@@ -92,7 +92,9 @@ def main() -> None:
     elif args.cmd == "worker":
         from .worker import Worker
         host, port = args.hub
-        worker = Worker(host, port, one_shot=args.prompt, max_tokens=args.max_tokens)
+        worker = Worker(host, port,
+                        one_shot=args.prompt, max_tokens=args.max_tokens,
+                        headless=args.headless)
         try:
             asyncio.run(worker.start())
         except KeyboardInterrupt:
