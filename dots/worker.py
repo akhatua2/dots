@@ -36,6 +36,7 @@ class WorkerSession:
 
     def __init__(self):
         self.shard: Shard | None = None
+        self.forwards_this_turn = 0
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
@@ -68,7 +69,11 @@ class WorkerSession:
             return self._forward(msg)
         if kind == "reset_kv":
             if self.shard:
+                if self.forwards_this_turn > 0:
+                    log.info("turn complete: %d forwards processed, resetting KV",
+                             self.forwards_this_turn)
                 self.shard.reset_kv()
+            self.forwards_this_turn = 0
             return {"kind": "ok"}
         if kind == "ping":
             return {"kind": "pong"}
@@ -91,6 +96,11 @@ class WorkerSession:
     def _forward(self, msg: dict) -> dict:
         if self.shard is None:
             return {"kind": "error", "error": "no shard loaded"}
+        self.forwards_this_turn += 1
+        if self.forwards_this_turn == 1 or self.forwards_this_turn % 25 == 0:
+            log.info("forward #%d (layers %d:%d)",
+                     self.forwards_this_turn,
+                     self.shard.spec.layer_start, self.shard.spec.layer_end)
         hidden = decode_array(msg["hidden"])
         out = self.shard.run_layers(hidden)
         return {"kind": "forward_out", "hidden": encode_array(out)}

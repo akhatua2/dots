@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from dataclasses import dataclass
 
@@ -156,10 +157,30 @@ class DotsCluster:
             await write_msg(r.writer, {"kind": "reset_kv"})
             await read_msg(r.reader)  # consume "ok"
 
+    def _stop_token_ids(self) -> set[int]:
+        """Collect every token id we treat as end-of-turn.
+
+        Some chat-tuned models (SmolLM2, Qwen, Llama-3) end an assistant turn
+        with a special token (e.g. <|im_end|>) that isn't the tokenizer's
+        eos_token_id, so checking eos alone lets the loop run away.
+        """
+        tokenizer = self.local.tokenizer
+        ids: set[int] = set()
+        if tokenizer.eos_token_id is not None:
+            ids.add(tokenizer.eos_token_id)
+        for marker in ("<|im_end|>", "<|endoftext|>", "<|eot_id|>"):
+            try:
+                tid = tokenizer.convert_tokens_to_ids(marker)
+            except Exception:
+                continue
+            if isinstance(tid, int) and tid > 0:
+                ids.add(tid)
+        return ids
+
     async def generate(self, prompt: str, max_new_tokens: int = 128) -> None:
         """Stream generation to stdout. Greedy sampling for the PoC."""
         tokenizer = self.local.tokenizer
-        # Use the chat template if the tokenizer has one (SmolLM2 does).
+        # Use the chat template if the tokenizer has one.
         if hasattr(tokenizer, "apply_chat_template"):
             tokens_list = tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}],
@@ -168,6 +189,7 @@ class DotsCluster:
         else:
             tokens_list = tokenizer.encode(prompt)
 
+        stop_ids = self._stop_token_ids()
         await self._reset_kv_all()
 
         # Prefill: one shot through the pipeline with the whole prompt.
@@ -179,13 +201,13 @@ class DotsCluster:
             token = int(mx.argmax(logits, axis=-1).item())
         prefill_ms = (time.perf_counter() - t0) * 1000
 
-        eos = tokenizer.eos_token_id
-        # Decode loop: one token at a time through the pipeline.
+        # Decode loop: plain stdout so rich doesn't try to parse token text as markup.
         decode_start = time.perf_counter()
         n_decoded = 0
-        while n_decoded < max_new_tokens and token != eos:
+        while n_decoded < max_new_tokens and token not in stop_ids:
             text = tokenizer.decode([token])
-            ui.console.print(text, end="", style="white", soft_wrap=True, highlight=False)
+            sys.stdout.write(text)
+            sys.stdout.flush()
             n_decoded += 1
             next_in = mx.array([[token]])
             hidden = await self._run_pipeline(next_in)

@@ -35,7 +35,7 @@ def main() -> None:
     p_chat = sub.add_parser("chat", help="run as coordinator and start chat loop")
     p_chat.add_argument(
         "--model",
-        default="mlx-community/SmolLM2-135M-Instruct",
+        default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         help="mlx-lm model id or local path",
     )
     p_chat.add_argument(
