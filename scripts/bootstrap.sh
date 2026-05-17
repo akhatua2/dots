@@ -15,10 +15,14 @@ uv venv
 echo "→ installing dots and dependencies"
 uv pip install -e .
 
-ip=$(ipconfig getifaddr en0 2>/dev/null || echo "<your-wifi-ip>")
 echo
-echo "✓ dots installed. To start the worker:"
+echo "dots installed."
 echo
-echo "    .venv/bin/dots serve --port 5555"
+echo "Next steps:"
+echo "  • Run the hub on this Mac:        .venv/bin/dots hub"
+echo "  • Donate compute to a hub:        .venv/bin/dots worker HUB_HOST:5555"
+echo "  • Open the chat:                  .venv/bin/dots chat HUB_HOST:5555"
 echo
-echo "Then tell the coordinator your address:  ${ip}:5555"
+echo "If you and a friend are on Tailscale, HUB_HOST is the hub Mac's"
+echo "tailnet IP — click the Tailscale menu bar icon on the hub Mac"
+echo "and copy the address shown next to the Mac's name."

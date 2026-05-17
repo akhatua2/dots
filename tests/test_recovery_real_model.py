@@ -80,10 +80,13 @@ async def real_hub(monkeypatch) -> AsyncIterator[Hub]:
 
 
 async def _connect_worker(hub: Hub) -> Worker:
-    w = Worker("127.0.0.1", hub.port)
+    import uuid as _uuid
+    w = Worker("127.0.0.1", hub.port, identity=str(_uuid.uuid4()))
     reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
     w.conn = PeerConnection(reader, writer, "test", w._handle)
-    ack = await w.conn.call("hello", free_ram_gb=free_ram_gb())
+    ack = await w.conn.call(
+        "hello", worker_id=w.identity, free_ram_gb=free_ram_gb(),
+    )
     w.model_id = ack["model_id"]
     w.n_layers = ack["n_layers"]
     await asyncio.wait_for(w._welcome.wait(), timeout=60.0)
