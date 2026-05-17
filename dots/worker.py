@@ -465,7 +465,10 @@ class Worker:
         self._app = Application(
             layout=layout,
             key_bindings=kb,
-            full_screen=True,
+            # Render inline rather than taking over the terminal: nothing
+            # is cleared on startup, and the conversation stays in the
+            # scrollback after Ctrl-C / Ctrl-D.
+            full_screen=False,
             style=_PROMPT_STYLE,
             mouse_support=False,
         )
