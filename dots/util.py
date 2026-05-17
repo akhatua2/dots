@@ -57,3 +57,57 @@ def load_last_hub() -> str | None:
         return None
     addr = f.read_text().strip()
     return addr or None
+
+
+def worker_pid_file() -> pathlib.Path:
+    return dots_home() / "worker.pid"
+
+
+def write_worker_pid(pid: int) -> None:
+    """Record a long-running `dots worker`'s PID so `dots chat` can detect
+    it and skip spawning a duplicate."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    worker_pid_file().write_text(f"{pid}\n")
+
+
+def clear_worker_pid(only_if: int | None = None) -> None:
+    """Remove the worker PID file. If only_if is given, only delete when
+    the file points at exactly that pid (so we don't trample a successor
+    worker that started between our write and our cleanup)."""
+    f = worker_pid_file()
+    if not f.exists():
+        return
+    if only_if is not None:
+        try:
+            current = int(f.read_text().strip())
+        except (ValueError, OSError):
+            return
+        if current != only_if:
+            return
+    try:
+        f.unlink()
+    except OSError:
+        pass
+
+
+def read_live_worker_pid() -> int | None:
+    """Returns the PID of a `dots worker` running on this machine, or None
+    if no PID is recorded or the recorded process is dead."""
+    f = worker_pid_file()
+    if not f.exists():
+        return None
+    try:
+        pid = int(f.read_text().strip())
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)        # signal 0 = liveness probe, no actual signal
+    except OSError:
+        # stale entry — process is gone
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    return pid
