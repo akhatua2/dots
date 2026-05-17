@@ -26,6 +26,19 @@ The hub is the single source of truth. It records every credit and debit
 atomically to ~/.dots/credits.json. The ledger has no separate write
 authority — workers and chat clients can READ the public state via
 `GET /v1/credits`, but they cannot write.
+
+**The ledger is append-only by design.** There is no `record_turn_undo`,
+no `delete_account`, no `dots credits reset` subcommand. Once a turn is
+recorded, it stays recorded forever. This is load-bearing for:
+  - audit-trail credibility ([[cryptographic-ledger]] depends on it)
+  - debt non-repudiation (you can't wipe a negative balance)
+  - cross-pool balance transfers (a forgeable history is worthless)
+
+If the file gets corrupted (version mismatch, JSON parse error), `_load`
+silently discards it and starts fresh. That's a *recovery* path, not a
+feature. During development you can `rm ~/.dots/credits.json` out of
+band; in any real deployment that should be considered destructive and
+controlled like any other production-data deletion.
 """
 from __future__ import annotations
 
