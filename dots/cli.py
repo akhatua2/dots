@@ -16,6 +16,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import argparse
 import asyncio
+import getpass
 import logging
 import signal
 import subprocess
@@ -26,8 +27,18 @@ from typing import Optional
 
 from .util import (
     clear_worker_pid,
+    derive_account_id,
+    dots_home,
+    load_account_alias,
+    load_account_email,
+    load_account_name,
     load_last_hub,
+    load_or_create_account,
     read_live_worker_pid,
+    save_account_alias,
+    save_account_email,
+    save_account_id,
+    save_account_name,
     write_worker_pid,
 )
 
@@ -108,6 +119,165 @@ def _shutdown_companion_worker(proc: subprocess.Popen) -> None:
             pass
 
 
+# ─────────────────────────── account subcommand helpers ────────────────────
+
+
+def _do_account_show() -> None:
+    """`dots account show` — print account_id, alias, name, email."""
+    account_id = load_or_create_account()
+    alias = load_account_alias()
+    name = load_account_name()
+    email = load_account_email()
+    sys.stdout.write(f"account_id: {account_id}\n")
+    sys.stdout.write(f"alias:      {alias if alias else '(unset)'}\n")
+    sys.stdout.write(f"name:       {name if name else '(unset)'}\n")
+    sys.stdout.write(f"email:      {email if email else '(unset)'}\n")
+
+
+def _prompt(label: str, default: str | None = None) -> str:
+    """Prompt the user, allowing empty input to keep the default."""
+    suffix = f" [{default}]" if default else ""
+    val = input(f"{label}{suffix}: ").strip()
+    return val if val else (default or "")
+
+
+def _do_account_create() -> None:
+    """Interactive account setup.
+
+    Asks for name, email, alias, and (optionally) a password. With a
+    password, the account_id is *deterministically derived* from
+    name+email+password — so re-running this command with the same
+    inputs reproduces the same account_id. That's the recovery story:
+    lose your `~/.dots/account` file, re-enter the inputs, get your
+    credit history back.
+
+    Without a password, we generate a random UUID. Simpler, but if you
+    lose the file the account is unrecoverable.
+    """
+    home = dots_home()
+    account_file = home / "account"
+    existing = None
+    if account_file.exists():
+        existing = account_file.read_text().strip()
+        sys.stdout.write(f"An account already exists: {existing}\n")
+        ans = input("Overwrite? (y/N): ").strip().lower()
+        if ans != "y":
+            sys.stdout.write("Cancelled.\n")
+            return
+
+    sys.stdout.write("\nSetting up your dots account.\n\n")
+    name = _prompt("Your name", default=load_account_name())
+    email = _prompt("Your email", default=load_account_email())
+    alias = _prompt("Short alias for logs (optional)",
+                    default=load_account_alias())
+
+    sys.stdout.write(
+        "\nOptional: set a password to make this account recoverable.\n"
+        "With a password, the account ID is derived from "
+        "(name + email + password). If you lose your account file or\n"
+        "set up dots on a new device, re-entering the same inputs gets\n"
+        "you back the same account ID — and your credit history.\n"
+        "Without one, we generate a random UUID (not recoverable).\n\n"
+    )
+    pw1 = getpass.getpass("Password (or just hit enter to skip): ")
+    if pw1:
+        if not name or not email:
+            sys.stdout.write(
+                "Password-derived accounts need name and email "
+                "to be set. Cancelled.\n"
+            )
+            return
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw1 != pw2:
+            sys.stdout.write("Passwords don't match. Cancelled.\n")
+            return
+        account_id = derive_account_id(name, email, pw1)
+    else:
+        account_id = "acc-" + uuid.uuid4().hex
+
+    save_account_id(account_id)
+    if name:
+        save_account_name(name)
+    if email:
+        save_account_email(email)
+    if alias:
+        save_account_alias(alias)
+
+    sys.stdout.write(f"\naccount_id: {account_id}\n")
+    sys.stdout.write(f"saved to:   {account_file}\n")
+
+
+# ─────────────────────────── credits subcommand ─────────────────────────────
+
+
+def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
+    """`dots credits` — query the hub's /v1/credits endpoint and print
+    either your account balance or, with --all, every account."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    # The credits subcommand talks HTTP (not the dots TCP protocol).
+    # Default port for the OpenAI-compatible API is 8080. If the user
+    # passed only a host:port, we trust them. Otherwise resolve via
+    # last_hub but swap the port for 8080.
+    if hub_arg:
+        host, _, port_s = hub_arg.rpartition(":")
+        if not host or not port_s:
+            sys.stderr.write(f"expected host:port, got {hub_arg!r}\n")
+            sys.exit(2)
+        host, port = host, int(port_s)
+    else:
+        saved = load_last_hub()
+        if saved is None:
+            sys.stderr.write("no hub address given and no remembered hub\n")
+            sys.exit(2)
+        host = saved.rsplit(":", 1)[0]
+        port = 8080  # convention: HTTP API on 8080
+
+    url = f"http://{host}:{port}/v1/credits"
+    try:
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        sys.stderr.write(f"could not reach {url}: {e}\n")
+        sys.stderr.write("(the hub may not have --http-port enabled)\n")
+        sys.exit(1)
+
+    my_account = load_or_create_account()
+    accounts = data.get("accounts", {})
+
+    if show_all:
+        if not accounts:
+            sys.stdout.write("(ledger is empty)\n")
+            return
+        rows = sorted(accounts.items(),
+                      key=lambda kv: kv[1].get("balance_cu", 0), reverse=True)
+        sys.stdout.write(f"{'account':<40} {'alias':<15} "
+                         f"{'earned (CU)':>12} {'spent (CU)':>12} "
+                         f"{'balance (CU)':>13}\n")
+        for aid, a in rows:
+            marker = " ← you" if aid == my_account else ""
+            alias = a.get("alias") or "—"
+            sys.stdout.write(
+                f"{aid:<40} {alias:<15} "
+                f"{a.get('earned_cu', 0):>12.4f} "
+                f"{a.get('spent_cu', 0):>12.4f} "
+                f"{a.get('balance_cu', 0):>13.4f}{marker}\n"
+            )
+        return
+
+    mine = accounts.get(my_account)
+    if mine is None:
+        sys.stdout.write(f"account {my_account}: no activity yet\n")
+        return
+    sys.stdout.write(f"account: {my_account}\n")
+    sys.stdout.write(f"alias:   {mine.get('alias') or '(unset)'}\n")
+    sys.stdout.write(f"earned:  {mine.get('earned_cu', 0):.4f} CU\n")
+    sys.stdout.write(f"spent:   {mine.get('spent_cu', 0):.4f} CU\n")
+    sys.stdout.write(f"balance: {mine.get('balance_cu', 0):.4f} CU\n")
+
+
 # ────────────────────────────────── main ────────────────────────────────────
 
 
@@ -127,9 +297,10 @@ def main() -> None:
         help="mlx-lm model id (auto-downloaded on first run)",
     )
     p_hub.add_argument(
-        "--http-port", type=int, default=None, metavar="PORT",
-        help="also expose an OpenAI-compatible HTTP API on this port "
-             "(POST /v1/chat/completions, GET /v1/models)",
+        "--http-port", type=int, default=8080, metavar="PORT",
+        help="port for the OpenAI-compatible HTTP API "
+             "(POST /v1/chat/completions, GET /v1/models, GET /v1/credits). "
+             "defaults to 8080. pass --http-port 0 to disable.",
     )
 
     p_chat = sub.add_parser(
@@ -170,6 +341,44 @@ def main() -> None:
              "defaults to no cap.",
     )
 
+    p_credits = sub.add_parser(
+        "credits",
+        help="show your CU balance from a hub's /v1/credits endpoint.",
+    )
+    p_credits.add_argument(
+        "hub", nargs="?", default=None,
+        help="hub HTTP api as host:port (defaults to last hub on port 8080)",
+    )
+    p_credits.add_argument(
+        "--all", action="store_true",
+        help="show every account, not just yours",
+    )
+
+    p_account = sub.add_parser(
+        "account",
+        help="manage this device's dots account (who earns/spends CU).",
+    )
+    p_account_sub = p_account.add_subparsers(dest="account_cmd", required=True)
+    p_account_sub.add_parser(
+        "create",
+        help="interactive setup: name, email, optional password for recovery",
+    )
+    p_account_sub.add_parser(
+        "show", help="print this device's account_id, alias, name, email",
+    )
+    p_account_alias = p_account_sub.add_parser(
+        "set-alias", help="cosmetic short handle for log lines",
+    )
+    p_account_alias.add_argument("alias")
+    p_account_name = p_account_sub.add_parser(
+        "set-name", help="full human-readable name (local only, not sent on HELLO)",
+    )
+    p_account_name.add_argument("name")
+    p_account_email = p_account_sub.add_parser(
+        "set-email", help="contact email (local only, not sent on HELLO)",
+    )
+    p_account_email.add_argument("email")
+
     args = p.parse_args()
     _configure_logging(args.verbose)
     from . import ui
@@ -186,6 +395,30 @@ def main() -> None:
         except KeyboardInterrupt:
             sys.exit(0)
         return
+
+    if args.cmd == "credits":
+        _do_credits(args.hub, show_all=args.all)
+        return
+
+    if args.cmd == "account":
+        if args.account_cmd == "create":
+            _do_account_create()
+            return
+        if args.account_cmd == "show":
+            _do_account_show()
+            return
+        if args.account_cmd == "set-alias":
+            save_account_alias(args.alias)
+            sys.stdout.write(f"alias set to: {args.alias}\n")
+            return
+        if args.account_cmd == "set-name":
+            save_account_name(args.name)
+            sys.stdout.write(f"name set to: {args.name}\n")
+            return
+        if args.account_cmd == "set-email":
+            save_account_email(args.email)
+            sys.stdout.write(f"email set to: {args.email}\n")
+            return
 
     host, port = _resolve_hub_addr(args.hub)
     from .worker import Worker

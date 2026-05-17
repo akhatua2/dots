@@ -70,7 +70,9 @@ Plans are listed in roughly dependency order. Earlier ones unlock later ones.
   account identity, persistent across devices. Prerequisite for the
   credit economy.
 - [`compute-units-ledger.md`](./compute-units-ledger.md) — Per-turn
-  CU earn + spend tracking with zero-sum conservation.
+  CU earn + spend tracking with zero-sum conservation. (Design
+  rationale + GPU future-proofing in
+  [`compute-units-ledger-rationale.md`](./compute-units-ledger-rationale.md).)
 - [`cryptographic-ledger.md`](./cryptographic-ledger.md) — Hash-chained,
   signed ledger entries; tamper-evident; Bitcoin-inspired hardening of
   the basic ledger.

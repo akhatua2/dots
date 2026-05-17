@@ -33,8 +33,10 @@ import mlx.core as mx
 from mlx_lm import load as mlx_load
 
 from . import ui
+from .ledger import Ledger
 from .peer import PeerConnection
 from .protocol import decode_array, encode_array
+from .util import dots_home
 
 log = logging.getLogger("dots.hub")
 
@@ -61,11 +63,29 @@ class Participant:
     max_load_gb: float | None = None           # None == no cap
     layer_range: tuple[int, int] | None = None
     ready: bool = False
+    # The human-owner account this worker contributes to. CU and the
+    # future ledger get attributed against this, not against the
+    # per-process `id` above. Multiple Participants can share an account.
+    account_id: str | None = None
+    account_alias: str | None = None
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
 
     @property
     def short_id(self) -> str:
         return self.id[:8] if self.id else "?"
+
+    @property
+    def display_owner(self) -> str:
+        """Best-effort short label for who owns this participant. Used in
+        log lines. Prefers an explicit alias, falls back to a truncated
+        account_id, then 'anon' if the participant predates accounts."""
+        if self.account_alias:
+            return self.account_alias
+        if self.account_id:
+            short = (self.account_id[4:] if self.account_id.startswith("acc-")
+                     else self.account_id)
+            return short[:8]
+        return "anon"
 
 
 class TopologyChanged(Exception):
@@ -146,6 +166,28 @@ def _per_layer_bytes(model, n_layers: int) -> int:
         return 0
 
 
+def _active_params(model) -> int:
+    """Total active parameter count of `model`. Used in CU FLOP accounting.
+
+    For dense models, this equals total params. For MoE models we use
+    total params as a conservative approximation (slight overcount in
+    CU cost) — refining to top-k × per-expert is a follow-up.
+
+    Returns 0 if we can't compute it (test fakes, missing parameters
+    attribute) — caller treats that as "skip ledger attribution".
+    """
+    try:
+        from mlx.utils import tree_flatten
+        total = 0
+        for _, v in tree_flatten(model.parameters()):
+            if hasattr(v, "size"):
+                total += int(v.size)
+        return total
+    except Exception:
+        log.debug("active params unavailable", exc_info=True)
+        return 0
+
+
 class Hub:
     def __init__(
         self,
@@ -153,6 +195,7 @@ class Hub:
         model_id: str,
         host: str = "0.0.0.0",
         http_port: int | None = None,
+        ledger_path=None,
     ):
         self.host = host
         self.port = port
@@ -166,6 +209,11 @@ class Hub:
         # after the model loads. Used to translate a worker's max_load_gb
         # into a max-layers cap when planning.
         self.bytes_per_layer = 0
+        # Total active parameters in the loaded model. Used for FLOP-based
+        # CU accounting (1 CU = 1 TFLOP = 2 × active_params × tokens / 1e12).
+        # For dense models this is total params. For MoE this is a conservative
+        # upper bound (refining to top-k × per-expert is a follow-up).
+        self.active_params = 0
 
         self.participants: dict[str, Participant] = {}
         self._pool_lock = asyncio.Lock()
@@ -174,6 +222,14 @@ class Hub:
         # for callers (tests, embeddings) that want a deterministic ready signal.
         self.started = asyncio.Event()
         self._topology_gen = 0
+        # Closed credit-unit economy. Persists per-account totals + a
+        # per-turn audit log. Tests pass an explicit path so they don't
+        # touch the developer's real ~/.dots/credits.json.
+        self.ledger = Ledger(ledger_path or (dots_home() / "credits.json"))
+        # Monotonic turn counter; used as the per-conv turn_idx in the
+        # ledger. Conversations carry their own count too; we rely on
+        # this for the ledger entry key.
+        self._turn_counter: dict[str, int] = {}
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -184,23 +240,29 @@ class Hub:
         self.bytes_per_layer = await asyncio.to_thread(
             _per_layer_bytes, self.model, self.n_layers,
         )
+        self.active_params = await asyncio.to_thread(_active_params, self.model)
+        params_str = (
+            f", {self.active_params / 1e9:.2f}B active params"
+            if self.active_params else ""
+        )
         if self.bytes_per_layer:
             ui.notice(
                 f"model ready ({self.n_layers} layers, "
-                f"{self.bytes_per_layer / 1e6:.1f} MB / layer)"
+                f"{self.bytes_per_layer / 1e6:.1f} MB / layer{params_str})"
             )
         else:
-            ui.notice(f"model ready ({self.n_layers} layers)")
+            ui.notice(f"model ready ({self.n_layers} layers{params_str})")
 
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
         self.started.set()
 
-        # Optional OpenAI-compatible HTTP API alongside the worker TCP server.
-        # Lives only for as long as the hub does; cancellation tears it down.
+        # OpenAI-compatible HTTP API alongside the worker TCP server. On
+        # by default; users can pass --http-port 0 to disable. Lives only
+        # for as long as the hub does; cancellation tears it down.
         http_task: asyncio.Task | None = None
-        if self.http_port is not None:
+        if self.http_port:
             from .api import HttpApi
             api = HttpApi(self, host=self.host, port=self.http_port)
             http_task = asyncio.create_task(api.serve_forever())
@@ -268,6 +330,11 @@ class Hub:
         # Default to compute=True if the client didn't say (so pre-PR-5
         # workers keep behaving the same way).
         compute = bool(hello_msg.get("compute", True))
+        account_id = hello_msg.get("account_id")
+        account_id = account_id if isinstance(account_id, str) and account_id else None
+        account_alias = hello_msg.get("account_alias")
+        account_alias = (account_alias if isinstance(account_alias, str)
+                         and account_alias else None)
 
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
@@ -283,12 +350,13 @@ class Hub:
             participant = Participant(
                 id=worker_id, addr=addr_str, free_ram_gb=free_ram,
                 compute=compute, max_load_gb=max_load_gb, conn=conn,
+                account_id=account_id, account_alias=account_alias,
             )
             self.participants[worker_id] = participant
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
         role = "worker" if compute else "client"
-        ui.notice(f"{role}[{participant.short_id}] joined "
-                  f"({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
+        ui.notice(f"{role}·{participant.short_id} ({participant.display_owner}) "
+                  f"joined ({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
             await conn.notify("welcome", conv_id=participant.conv.id)
@@ -304,7 +372,8 @@ class Hub:
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
             left_role = "worker" if participant.compute else "client"
-            ui.notice(f"{left_role}[{participant.short_id}] left")
+            ui.notice(f"{left_role}·{participant.short_id} "
+                      f"({participant.display_owner}) left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
@@ -458,7 +527,61 @@ class Hub:
             return {"kind": "error", "error": str(e)}
 
         conv.history.append({"role": "assistant", "content": response_text})
+        # Closed-economy attribution. After a successful turn, credit each
+        # compute worker by (layers_owned × total_tokens) and debit the
+        # querier the same total. Quiet failure if anything goes wrong —
+        # the user-visible response should not be blocked by ledger I/O.
+        try:
+            self._attribute_turn(conv=conv, participant=participant, stats=stats)
+        except Exception:
+            log.exception("ledger attribution failed for %s", worker_id)
         return {"kind": "turn_done", **stats}
+
+    def _attribute_turn(
+        self, conv: "Conversation", participant: "Participant", stats: dict,
+    ) -> None:
+        """Record one successful turn in the ledger. Computes the plan
+        snapshot from currently-ready compute workers (post-turn state),
+        credits each by its layer share, and debits the querier.
+
+        Skips silently if there's no model context yet (test fakes,
+        active_params unavailable) or the querier has no account.
+        """
+        if self.active_params <= 0:
+            return  # no real model loaded (tests with fakes) → no FLOP unit
+        if not participant.account_id:
+            log.debug("skipping ledger entry — chat client has no account_id")
+            return
+
+        plan: list[tuple[str, str | None, int]] = []
+        total_layers_assigned = 0
+        for p in self.participants.values():
+            if not (p.compute and p.ready and p.layer_range and p.account_id):
+                continue
+            layers_owned = p.layer_range[1] - p.layer_range[0]
+            plan.append((p.account_id, p.account_alias, layers_owned))
+            total_layers_assigned += layers_owned
+        if not plan or total_layers_assigned == 0:
+            return  # nothing to attribute (e.g. failure or no compute)
+
+        prefill_tokens = int(stats.get("prefill_tokens", 0))
+        decode_tokens = int(stats.get("decode_tokens", 0))
+        if prefill_tokens + decode_tokens == 0:
+            return  # nothing was generated; charge nothing
+
+        self._turn_counter[conv.id] = self._turn_counter.get(conv.id, 0) + 1
+        self.ledger.record_turn(
+            conv_id=conv.id,
+            turn_idx=self._turn_counter[conv.id],
+            querier_account=participant.account_id,
+            querier_alias=participant.account_alias,
+            plan=plan,
+            prefill_tokens=prefill_tokens,
+            decode_tokens=decode_tokens,
+            total_layers=total_layers_assigned,
+            model_id=self.model_id,
+            active_params=self.active_params,
+        )
 
     async def _on_reset(self, worker_id: str) -> dict:
         async with self._pool_lock:
