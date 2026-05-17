@@ -273,16 +273,9 @@ def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
         return
     sys.stdout.write(f"account: {my_account}\n")
     sys.stdout.write(f"alias:   {mine.get('alias') or '(unset)'}\n")
-    sys.stdout.write(
-        f"earned:  {mine.get('earned_cu', 0):.4f} CU "
-        f"across {mine.get('turns_as_worker', 0)} turns as a worker\n"
-    )
-    sys.stdout.write(
-        f"spent:   {mine.get('spent_cu', 0):.4f} CU "
-        f"across {mine.get('turns_as_querier', 0)} turns as a querier\n"
-    )
+    sys.stdout.write(f"earned:  {mine.get('earned_cu', 0):.4f} CU\n")
+    sys.stdout.write(f"spent:   {mine.get('spent_cu', 0):.4f} CU\n")
     sys.stdout.write(f"balance: {mine.get('balance_cu', 0):.4f} CU\n")
-    sys.stdout.write("\n(1 CU = 1 TFLOP = 10¹² floating-point operations)\n")
 
 
 # ────────────────────────────────── main ────────────────────────────────────
