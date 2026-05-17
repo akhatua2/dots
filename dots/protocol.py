@@ -1,7 +1,15 @@
 """Wire protocol: length-prefixed msgpack frames over asyncio TCP.
 
-Messages are dicts with a "kind" field. Hidden-state tensors travel as raw
-bytes plus shape + dtype, since msgpack-native numpy support is patchy.
+Every message is a dict with at least:
+    kind: str          message type (e.g. "hello", "compute", "ok")
+    rid:  int          request id, unique per sender per connection
+
+Responses additionally carry:
+    response_to: int   the rid of the request they answer
+
+Hidden-state tensors travel as raw bytes plus shape + dtype, since
+msgpack-native numpy support is patchy and we need a stable on-the-wire
+representation across bfloat16 (which numpy doesn't natively support).
 """
 from __future__ import annotations
 
@@ -14,7 +22,7 @@ import mlx.core as mx
 import numpy as np
 
 LEN_HEADER = struct.Struct(">I")
-MAX_FRAME_BYTES = 64 * 1024 * 1024  # 64 MB, generous for prefill activations
+MAX_FRAME_BYTES = 64 * 1024 * 1024  # 64 MB — generous for prefill activations
 
 
 async def read_msg(reader: asyncio.StreamReader) -> dict[str, Any]:
@@ -44,7 +52,7 @@ def encode_array(x: mx.array) -> dict[str, Any]:
     else:
         wire_x = x
         wire_dtype = orig_dtype
-    arr = np.array(wire_x)  # default copy=True, safe across all mlx dtypes
+    arr = np.array(wire_x)  # forced copy, safe across all mlx dtypes
     return {
         "shape": list(arr.shape),
         "dtype": wire_dtype,
@@ -61,7 +69,7 @@ _MLX_DTYPES = {
 
 def decode_array(d: dict[str, Any]) -> mx.array:
     arr = np.frombuffer(d["data"], dtype=np.dtype(d["dtype"])).reshape(d["shape"])
-    # frombuffer is a read-only view; copy so mlx owns the memory.
+    # frombuffer returns a read-only view; copy so mlx owns the memory.
     out = mx.array(arr.copy())
     orig = d.get("orig_dtype")
     if orig and orig != d["dtype"] and orig in _MLX_DTYPES:

@@ -1,4 +1,4 @@
-"""CLI entry point."""
+"""CLI entry point: `dots hub` and `dots worker`."""
 from __future__ import annotations
 
 import argparse
@@ -7,16 +7,11 @@ import logging
 import sys
 
 
-def _parse_workers(s: str) -> list[tuple[str, int]]:
-    if not s:
-        return []
-    out = []
-    for token in s.split(","):
-        host, _, port = token.strip().partition(":")
-        if not port:
-            raise argparse.ArgumentTypeError(f"expected host:port, got {token!r}")
-        out.append((host, int(port)))
-    return out
+def _parse_hub_addr(s: str) -> tuple[str, int]:
+    host, _, port = s.rpartition(":")
+    if not host or not port:
+        raise argparse.ArgumentTypeError(f"expected host:port, got {s!r}")
+    return host, int(port)
 
 
 def main() -> None:
@@ -28,54 +23,46 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="dots")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_serve = sub.add_parser("serve", help="run as a worker (waits for coordinator)")
-    p_serve.add_argument("--host", default="0.0.0.0")
-    p_serve.add_argument("--port", type=int, default=5555)
-
-    p_chat = sub.add_parser("chat", help="run as coordinator and start chat loop")
-    p_chat.add_argument(
+    p_hub = sub.add_parser("hub", help="run the dots hub (chat REPL + worker pool)")
+    p_hub.add_argument("--port", type=int, default=5555)
+    p_hub.add_argument("--host", default="0.0.0.0")
+    p_hub.add_argument(
         "--model",
         default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-        help="mlx-lm model id or local path",
+        help="mlx-lm model id (auto-downloaded on first run)",
     )
-    p_chat.add_argument(
-        "--workers",
-        default="",
-        type=_parse_workers,
-        help="comma-separated remote workers, e.g. 10.30.1.2:5555,10.30.1.3:5555",
+
+    p_worker = sub.add_parser("worker", help="connect to a hub and serve a shard")
+    p_worker.add_argument(
+        "hub",
+        type=_parse_hub_addr,
+        help="hub address as host:port (e.g. 100.106.22.71:5555)",
     )
-    p_chat.add_argument(
+    p_worker.add_argument(
         "--prompt",
         default=None,
-        help="if set, run this prompt once and exit (non-interactive)",
+        help="non-interactive: send one prompt and exit",
     )
-    p_chat.add_argument(
-        "--max-tokens",
-        type=int,
-        default=128,
-        help="max tokens to generate per response",
-    )
-    p_chat.add_argument(
-        "--temperature",
-        type=float,
-        default=0.7,
-        help="sampling temperature (0 = greedy)",
+    p_worker.add_argument(
+        "--max-tokens", type=int, default=128,
+        help="max tokens for --prompt mode",
     )
 
     args = p.parse_args()
 
-    if args.cmd == "serve":
-        from .worker import serve
+    if args.cmd == "hub":
+        from .hub import Hub
+        hub = Hub(port=args.port, model_id=args.model, host=args.host)
         try:
-            asyncio.run(serve(args.host, args.port))
+            asyncio.run(hub.start())
         except KeyboardInterrupt:
             sys.exit(0)
-    elif args.cmd == "chat":
-        from .coordinator import chat
+    elif args.cmd == "worker":
+        from .worker import Worker
+        host, port = args.hub
+        worker = Worker(host, port, one_shot=args.prompt, max_tokens=args.max_tokens)
         try:
-            asyncio.run(chat(args.model, args.workers,
-                             one_shot=args.prompt, max_tokens=args.max_tokens,
-                             temperature=args.temperature))
+            asyncio.run(worker.start())
         except KeyboardInterrupt:
             sys.exit(0)
 

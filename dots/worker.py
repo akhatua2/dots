@@ -1,117 +1,209 @@
-"""Worker daemon: TCP server that runs one shard of the model.
+"""Worker: joins a hub as both compute participant and chat client.
 
-Protocol it speaks:
-    HELLO            -> HELLO_ACK {free_ram_gb, n_layers_supported}
-    LOAD_SHARD       -> READY | ERROR
-    FORWARD          -> FORWARD_OUT
-    RESET_KV         -> OK
-    PING             -> PONG
+One process; two roles that share a single TCP connection to the hub:
+
+  • Worker role (driven by the hub):
+      LOAD_SHARD          → build a Shard for the assigned layer range
+      COMPUTE             → run our layer slice on a hidden state
+      RESET_CONVERSATION  → clear KV cache for a conv id
+
+  • Chat role (driven by the user typing in the terminal):
+      PROMPT          we send our text + conv_id; hub runs a turn
+      TOKEN           hub streams response tokens back as notifications
+      WELCOME         hub tells us our conv_id (assigned on HELLO)
+      CONVERSATION_RESET   hub tells us our conv was reset (topology change)
+      TURN_DONE       reply to our PROMPT call signaling end of turn
+
+A single asyncio task tree: the chat REPL coroutine awaits the user's
+input and sends PROMPT calls; the PeerConnection's read loop dispatches
+incoming compute/load/etc to handler in parallel; token notifications hit
+the same handler and write to stdout.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
+import sys
 
-from .protocol import decode_array, encode_array, read_msg, write_msg
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
+
+from . import ui
+from .peer import PeerConnection
+from .protocol import decode_array, encode_array
 from .shard import Shard, ShardSpec
+from .util import free_ram_gb
 
 log = logging.getLogger("dots.worker")
 
-
-def _free_ram_gb() -> float:
-    # vm_stat gives free + inactive in pages; LPDDR5 page = 16384 on Apple Silicon.
-    out = subprocess.check_output(["vm_stat"]).decode()
-    pages_free = pages_inactive = 0
-    for line in out.splitlines():
-        if line.startswith("Pages free:"):
-            pages_free = int(line.split()[-1].rstrip("."))
-        elif line.startswith("Pages inactive:"):
-            pages_inactive = int(line.split()[-1].rstrip("."))
-    return (pages_free + pages_inactive) * 16384 / (1024**3)
+_PROMPT_STYLE = Style.from_dict({"prompt": "ansimagenta bold", "": "ansiwhite"})
 
 
-class WorkerSession:
-    """One connection from a coordinator. Owns at most one Shard."""
-
-    def __init__(self):
+class Worker:
+    def __init__(self, hub_host: str, hub_port: int,
+                 one_shot: str | None = None, max_tokens: int = 128):
+        self.hub_host = hub_host
+        self.hub_port = hub_port
+        self.conn: PeerConnection | None = None
         self.shard: Shard | None = None
-        self.forwards_this_turn = 0
+        self.conv_id: str | None = None        # assigned by hub via WELCOME
+        self.model_id: str | None = None
+        self.n_layers: int | None = None
+        self.one_shot = one_shot
+        self.max_tokens = max_tokens
+        # Serializes LOAD_SHARD vs COMPUTE so we can't compute through a
+        # half-replaced shard during a re-plan.
+        self._shard_lock = asyncio.Lock()
+        # Set when the hub sends our WELCOME; the REPL waits on this so we
+        # don't start chatting before we know our conv_id.
+        self._welcome = asyncio.Event()
 
-    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        peer = writer.get_extra_info("peername")
-        log.info("session opened from %s", peer)
+    # ───────────────────────────── lifecycle ─────────────────────────────
+
+    async def start(self) -> None:
+        ui.info(f"connecting to hub at {self.hub_host}:{self.hub_port}…")
+        reader, writer = await asyncio.open_connection(self.hub_host, self.hub_port)
+        self.conn = PeerConnection(
+            reader, writer, f"{self.hub_host}:{self.hub_port}", self._handle
+        )
+        ack = await self.conn.call("hello", free_ram_gb=free_ram_gb())
+        if ack.get("kind") != "hello_ack":
+            raise RuntimeError(f"unexpected HELLO response: {ack}")
+        self.model_id = ack.get("model_id")
+        self.n_layers = ack.get("n_layers")
+        ui.info(f"hub accepted; model={self.model_id} ({self.n_layers} layers)")
+
         try:
-            while True:
-                msg = await read_msg(reader)
-                resp = await self._dispatch(msg)
-                if resp is not None:
-                    await write_msg(writer, resp)
-        except asyncio.IncompleteReadError:
-            log.info("session closed from %s", peer)
-        except Exception:
-            log.exception("session error from %s", peer)
-        finally:
-            writer.close()
-            await writer.wait_closed()
+            await self._welcome.wait()
+        except asyncio.CancelledError:
+            return
 
-    async def _dispatch(self, msg: dict) -> dict | None:
+        # Run the chat REPL until the user exits or the connection drops.
+        repl_task = asyncio.create_task(self._chat_loop())
+        closed_task = asyncio.create_task(self.conn._closed.wait())
+        done, pending = await asyncio.wait(
+            {repl_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        if closed_task in done:
+            ui.info("hub disconnected — exiting")
+
+    # ──────────────────────────── incoming messages ──────────────────────
+
+    async def _handle(self, msg: dict) -> dict | None:
         kind = msg.get("kind")
-        if kind == "hello":
-            return {
-                "kind": "hello_ack",
-                "free_ram_gb": _free_ram_gb(),
-                "version": "0.0.1",
-            }
         if kind == "load_shard":
-            return await self._load_shard(msg)
-        if kind == "forward":
-            return self._forward(msg)
-        if kind == "reset_kv":
+            return await self._handle_load_shard(msg)
+        if kind == "compute":
+            return await self._handle_compute(msg)
+        if kind == "reset_conversation":
             if self.shard:
-                if self.forwards_this_turn > 0:
-                    log.info("turn complete: %d forwards processed, resetting KV",
-                             self.forwards_this_turn)
-                self.shard.reset_kv()
-            self.forwards_this_turn = 0
+                async with self._shard_lock:
+                    self.shard.reset_conversation(msg["conv_id"])
             return {"kind": "ok"}
+        if kind == "token":
+            # Notification — write straight to stdout, no response.
+            sys.stdout.write(msg.get("text", ""))
+            sys.stdout.flush()
+            return None
+        if kind == "welcome":
+            self.conv_id = msg.get("conv_id")
+            self._welcome.set()
+            return None
+        if kind == "conversation_reset":
+            # Notification — hub tells us our conv was wiped (e.g. topology
+            # changed). The REPL will see this next turn when token_count = 0
+            # on the hub side; locally we just print a hint.
+            reason = msg.get("reason", "unknown")
+            ui.console.print(f"\n[dim italic]conversation reset ({reason})[/dim italic]")
+            return None
         if kind == "ping":
             return {"kind": "pong"}
         return {"kind": "error", "error": f"unknown kind: {kind}"}
 
-    async def _load_shard(self, msg: dict) -> dict:
+    async def _handle_load_shard(self, msg: dict) -> dict:
         spec = ShardSpec(
             model_id=msg["model_id"],
-            layer_start=msg["layer_start"],
-            layer_end=msg["layer_end"],
-            is_first=msg["is_first"],
-            is_last=msg["is_last"],
+            layer_start=int(msg["layer_start"]),
+            layer_end=int(msg["layer_end"]),
         )
-        log.info("loading shard: %s", spec)
-        # mlx_load is sync; offload to a thread so we don't block the loop.
-        self.shard = await asyncio.to_thread(Shard, spec)
-        log.info("shard ready (n_layers=%d)", self.shard.n_layers)
+        ui.info(f"loading shard [{spec.layer_start}:{spec.layer_end}]…")
+        async with self._shard_lock:
+            self.shard = None  # free old weights before allocating new
+            self.shard = await asyncio.to_thread(Shard, spec)
+        ui.info(f"shard ready [{spec.layer_start}:{spec.layer_end}]")
         return {"kind": "ready", "n_layers": self.shard.n_layers}
 
-    def _forward(self, msg: dict) -> dict:
-        if self.shard is None:
-            return {"kind": "error", "error": "no shard loaded"}
-        self.forwards_this_turn += 1
-        if self.forwards_this_turn == 1 or self.forwards_this_turn % 25 == 0:
-            log.info("forward #%d (layers %d:%d)",
-                     self.forwards_this_turn,
-                     self.shard.spec.layer_start, self.shard.spec.layer_end)
-        hidden = decode_array(msg["hidden"])
-        out = self.shard.run_layers(hidden)
-        return {"kind": "forward_out", "hidden": encode_array(out)}
+    async def _handle_compute(self, msg: dict) -> dict:
+        async with self._shard_lock:
+            if self.shard is None:
+                return {"kind": "error", "error": "no shard loaded"}
+            hidden = decode_array(msg["hidden"])
+            out = self.shard.run_layers(msg["conv_id"], hidden)
+            return {"kind": "compute_out", "hidden": encode_array(out)}
 
+    # ─────────────────────────────── chat REPL ──────────────────────────
 
-async def serve(host: str, port: int):
-    async def on_connect(r, w):
-        await WorkerSession().handle(r, w)
+    async def _chat_loop(self) -> None:
+        if self.one_shot is not None:
+            ui.console.print()
+            ui.banner(self.model_id, [f"hub {self.hub_host}:{self.hub_port}"])
+            ui.console.print(f"[dim]one-shot: {self.one_shot}[/dim]\n")
+            resp = await self.conn.call(
+                "prompt", text=self.one_shot, max_tokens=self.max_tokens
+            )
+            kind = resp.get("kind")
+            sys.stdout.write("\n")
+            if kind == "turn_done":
+                ui.stats(
+                    int(resp.get("prefill_tokens", 0)),
+                    float(resp.get("prefill_ms", 0)),
+                    int(resp.get("decode_tokens", 0)),
+                    float(resp.get("decode_ms", 0)) / 1000.0,
+                )
+            else:
+                ui.error(resp.get("error", "turn failed"))
+            return
 
-    server = await asyncio.start_server(on_connect, host=host, port=port)
-    addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-    log.info("worker listening on %s", addrs)
-    async with server:
-        await server.serve_forever()
+        session = PromptSession()
+        ui.console.print()
+        ui.banner(self.model_id, [f"hub {self.hub_host}:{self.hub_port}"])
+        ui.console.print(
+            "[dim]/reset clear conversation · Ctrl-D to leave the pool[/dim]\n"
+        )
+
+        while True:
+            try:
+                line = await session.prompt_async(
+                    HTML("<prompt>❯ </prompt>"), style=_PROMPT_STYLE
+                )
+            except (EOFError, KeyboardInterrupt):
+                ui.console.print()
+                return
+            line = line.strip()
+            if not line:
+                continue
+            if line == "/reset":
+                resp = await self.conn.call("reset")
+                if resp.get("kind") == "ok":
+                    ui.info("conversation reset")
+                else:
+                    ui.error(resp.get("error", "reset failed"))
+                continue
+
+            resp = await self.conn.call("prompt", text=line)
+            kind = resp.get("kind")
+            if kind == "turn_done":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                ui.stats(
+                    int(resp.get("prefill_tokens", 0)),
+                    float(resp.get("prefill_ms", 0)),
+                    int(resp.get("decode_tokens", 0)),
+                    float(resp.get("decode_ms", 0)) / 1000.0,
+                )
+            else:
+                ui.error(resp.get("error", "turn failed"))
+            ui.console.print()

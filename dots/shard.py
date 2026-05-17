@@ -1,8 +1,12 @@
 """Model shard: loads a full mlx-lm model but only runs an assigned layer range.
 
 For the PoC we accept the memory cost of loading the whole model on every node
-(SmolLM2-135M is ~70 MB; this is negligible). A future version can stream and
-keep only the assigned weights resident.
+(SmolLM2-135M is ~70 MB, Qwen2.5-0.5B is ~300 MB; negligible). A future version
+can stream and keep only the assigned weights resident.
+
+Each shard holds one KV cache *per conversation id*. Two users chatting through
+the mesh keep separate histories, and a conversation's cache persists across
+turns so we only prefill the new tokens each round.
 """
 from __future__ import annotations
 
@@ -19,8 +23,6 @@ class ShardSpec:
     model_id: str
     layer_start: int  # inclusive
     layer_end: int    # exclusive
-    is_first: bool    # owns embed_tokens
-    is_last: bool     # owns final norm + lm_head
 
 
 class Shard:
@@ -32,21 +34,33 @@ class Shard:
             raise ValueError(
                 f"layer_end={spec.layer_end} exceeds model layers={self.n_layers}"
             )
-        # KV cache covers the full model; we just won't touch entries outside our range.
-        self.cache = make_prompt_cache(self.model)
+        # One KV cache list per active conversation. Created lazily on first use.
+        self._caches: dict[str, list] = {}
 
-    def reset_kv(self) -> None:
-        self.cache = make_prompt_cache(self.model)
+    def _cache_for(self, conv_id: str) -> list:
+        cache = self._caches.get(conv_id)
+        if cache is None:
+            cache = make_prompt_cache(self.model)
+            self._caches[conv_id] = cache
+        return cache
+
+    def reset_conversation(self, conv_id: str) -> None:
+        self._caches.pop(conv_id, None)
+
+    def known_conversations(self) -> list[str]:
+        return list(self._caches.keys())
 
     def embed(self, tokens: mx.array) -> mx.array:
-        # tokens: [batch, seq] int. Returns [batch, seq, hidden].
+        # tokens: [batch, seq] int -> [batch, seq, hidden]
         return self.model.model.embed_tokens(tokens)
 
-    def run_layers(self, hidden: mx.array) -> mx.array:
-        # hidden: [batch, seq, hidden]. Mutates self.cache for our layer range.
-        # The causal mask depends on the current cache offset; create it from
-        # the slice of cache entries we'll actually use so positions line up.
-        cache_slice = [self.cache[i] for i in
+    def run_layers(self, conv_id: str, hidden: mx.array) -> mx.array:
+        """Run hidden through this shard's layer range, updating the
+        per-conversation KV cache."""
+        full_cache = self._cache_for(conv_id)
+        # Slice the cache to the layers we own so the mask's offset is
+        # computed from the right entries.
+        cache_slice = [full_cache[i] for i in
                        range(self.spec.layer_start, self.spec.layer_end)]
         mask = create_attention_mask(hidden, cache_slice)
         for idx, i in enumerate(range(self.spec.layer_start, self.spec.layer_end)):
@@ -56,7 +70,7 @@ class Shard:
         return hidden
 
     def head(self, hidden: mx.array) -> mx.array:
-        # Returns logits: [batch, seq, vocab].
+        """Apply final norm + lm_head -> logits."""
         normed = self.model.model.norm(hidden)
         if self.model.args.tie_word_embeddings:
             return self.model.model.embed_tokens.as_linear(normed)
