@@ -311,7 +311,7 @@ class Hub:
             self.participants[worker_id] = participant
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
         role = "worker" if compute else "client"
-        ui.notice(f"{role}[{participant.short_id} · {participant.display_owner}] "
+        ui.notice(f"{role}·{participant.short_id} ({participant.display_owner}) "
                   f"joined ({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
@@ -328,8 +328,8 @@ class Hub:
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
             left_role = "worker" if participant.compute else "client"
-            ui.notice(f"{left_role}[{participant.short_id} · "
-                      f"{participant.display_owner}] left")
+            ui.notice(f"{left_role}·{participant.short_id} "
+                      f"({participant.display_owner}) left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
