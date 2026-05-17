@@ -53,9 +53,8 @@ def banner(model: str, hub_addr: str, layer_range: tuple[int, int] | None = None
 
 def banner_text(model: str, hub_addr: str, layer_range: tuple[int, int] | None,
                 version: str = "0.0.1") -> str:
-    """Same content as banner() but returned as a plain string with embedded
-    ANSI sequences — suitable for seeding a prompt_toolkit BufferControl
-    where rich.print isn't available."""
+    """Plain-text banner (no ANSI). Used as a fallback when styling is
+    inconvenient. The interactive UI uses `banner_segments` instead."""
     if layer_range is not None:
         shard_str = f"layers {layer_range[0]}:{layer_range[1]}"
     else:
@@ -67,6 +66,52 @@ def banner_text(model: str, hub_addr: str, layer_range: tuple[int, int] | None,
         f"     shard     {shard_str}",
     ]
     return "\n".join(lines)
+
+
+_ART_LINES = [
+    "  · ✦ ·    ",
+    " ✦ · · ✦   ",
+    " ✦ · · ✦   ",
+    "  · ✦ ·    ",
+]
+
+
+def _style_art_line(line: str) -> list[tuple[str, str]]:
+    """Color stars and dots distinctly so the constellation has weight."""
+    out: list[tuple[str, str]] = []
+    for ch in line:
+        if ch == "✦":
+            out.append(("class:banner.star", ch))
+        elif ch == "·":
+            out.append(("class:banner.dot", ch))
+        else:
+            out.append(("", ch))
+    return out
+
+
+def banner_segments(model: str, hub_addr: str,
+                    layer_range: tuple[int, int] | None,
+                    version: str = "0.0.1") -> list[tuple[str, str]]:
+    """Banner as `(style, text)` tuples for FormattedTextControl. Four-row
+    constellation art on the left, vertically centered against the four
+    text rows (dots/model/hub/shard) on the right."""
+    if layer_range is not None:
+        shard_str = f"layers {layer_range[0]}:{layer_range[1]}"
+    else:
+        shard_str = "not assigned"
+    text_rows = [("model", model), ("hub", hub_addr), ("shard", shard_str)]
+
+    out: list[tuple[str, str]] = []
+    # Row 1: art + project name + version
+    out.extend(_style_art_line(_ART_LINES[0]))
+    out.append(("class:banner.name", "dots "))
+    out.append(("class:banner.version", f"v{version}\n"))
+    # Rows 2-4: art + key/value pairs
+    for art_line, (key, val) in zip(_ART_LINES[1:], text_rows, strict=True):
+        out.extend(_style_art_line(art_line))
+        out.append(("class:banner.key", f"{key:<9}"))
+        out.append(("class:banner.value", f"{val}\n"))
+    return out
 
 
 def info(msg: str) -> None:

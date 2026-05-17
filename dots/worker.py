@@ -133,8 +133,12 @@ _PROMPT_STYLE = Style.from_dict({
     # bottom-toolbar (used in one-shot fallback) without reverse video.
     "bottom-toolbar": "bg:default fg:default noreverse",
     "rule": "fg:#5a5a5a bg:default",
-    "history": "fg:default bg:default",
-    "history.prompt": "fg:#888888 bg:default",
+    "banner.star": "fg:ansiyellow bold bg:default",
+    "banner.dot": "fg:#7a4b7a bg:default",
+    "banner.name": "fg:ansimagenta bold bg:default",
+    "banner.version": "fg:#888888 bg:default",
+    "banner.key": "fg:ansicyan bg:default",
+    "banner.value": "fg:default bg:default",
     "status.marker": "fg:ansimagenta bg:default bold",
     "status.tps": "fg:ansicyan bg:default",
     "status.dim": "fg:#888888 bg:default",
@@ -335,14 +339,14 @@ class Worker:
         prompt_queue: asyncio.Queue[str] = asyncio.Queue()
         generating = {"flag": False}     # mutable so closures can flip it
 
-        # Seed the history with the banner + help line.
-        banner = ui.banner_text(self.model_id, hub_addr, layer_range)
-        intro = (
-            banner
-            + f"\n\n{INDENT}/reset to clear conversation · Ctrl-D to exit\n\n"
-        )
+        # Help line lives in the history buffer (so it scrolls with the
+        # conversation); the colored banner gets its own static Window above.
+        intro = f"\n{INDENT}/reset to clear conversation · Ctrl-D to exit\n\n"
         history_buf.set_document(Document(intro, cursor_position=len(intro)),
                                  bypass_readonly=True)
+        banner_segments = ui.banner_segments(
+            self.model_id, hub_addr, layer_range,
+        )
 
         def append_history(text: str) -> None:
             # Auto-follow when the cursor is already at the end. If the user
@@ -437,14 +441,15 @@ class Worker:
         def _end(event):
             history_buf.cursor_position = len(history_buf.text)
 
-        # History shrinks to its content; the input box sits right under it.
-        # The trailing empty Window absorbs any unused screen real estate so
-        # the box doesn't get yanked to the terminal's bottom edge when the
-        # conversation is short.
         layout = Layout(
             HSplit([
+                # Colored banner — fixed, never scrolled.
+                Window(FormattedTextControl(banner_segments),
+                       height=4, dont_extend_height=True),
+                # Conversation history.
                 Window(BufferControl(history_buf, focusable=False),
                        wrap_lines=False, dont_extend_height=True),
+                # Input box.
                 Window(FormattedTextControl(top_rule), height=1),
                 Window(
                     BufferControl(
