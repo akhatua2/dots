@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import uuid
 from typing import AsyncIterator
 
 import pytest
@@ -78,15 +79,19 @@ async def hub() -> AsyncIterator[Hub]:
 # manually and return a connected Worker that callers can issue send_prompt
 # against.
 async def connect_worker(hub: Hub) -> Worker:
-    w = Worker("127.0.0.1", hub.port)
+    # Give every test-spawned worker a unique identity so multiple workers
+    # in the same test don't share the on-disk ~/.dots/identity file (which
+    # would cause the hub's "same UUID reconnected" takeover path to fire).
+    w = Worker("127.0.0.1", hub.port, identity=str(uuid.uuid4()))
     reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
     w.conn = PeerConnection(reader, writer, f"127.0.0.1:{hub.port}", w._handle)
-    ack = await w.conn.call("hello", free_ram_gb=free_ram_gb())
+    ack = await w.conn.call(
+        "hello", worker_id=w.identity, free_ram_gb=free_ram_gb(),
+    )
     assert ack.get("kind") == "hello_ack"
     w.model_id = ack["model_id"]
     w.n_layers = ack["n_layers"]
     await asyncio.wait_for(w._welcome.wait(), timeout=2.0)
-    # Wait for the shard to be loaded.
     deadline = asyncio.get_running_loop().time() + 2.0
     while w.shard is None and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(0.01)
