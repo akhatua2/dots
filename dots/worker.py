@@ -58,6 +58,10 @@ class Worker:
         # Set when the hub sends our WELCOME; the REPL waits on this so we
         # don't start chatting before we know our conv_id.
         self._welcome = asyncio.Event()
+        # Capture-mode plumbing for programmatic use (e.g. tests). When
+        # _capture_text is not None, every "token" notification also appends
+        # to it instead of only going to stdout.
+        self._capture_text: list[str] | None = None
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -105,8 +109,11 @@ class Worker:
             return {"kind": "ok"}
         if kind == "token":
             # Notification — write straight to stdout, no response.
-            sys.stdout.write(msg.get("text", ""))
+            text = msg.get("text", "")
+            sys.stdout.write(text)
             sys.stdout.flush()
+            if self._capture_text is not None:
+                self._capture_text.append(text)
             return None
         if kind == "welcome":
             self.conv_id = msg.get("conv_id")
@@ -146,25 +153,49 @@ class Worker:
 
     # ─────────────────────────────── chat REPL ──────────────────────────
 
+    async def send_prompt(
+        self, text: str, max_tokens: int = 128, temperature: float | None = None,
+    ) -> tuple[str, dict]:
+        """Send one prompt and return (response_text, stats_dict).
+
+        Captures the streamed token notifications into a buffer alongside
+        printing them to stdout, so callers (e.g. tests) get clean access
+        to the response. Blocks until the hub returns turn_done or an error.
+        """
+        if self.conn is None:
+            raise RuntimeError("not connected to hub")
+        payload: dict = {"text": text, "max_tokens": max_tokens}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        captured: list[str] = []
+        prev_capture = self._capture_text
+        self._capture_text = captured
+        try:
+            resp = await self.conn.call("prompt", **payload)
+        finally:
+            self._capture_text = prev_capture
+        if resp.get("kind") != "turn_done":
+            raise RuntimeError(resp.get("error", "turn failed"))
+        return "".join(captured), resp
+
     async def _chat_loop(self) -> None:
         if self.one_shot is not None:
             ui.console.print()
             ui.banner(self.model_id, [f"hub {self.hub_host}:{self.hub_port}"])
             ui.console.print(f"[dim]one-shot: {self.one_shot}[/dim]\n")
-            resp = await self.conn.call(
-                "prompt", text=self.one_shot, max_tokens=self.max_tokens
-            )
-            kind = resp.get("kind")
-            sys.stdout.write("\n")
-            if kind == "turn_done":
+            try:
+                _, resp = await self.send_prompt(
+                    self.one_shot, max_tokens=self.max_tokens,
+                )
+                sys.stdout.write("\n")
                 ui.stats(
                     int(resp.get("prefill_tokens", 0)),
                     float(resp.get("prefill_ms", 0)),
                     int(resp.get("decode_tokens", 0)),
                     float(resp.get("decode_ms", 0)) / 1000.0,
                 )
-            else:
-                ui.error(resp.get("error", "turn failed"))
+            except RuntimeError as e:
+                ui.error(str(e))
             return
 
         session = PromptSession()
@@ -193,9 +224,8 @@ class Worker:
                     ui.error(resp.get("error", "reset failed"))
                 continue
 
-            resp = await self.conn.call("prompt", text=line)
-            kind = resp.get("kind")
-            if kind == "turn_done":
+            try:
+                _, resp = await self.send_prompt(line, max_tokens=256)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
                 ui.stats(
@@ -204,6 +234,6 @@ class Worker:
                     int(resp.get("decode_tokens", 0)),
                     float(resp.get("decode_ms", 0)) / 1000.0,
                 )
-            else:
-                ui.error(resp.get("error", "turn failed"))
+            except RuntimeError as e:
+                ui.error(str(e))
             ui.console.print()
