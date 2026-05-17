@@ -257,8 +257,10 @@ Press `Ctrl+C` to exit.
 
 Every contribution and query is attributed to an **account** (a human
 owner, separate from per-device worker IDs). The hub runs a closed credit
-economy: contributing earns CU, querying spends CU. Per-turn, credits and
-debits exactly match, so the pool sum is always zero.
+economy: **1 CU = 1 TFLOP of compute work**. Contributing earns CU,
+querying spends CU. Per-turn, credits and debits exactly match
+(zero-sum), so the pool sum is always exactly zero. Model-aware:
+queries on bigger models cost proportionally more CU.
 
 Optional one-time setup on each Mac:
 
