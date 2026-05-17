@@ -298,9 +298,10 @@ def main() -> None:
         help="mlx-lm model id (auto-downloaded on first run)",
     )
     p_hub.add_argument(
-        "--http-port", type=int, default=None, metavar="PORT",
-        help="also expose an OpenAI-compatible HTTP API on this port "
-             "(POST /v1/chat/completions, GET /v1/models)",
+        "--http-port", type=int, default=8080, metavar="PORT",
+        help="port for the OpenAI-compatible HTTP API "
+             "(POST /v1/chat/completions, GET /v1/models, GET /v1/credits). "
+             "defaults to 8080. pass --http-port 0 to disable.",
     )
 
     p_chat = sub.add_parser(

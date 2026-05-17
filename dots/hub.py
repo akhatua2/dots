@@ -226,10 +226,11 @@ class Hub:
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
         self.started.set()
 
-        # Optional OpenAI-compatible HTTP API alongside the worker TCP server.
-        # Lives only for as long as the hub does; cancellation tears it down.
+        # OpenAI-compatible HTTP API alongside the worker TCP server. On
+        # by default; users can pass --http-port 0 to disable. Lives only
+        # for as long as the hub does; cancellation tears it down.
         http_task: asyncio.Task | None = None
-        if self.http_port is not None:
+        if self.http_port:
             from .api import HttpApi
             api = HttpApi(self, host=self.host, port=self.http_port)
             http_task = asyncio.create_task(api.serve_forever())
