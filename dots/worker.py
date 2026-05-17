@@ -25,8 +25,14 @@ import asyncio
 import logging
 import sys
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.styles import Style
 
 from . import ui
@@ -35,9 +41,59 @@ from .protocol import decode_array, encode_array
 from .shard import Shard, ShardSpec
 from .util import free_ram_gb
 
+
+# 2-space leading margin for *everything* in the chat area. The `›` lands
+# at col 2 so user lines start at col 4 (after "  › "); response lines also
+# start at col 4 so they sit under the user's text — same as Claude Code.
+INDENT = "  "
+
+
+class _Indenter:
+    """Prefixes every line of streamed text with INDENT. Tracks whether the
+    next character is at the start of a line."""
+
+    def __init__(self, indent: str = INDENT):
+        self.indent = indent
+        self.at_line_start = True
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        out: list[str] = []
+        for ch in text:
+            if self.at_line_start:
+                out.append(self.indent)
+                self.at_line_start = False
+            out.append(ch)
+            if ch == "\n":
+                self.at_line_start = True
+        return "".join(out)
+
+    def reset(self) -> None:
+        self.at_line_start = True
+
 log = logging.getLogger("dots.worker")
 
-_PROMPT_STYLE = Style.from_dict({"prompt": "ansimagenta bold", "": "ansiwhite"})
+
+def _ttysize() -> tuple[int, int]:
+    try:
+        import shutil
+        return shutil.get_terminal_size((80, 24))
+    except Exception:
+        return (80, 24)
+
+_PROMPT_STYLE = Style.from_dict({
+    "prompt": "ansimagenta bold",
+    "": "",
+    # bottom-toolbar (used in one-shot fallback) without reverse video.
+    "bottom-toolbar": "bg:default fg:default noreverse",
+    "rule": "fg:#5a5a5a bg:default",
+    "history": "fg:default bg:default",
+    "history.prompt": "fg:#888888 bg:default",
+    "status.marker": "fg:ansimagenta bg:default bold",
+    "status.tps": "fg:ansicyan bg:default",
+    "status.dim": "fg:#888888 bg:default",
+})
 
 
 class Worker:
@@ -62,6 +118,14 @@ class Worker:
         # _capture_text is not None, every "token" notification also appends
         # to it instead of only going to stdout.
         self._capture_text: list[str] | None = None
+        # Rolling status — shown on the divider above each new prompt.
+        self._latest_tps: float | None = None
+        # Set while the interactive prompt_toolkit Application is running.
+        self._app: Application | None = None
+        # When set, every TOKEN notification is delivered to this callback
+        # instead of being written to stdout. Used by the interactive UI to
+        # route streaming output into its history buffer.
+        self._token_callback = None
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -108,10 +172,18 @@ class Worker:
                     self.shard.reset_conversation(msg["conv_id"])
             return {"kind": "ok"}
         if kind == "token":
-            # Notification — write straight to stdout, no response.
+            # Notification — route to whichever consumer is registered.
+            # Interactive UI installs a callback that appends to the
+            # history buffer; one-shot/CLI paths fall back to stdout.
             text = msg.get("text", "")
-            sys.stdout.write(text)
-            sys.stdout.flush()
+            if self._token_callback is not None:
+                try:
+                    self._token_callback(text)
+                except Exception:
+                    log.exception("token callback failed")
+            else:
+                sys.stdout.write(text)
+                sys.stdout.flush()
             if self._capture_text is not None:
                 self._capture_text.append(text)
             return None
@@ -172,10 +244,18 @@ class Worker:
         return "".join(captured), resp
 
     async def _chat_loop(self) -> None:
+        hub_addr = f"{self.hub_host}:{self.hub_port}"
+        layer_range = (
+            (self.shard.spec.layer_start, self.shard.spec.layer_end)
+            if self.shard is not None else None
+        )
+
+        # One-shot mode: still uses the simpler PromptSession-free path,
+        # since there's nothing to display interactively.
         if self.one_shot is not None:
             ui.console.print()
-            ui.banner(self.model_id, [f"hub {self.hub_host}:{self.hub_port}"])
-            ui.console.print(f"[dim]one-shot: {self.one_shot}[/dim]\n")
+            ui.banner(self.model_id, hub_addr, layer_range)
+            ui.console.print(f"\n{INDENT}› {self.one_shot}\n")
             try:
                 _, resp = await self.send_prompt(
                     self.one_shot, max_tokens=self.max_tokens,
@@ -191,42 +271,177 @@ class Worker:
                 ui.error(str(e))
             return
 
-        session = PromptSession()
-        ui.console.print()
-        ui.banner(self.model_id, [f"hub {self.hub_host}:{self.hub_port}"])
-        ui.console.print(
-            "[dim]/reset clear conversation · Ctrl-D to leave the pool[/dim]\n"
+        # Interactive: a small prompt_toolkit Application with a history
+        # buffer (read-only-ish, full of past prompts + streamed responses)
+        # above a fixed input box at the bottom of the screen. The user can
+        # type the next message at any moment, even while a response is
+        # still streaming in — submitted messages queue and process FIFO.
+        await self._run_chat_app(hub_addr, layer_range)
+
+    # ─────────────────────────── interactive app ────────────────────────
+
+    async def _run_chat_app(
+        self, hub_addr: str, layer_range: tuple[int, int] | None,
+    ) -> None:
+        history_buf = Buffer()
+        input_buf = Buffer(multiline=False)
+        indenter = _Indenter()
+        prompt_queue: asyncio.Queue[str] = asyncio.Queue()
+        generating = {"flag": False}     # mutable so closures can flip it
+
+        # Seed the history with the banner + help line.
+        banner = ui.banner_text(self.model_id, hub_addr, layer_range)
+        intro = (
+            banner
+            + f"\n\n{INDENT}/reset to clear conversation · Ctrl-D to exit\n\n"
+        )
+        history_buf.set_document(Document(intro, cursor_position=len(intro)),
+                                 bypass_readonly=True)
+
+        def append_history(text: str) -> None:
+            new_text = history_buf.text + text
+            history_buf.set_document(
+                Document(new_text, cursor_position=len(new_text)),
+                bypass_readonly=True,
+            )
+            if self._app is not None:
+                self._app.invalidate()
+
+        def top_rule():
+            width = max(20, _ttysize()[0] - 1)
+            return [("class:rule", INDENT + "─" * (width - len(INDENT)))]
+
+        bottom_rule = top_rule
+
+        def status_text():
+            parts: list[tuple[str, str]] = [
+                ("class:status.marker", f"{INDENT}‣‣ "),
+            ]
+            if self._latest_tps is not None:
+                parts.append(("class:status.tps",
+                              f"{self._latest_tps:.1f} tok/s"))
+                parts.append(("class:status.dim", "  ·  "))
+            if generating["flag"]:
+                parts.append(("class:status.dim", "generating · "))
+            parts.append(("class:status.dim", "ctrl-c to interrupt"))
+            return parts
+
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _on_enter(event):
+            text = input_buf.text
+            input_buf.reset()
+            stripped = text.strip()
+            if not stripped:
+                return
+            prompt_queue.put_nowait(stripped)
+            # Echo the submitted prompt into history immediately so the user
+            # sees their message land.
+            append_history(f"{INDENT}› {stripped}\n")
+
+        @kb.add("c-d")
+        def _on_ctrl_d(event):
+            event.app.exit()
+
+        @kb.add("c-c")
+        def _on_ctrl_c(event):
+            # If a generation is in-flight, this signals "abort" — for v1
+            # we just clear the input. Real cancellation is a v2 feature.
+            input_buf.reset()
+
+        layout = Layout(
+            HSplit([
+                Window(BufferControl(history_buf, focusable=False),
+                       wrap_lines=True),
+                Window(FormattedTextControl(top_rule), height=1),
+                Window(
+                    BufferControl(
+                        input_buf,
+                        input_processors=[BeforeInput(
+                            f"{INDENT}› ", style="class:prompt",
+                        )],
+                    ),
+                    height=1,
+                ),
+                Window(FormattedTextControl(bottom_rule), height=1),
+                Window(FormattedTextControl(status_text), height=1),
+            ]),
+            focused_element=input_buf,
         )
 
-        while True:
-            try:
-                line = await session.prompt_async(
-                    HTML("<prompt>❯ </prompt>"), style=_PROMPT_STYLE
-                )
-            except (EOFError, KeyboardInterrupt):
-                ui.console.print()
-                return
-            line = line.strip()
-            if not line:
-                continue
-            if line == "/reset":
-                resp = await self.conn.call("reset")
-                if resp.get("kind") == "ok":
-                    ui.info("conversation reset")
-                else:
-                    ui.error(resp.get("error", "reset failed"))
-                continue
+        self._app = Application(
+            layout=layout,
+            key_bindings=kb,
+            full_screen=True,
+            style=_PROMPT_STYLE,
+            mouse_support=False,
+        )
 
+        async def chat_processor():
+            while True:
+                try:
+                    user_msg = await prompt_queue.get()
+                except asyncio.CancelledError:
+                    return
+                if user_msg == "/reset":
+                    try:
+                        await self.conn.call("reset")
+                    except Exception:
+                        pass
+                    append_history(f"{INDENT}[conversation reset]\n\n")
+                    continue
+                indenter.reset()
+                generating["flag"] = True
+                self._app.invalidate()
+                try:
+                    _, resp = await self._send_prompt_streaming(
+                        user_msg,
+                        on_token=lambda t: append_history(indenter.feed(t)),
+                    )
+                    decode_tokens = int(resp.get("decode_tokens", 0))
+                    decode_s = float(resp.get("decode_ms", 0)) / 1000.0
+                    if decode_tokens > 0 and decode_s > 0:
+                        self._latest_tps = decode_tokens / decode_s
+                except RuntimeError as e:
+                    append_history(f"{INDENT}error: {e}\n")
+                finally:
+                    generating["flag"] = False
+                    # Blank line between turns.
+                    append_history("\n\n")
+                    self._app.invalidate()
+
+        processor_task = asyncio.create_task(chat_processor())
+        try:
+            await self._app.run_async()
+        finally:
+            processor_task.cancel()
             try:
-                _, resp = await self.send_prompt(line, max_tokens=256)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                ui.stats(
-                    int(resp.get("prefill_tokens", 0)),
-                    float(resp.get("prefill_ms", 0)),
-                    int(resp.get("decode_tokens", 0)),
-                    float(resp.get("decode_ms", 0)) / 1000.0,
-                )
-            except RuntimeError as e:
-                ui.error(str(e))
-            ui.console.print()
+                await processor_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._app = None
+
+    async def _send_prompt_streaming(
+        self, text: str, on_token, max_tokens: int = 256,
+        temperature: float | None = None,
+    ) -> tuple[str, dict]:
+        """Like send_prompt but routes each TOKEN notification through
+        `on_token(text)` (used by the chat app to append to its history
+        buffer instead of writing to stdout)."""
+        if self.conn is None:
+            raise RuntimeError("not connected to hub")
+        payload: dict = {"text": text, "max_tokens": max_tokens}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        captured: list[str] = []
+
+        prev_callback = self._token_callback
+        self._token_callback = lambda t: (on_token(t), captured.append(t))
+        try:
+            resp = await self.conn.call("prompt", **payload)
+        finally:
+            self._token_callback = prev_callback
+        if resp.get("kind") != "turn_done":
+            raise RuntimeError(resp.get("error", "turn failed"))
+        return "".join(captured), resp

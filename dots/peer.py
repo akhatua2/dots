@@ -79,8 +79,13 @@ class PeerConnection:
                 else:
                     # Notification — dispatch but don't reply.
                     asyncio.create_task(self._notify_handler(msg))
-        except asyncio.IncompleteReadError:
-            log.info("connection to %s closed", self.peer_id)
+        except (asyncio.IncompleteReadError, ConnectionResetError,
+                ConnectionAbortedError, BrokenPipeError) as e:
+            # Normal disconnect — the peer hung up or the OS killed the
+            # underlying socket. Not an error; the parent context will
+            # re-plan the pool.
+            log.info("connection to %s closed (%s)",
+                     self.peer_id, type(e).__name__)
         except Exception:
             log.exception("read loop error on %s", self.peer_id)
         finally:
