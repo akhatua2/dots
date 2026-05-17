@@ -1,0 +1,23 @@
+[project]
+name = "dots"
+version = "0.0.1"
+description = "Distributed LLM inference across laptops on a LAN."
+requires-python = ">=3.11"
+dependencies = [
+    "mlx>=0.20.0",
+    "mlx-lm>=0.20.0",
+    "msgpack>=1.0.0",
+    "numpy>=1.26.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+]
+
+[project.scripts]
+dots = "dots.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dots"]

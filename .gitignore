@@ -1,0 +1,23 @@
+# venv
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# editors
+.vscode/
+.idea/
+*.swp
+
+# os
+.DS_Store
+Thumbs.db
+
+# logs / tmp
+*.log
+/tmp/
