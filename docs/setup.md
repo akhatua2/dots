@@ -265,11 +265,12 @@ the same commands. Nothing needs to be reinstalled.
 
 ## Step 7 — (Optional) Check your CU balance
 
-dots tracks a **closed credit economy**. Contributing compute earns CU
-(compute units); querying spends CU. Per-turn, every CU spent matches
-exactly what's credited to the workers that participated — so a solo user
-in their own pool always nets to zero, and across a friend pool credits
-flow naturally from heavy users to heavy contributors.
+dots tracks a **closed compute-unit (CU) economy**. **1 CU = 1 TFLOP** of
+work (one trillion floating-point operations). Contributing compute earns
+CU; querying spends CU. Per-turn, every CU spent matches exactly what's
+credited to the workers that participated — so a solo user in their own
+pool always nets to zero, and across a friend pool credits flow naturally
+from heavy users to heavy contributors.
 
 The hub exposes an HTTP API on port `8080` by default (pass `--http-port 0`
 to disable). Check balances from any Mac:

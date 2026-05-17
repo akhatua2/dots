@@ -252,17 +252,18 @@ def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
             sys.stdout.write("(ledger is empty)\n")
             return
         rows = sorted(accounts.items(),
-                      key=lambda kv: kv[1].get("balance", 0), reverse=True)
+                      key=lambda kv: kv[1].get("balance_cu", 0), reverse=True)
         sys.stdout.write(f"{'account':<40} {'alias':<15} "
-                         f"{'earned':>8} {'spent':>8} {'balance':>8}\n")
+                         f"{'earned (CU)':>12} {'spent (CU)':>12} "
+                         f"{'balance (CU)':>13}\n")
         for aid, a in rows:
             marker = " ← you" if aid == my_account else ""
             alias = a.get("alias") or "—"
             sys.stdout.write(
                 f"{aid:<40} {alias:<15} "
-                f"{a.get('earned_lifetime', 0):>8} "
-                f"{a.get('spent_lifetime', 0):>8} "
-                f"{a.get('balance', 0):>8}{marker}\n"
+                f"{a.get('earned_cu', 0):>12.4f} "
+                f"{a.get('spent_cu', 0):>12.4f} "
+                f"{a.get('balance_cu', 0):>13.4f}{marker}\n"
             )
         return
 
@@ -272,11 +273,16 @@ def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
         return
     sys.stdout.write(f"account: {my_account}\n")
     sys.stdout.write(f"alias:   {mine.get('alias') or '(unset)'}\n")
-    sys.stdout.write(f"earned:  {mine.get('earned_lifetime', 0)} CU "
-                     f"across {mine.get('turns_as_worker', 0)} turns as a worker\n")
-    sys.stdout.write(f"spent:   {mine.get('spent_lifetime', 0)} CU "
-                     f"across {mine.get('turns_as_querier', 0)} turns as a querier\n")
-    sys.stdout.write(f"balance: {mine.get('balance', 0)} CU\n")
+    sys.stdout.write(
+        f"earned:  {mine.get('earned_cu', 0):.4f} CU "
+        f"across {mine.get('turns_as_worker', 0)} turns as a worker\n"
+    )
+    sys.stdout.write(
+        f"spent:   {mine.get('spent_cu', 0):.4f} CU "
+        f"across {mine.get('turns_as_querier', 0)} turns as a querier\n"
+    )
+    sys.stdout.write(f"balance: {mine.get('balance_cu', 0):.4f} CU\n")
+    sys.stdout.write("\n(1 CU = 1 TFLOP = 10¹² floating-point operations)\n")
 
 
 # ────────────────────────────────── main ────────────────────────────────────

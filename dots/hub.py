@@ -166,6 +166,28 @@ def _per_layer_bytes(model, n_layers: int) -> int:
         return 0
 
 
+def _active_params(model) -> int:
+    """Total active parameter count of `model`. Used in CU FLOP accounting.
+
+    For dense models, this equals total params. For MoE models we use
+    total params as a conservative approximation (slight overcount in
+    CU cost) — refining to top-k × per-expert is a follow-up.
+
+    Returns 0 if we can't compute it (test fakes, missing parameters
+    attribute) — caller treats that as "skip ledger attribution".
+    """
+    try:
+        from mlx.utils import tree_flatten
+        total = 0
+        for _, v in tree_flatten(model.parameters()):
+            if hasattr(v, "size"):
+                total += int(v.size)
+        return total
+    except Exception:
+        log.debug("active params unavailable", exc_info=True)
+        return 0
+
+
 class Hub:
     def __init__(
         self,
@@ -187,6 +209,11 @@ class Hub:
         # after the model loads. Used to translate a worker's max_load_gb
         # into a max-layers cap when planning.
         self.bytes_per_layer = 0
+        # Total active parameters in the loaded model. Used for FLOP-based
+        # CU accounting (1 CU = 1 TFLOP = 2 × active_params × tokens / 1e12).
+        # For dense models this is total params. For MoE this is a conservative
+        # upper bound (refining to top-k × per-expert is a follow-up).
+        self.active_params = 0
 
         self.participants: dict[str, Participant] = {}
         self._pool_lock = asyncio.Lock()
@@ -213,13 +240,18 @@ class Hub:
         self.bytes_per_layer = await asyncio.to_thread(
             _per_layer_bytes, self.model, self.n_layers,
         )
+        self.active_params = await asyncio.to_thread(_active_params, self.model)
+        params_str = (
+            f", {self.active_params / 1e9:.2f}B active params"
+            if self.active_params else ""
+        )
         if self.bytes_per_layer:
             ui.notice(
                 f"model ready ({self.n_layers} layers, "
-                f"{self.bytes_per_layer / 1e6:.1f} MB / layer)"
+                f"{self.bytes_per_layer / 1e6:.1f} MB / layer{params_str})"
             )
         else:
-            ui.notice(f"model ready ({self.n_layers} layers)")
+            ui.notice(f"model ready ({self.n_layers} layers{params_str})")
 
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
@@ -510,7 +542,17 @@ class Hub:
     ) -> None:
         """Record one successful turn in the ledger. Computes the plan
         snapshot from currently-ready compute workers (post-turn state),
-        credits each by its layer share, and debits the querier."""
+        credits each by its layer share, and debits the querier.
+
+        Skips silently if there's no model context yet (test fakes,
+        active_params unavailable) or the querier has no account.
+        """
+        if self.active_params <= 0:
+            return  # no real model loaded (tests with fakes) → no FLOP unit
+        if not participant.account_id:
+            log.debug("skipping ledger entry — chat client has no account_id")
+            return
+
         plan: list[tuple[str, str | None, int]] = []
         total_layers_assigned = 0
         for p in self.participants.values():
@@ -521,9 +563,11 @@ class Hub:
             total_layers_assigned += layers_owned
         if not plan or total_layers_assigned == 0:
             return  # nothing to attribute (e.g. failure or no compute)
-        if not participant.account_id:
-            log.debug("skipping ledger entry — chat client has no account_id")
-            return
+
+        prefill_tokens = int(stats.get("prefill_tokens", 0))
+        decode_tokens = int(stats.get("decode_tokens", 0))
+        if prefill_tokens + decode_tokens == 0:
+            return  # nothing was generated; charge nothing
 
         self._turn_counter[conv.id] = self._turn_counter.get(conv.id, 0) + 1
         self.ledger.record_turn(
@@ -532,9 +576,11 @@ class Hub:
             querier_account=participant.account_id,
             querier_alias=participant.account_alias,
             plan=plan,
-            prefill_tokens=int(stats.get("prefill_tokens", 0)),
-            decode_tokens=int(stats.get("decode_tokens", 0)),
+            prefill_tokens=prefill_tokens,
+            decode_tokens=decode_tokens,
             total_layers=total_layers_assigned,
+            model_id=self.model_id,
+            active_params=self.active_params,
         )
 
     async def _on_reset(self, worker_id: str) -> dict:
