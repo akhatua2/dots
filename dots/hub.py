@@ -176,10 +176,9 @@ class Hub:
 
         worker_id = hello_msg.get("worker_id")
         if not isinstance(worker_id, str) or not worker_id:
-            # Pre-identity client; give them an ephemeral one but log it.
-            worker_id = f"ephemeral-{uuid.uuid4()}"
-            log.warning("HELLO without worker_id from %s; assigning %s",
-                        addr_str, worker_id)
+            log.warning("HELLO without worker_id from %s; dropping", addr_str)
+            await conn.close()
+            return
         wid_holder["id"] = worker_id
         free_ram = float(hello_msg.get("free_ram_gb", 0.0))
 
