@@ -126,6 +126,11 @@ def main() -> None:
         default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         help="mlx-lm model id (auto-downloaded on first run)",
     )
+    p_hub.add_argument(
+        "--http-port", type=int, default=None, metavar="PORT",
+        help="also expose an OpenAI-compatible HTTP API on this port "
+             "(POST /v1/chat/completions, GET /v1/models)",
+    )
 
     p_chat = sub.add_parser(
         "chat",
@@ -172,7 +177,10 @@ def main() -> None:
 
     if args.cmd == "hub":
         from .hub import Hub
-        hub = Hub(port=args.port, model_id=args.model, host=args.host)
+        hub = Hub(
+            port=args.port, model_id=args.model, host=args.host,
+            http_port=args.http_port,
+        )
         try:
             asyncio.run(hub.start())
         except KeyboardInterrupt:
