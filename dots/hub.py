@@ -199,7 +199,7 @@ class Hub:
             workers = sorted(self.participants.values(), key=lambda w: w.id)
             if not workers:
                 self._pool_ready.clear()
-                ui.info("pool empty")
+                ui.notice("pool empty — waiting for workers")
                 return
 
             ranges = plan_layers([w.free_ram_gb for w in workers], self.n_layers)
@@ -207,9 +207,14 @@ class Hub:
                 w.layer_range = r
                 w.ready = False
 
-            # Topology change invalidates every conversation's KV caches.
+            # Topology change invalidates every conversation's worker-side KV
+            # caches — but NOT the hub-side chat history, which is the source
+            # of truth we'll re-prefill from on the next compute call. Wiping
+            # history here used to drop the just-appended user message of any
+            # in-flight turn and left the model generating from a context
+            # missing the user's question; see test_user_message_survives_
+            # worker_drop.
             for w in workers:
-                w.conv.history.clear()
                 w.conv.token_count = 0
 
             workers_snapshot = list(workers)
@@ -244,16 +249,6 @@ class Hub:
                 ui.info(f"pool ready ({ready_count}): {plan_str}")
             else:
                 self._pool_ready.clear()
-
-        # Tell every worker their conversation reset (so their REPL UI can
-        # reflect it, e.g. clear scrollback).
-        async with self._pool_lock:
-            workers_now = list(self.participants.values())
-        for w in workers_now:
-            try:
-                await w.conn.notify("conversation_reset", reason="topology_changed")
-            except Exception:
-                pass
 
     # ────────────────────────────── one turn ────────────────────────────
 

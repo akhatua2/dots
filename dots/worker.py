@@ -92,7 +92,7 @@ class Worker:
         for t in pending:
             t.cancel()
         if closed_task in done:
-            ui.info("hub disconnected — exiting")
+            ui.notice("hub disconnected — exiting")
 
     # ──────────────────────────── incoming messages ──────────────────────
 
@@ -118,13 +118,6 @@ class Worker:
         if kind == "welcome":
             self.conv_id = msg.get("conv_id")
             self._welcome.set()
-            return None
-        if kind == "conversation_reset":
-            # Notification — hub tells us our conv was wiped (e.g. topology
-            # changed). The REPL will see this next turn when token_count = 0
-            # on the hub side; locally we just print a hint.
-            reason = msg.get("reason", "unknown")
-            ui.console.print(f"\n[dim italic]conversation reset ({reason})[/dim italic]")
             return None
         if kind == "ping":
             return {"kind": "pong"}

@@ -1,4 +1,9 @@
-"""Tiny terminal UI helpers — banner, prompt, spinner, stats."""
+"""Tiny terminal UI helpers — banner, spinner, stats.
+
+`info()` only prints when verbose mode is on (see `set_verbose`). Banner,
+stats, and errors always print — they're the bits the user actually wants
+in a normal session. Everything debuggy goes through info().
+"""
 from __future__ import annotations
 
 from rich.console import Console
@@ -6,6 +11,17 @@ from rich.panel import Panel
 from rich.text import Text
 
 console = Console()
+
+_verbose = False
+
+
+def set_verbose(v: bool) -> None:
+    global _verbose
+    _verbose = v
+
+
+def is_verbose() -> bool:
+    return _verbose
 
 
 def banner(model: str, pipeline: list[str]) -> None:
@@ -22,6 +38,12 @@ def banner(model: str, pipeline: list[str]) -> None:
 
 
 def info(msg: str) -> None:
+    if _verbose:
+        console.print(f"[dim]{msg}[/dim]")
+
+
+def notice(msg: str) -> None:
+    """Always-visible status (e.g. 'hub disconnected — exiting')."""
     console.print(f"[dim]{msg}[/dim]")
 
 

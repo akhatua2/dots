@@ -1,5 +1,19 @@
-"""CLI entry point: `dots hub` and `dots worker`."""
+"""CLI entry point: `dots hub` and `dots worker`.
+
+By default we run in quiet mode — only the banner, the streaming response,
+the per-turn stats line, and errors hit your terminal. Worker join/leave
+events, model load progress, and HTTP request logs are suppressed. Pass
+`--verbose` (or `-v`) to see all of it.
+"""
 from __future__ import annotations
+
+# These environment variables have to be set before any module that reads
+# them (huggingface_hub, transformers) is imported. We default to quiet
+# and the verbose path below restores progress bars if requested.
+import os
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import argparse
 import asyncio
@@ -14,16 +28,32 @@ def _parse_hub_addr(s: str) -> tuple[str, int]:
     return host, int(port)
 
 
-def main() -> None:
+def _configure_logging(verbose: bool) -> None:
+    level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Always quiet these no matter the level — they spam INFO during model
+    # downloads and the user almost never wants per-request HTTP traces.
+    if not verbose:
+        for noisy in ("httpx", "urllib3", "huggingface_hub",
+                      "transformers", "filelock"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    else:
+        os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+
+
+def main() -> None:
     p = argparse.ArgumentParser(prog="dots")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="show internal logs (worker join/leave, model loading, "
+                        "HTTP requests, HF progress bars)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_hub = sub.add_parser("hub", help="run the dots hub (chat REPL + worker pool)")
+    p_hub = sub.add_parser("hub", help="run the dots hub (orchestrator + chat pool)")
     p_hub.add_argument("--port", type=int, default=5555)
     p_hub.add_argument("--host", default="0.0.0.0")
     p_hub.add_argument(
@@ -39,8 +69,7 @@ def main() -> None:
         help="hub address as host:port (e.g. 100.106.22.71:5555)",
     )
     p_worker.add_argument(
-        "--prompt",
-        default=None,
+        "--prompt", default=None,
         help="non-interactive: send one prompt and exit",
     )
     p_worker.add_argument(
@@ -49,6 +78,9 @@ def main() -> None:
     )
 
     args = p.parse_args()
+    _configure_logging(args.verbose)
+    from . import ui
+    ui.set_verbose(args.verbose)
 
     if args.cmd == "hub":
         from .hub import Hub
