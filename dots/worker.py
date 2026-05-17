@@ -507,8 +507,14 @@ class Worker:
                     append_history(f"{INDENT}error: {e}\n")
                 finally:
                     generating["flag"] = False
-                    # Blank line between turns.
-                    append_history("\n\n")
+                    # Normalize end-of-turn whitespace: strip any trailing
+                    # newlines the model emitted, then add exactly one blank
+                    # line before the input box.
+                    text = history_buf.text.rstrip("\n") + "\n\n"
+                    history_buf.set_document(
+                        Document(text, cursor_position=len(text)),
+                        bypass_readonly=True,
+                    )
                     self._app.invalidate()
 
         processor_task = asyncio.create_task(chat_processor())
