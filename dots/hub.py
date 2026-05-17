@@ -197,8 +197,14 @@ class Hub:
         async with self._pool_lock:
             self._topology_gen += 1
             workers = sorted(self.participants.values(), key=lambda w: w.id)
+            # Crucial: clear pool_ready *here*, not just on empty-pool. Any
+            # topology change makes every worker's layer assignment stale
+            # until LOAD_SHARD finishes; the retry path in _turn must wait
+            # for that, otherwise _pipeline runs with zero ready workers
+            # and the hub samples from raw embeddings (the same token over
+            # and over — the bug the user observed as 'their their their').
+            self._pool_ready.clear()
             if not workers:
-                self._pool_ready.clear()
                 ui.notice("pool empty — waiting for workers")
                 return
 
