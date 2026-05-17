@@ -61,11 +61,29 @@ class Participant:
     max_load_gb: float | None = None           # None == no cap
     layer_range: tuple[int, int] | None = None
     ready: bool = False
+    # The human-owner account this worker contributes to. CU and the
+    # future ledger get attributed against this, not against the
+    # per-process `id` above. Multiple Participants can share an account.
+    account_id: str | None = None
+    account_alias: str | None = None
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
 
     @property
     def short_id(self) -> str:
         return self.id[:8] if self.id else "?"
+
+    @property
+    def display_owner(self) -> str:
+        """Best-effort short label for who owns this participant. Used in
+        log lines. Prefers an explicit alias, falls back to a truncated
+        account_id, then 'anon' if the participant predates accounts."""
+        if self.account_alias:
+            return self.account_alias
+        if self.account_id:
+            short = (self.account_id[4:] if self.account_id.startswith("acc-")
+                     else self.account_id)
+            return short[:8]
+        return "anon"
 
 
 class TopologyChanged(Exception):
@@ -268,6 +286,11 @@ class Hub:
         # Default to compute=True if the client didn't say (so pre-PR-5
         # workers keep behaving the same way).
         compute = bool(hello_msg.get("compute", True))
+        account_id = hello_msg.get("account_id")
+        account_id = account_id if isinstance(account_id, str) and account_id else None
+        account_alias = hello_msg.get("account_alias")
+        account_alias = (account_alias if isinstance(account_alias, str)
+                         and account_alias else None)
 
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
@@ -283,12 +306,13 @@ class Hub:
             participant = Participant(
                 id=worker_id, addr=addr_str, free_ram_gb=free_ram,
                 compute=compute, max_load_gb=max_load_gb, conn=conn,
+                account_id=account_id, account_alias=account_alias,
             )
             self.participants[worker_id] = participant
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
         role = "worker" if compute else "client"
-        ui.notice(f"{role}[{participant.short_id}] joined "
-                  f"({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
+        ui.notice(f"{role}[{participant.short_id} · {participant.display_owner}] "
+                  f"joined ({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
             await conn.notify("welcome", conv_id=participant.conv.id)
@@ -304,7 +328,8 @@ class Hub:
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
             left_role = "worker" if participant.compute else "client"
-            ui.notice(f"{left_role}[{participant.short_id}] left")
+            ui.notice(f"{left_role}[{participant.short_id} · "
+                      f"{participant.display_owner}] left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
