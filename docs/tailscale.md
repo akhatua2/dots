@@ -2,122 +2,125 @@
 
 Tailscale is a free app that connects your Macs over the internet as
 if they were on the same network. It works through firewalls and
-routers without any setup, and it's the easiest way to pool Macs
+routers with no configuration, and it's the easiest way to pool Macs
 that aren't on the same Wi-Fi.
 
 > **Free plan limits:** 100 devices, 3 users. Plenty for a friend pool.
 > No credit card required.
 
+This whole guide is point-and-click. You won't open Terminal once.
+
 ---
 
-## Step 1 — Install Tailscale on every Mac
+## Step 1 — Download Tailscale on every Mac
 
 Every Mac in your pool (the hub and every friend) does this.
 
-```bash
-brew install --cask tailscale
-```
-
-If you don't have `brew`, download Tailscale directly from
-[tailscale.com/download](https://tailscale.com/download) and
-double-click the `.pkg` to install.
+1. In a browser, go to
+   [tailscale.com/download](https://tailscale.com/download).
+2. Click **Download Tailscale for macOS**. A `.pkg` file lands in
+   your Downloads folder.
+3. Double-click the `.pkg` to open it. macOS opens the installer.
+4. Click **Continue → Continue → Install**. Enter your Mac password
+   when prompted.
+5. When it finishes, click **Close**. You can move the installer to
+   the Trash.
 
 ---
 
 ## Step 2 — Sign in
 
 After installing, a small triangle icon appears in your **menu bar**
-(top-right of your screen, near the Wi-Fi symbol).
+(top-right corner of your screen, near the Wi-Fi symbol).
 
-1. Click the icon.
-2. Click **Log in**.
-3. Sign in with Google, GitHub, Microsoft, or email — whichever you
-   prefer.
+1. Click the triangle icon.
+2. Click **Log in**. Your browser opens to a Tailscale sign-in page.
+3. Sign in with Google, GitHub, Microsoft, Apple, or email —
+   whichever you prefer. Most people pick Google.
+4. The browser shows **"Success! You can close this window."** —
+   close it and switch back to your Mac.
 
-The **hub owner should sign in first**. They'll create the tailnet
-that everyone else joins.
-
----
-
-## Step 3 — Invite your friends
-
-This is done by the **hub owner only**.
-
-1. Go to [login.tailscale.com](https://login.tailscale.com) in a
-   browser.
-2. Click **Users** in the left sidebar.
-3. Click the **Invite users** button.
-4. Enter each friend's email and click send.
-
-Each friend will get an email with a magic link. They open the email
-on their Mac, click the link, and that signs their Mac into your
-shared tailnet.
+The **hub owner should sign in first**. They're creating the
+"tailnet" (the private network) that everyone else joins.
 
 ---
 
-## Step 4 — Find the hub's Tailscale address
+## Step 3 — The hub owner invites the friends
+
+This step is done by the **hub owner only** — the friend who will
+run the `dots hub` command later. The friends don't do anything
+yet; they're waiting for an invitation email.
+
+1. In a browser, go to
+   [login.tailscale.com](https://login.tailscale.com).
+2. In the left sidebar, click **Users**.
+3. Click the **Invite users** button at the top right.
+4. In the popup, type each friend's email address. Separate multiple
+   emails with commas.
+5. Click **Send invites**.
+
+Each friend will get an email titled something like *"You've been
+invited to join a Tailscale network."*
+
+---
+
+## Step 4 — Each friend accepts the invitation
+
+Each friend does this on the Mac they want to join with:
+
+1. Open the invitation email in any browser.
+2. Click the big **Accept invitation** button.
+3. Sign in with the same provider they picked in Step 2 (Google,
+   GitHub, etc.).
+4. The browser confirms they've joined the network.
+
+That's it. Their Mac is now on the same tailnet as the hub.
+
+---
+
+## Step 5 — Find the hub's Tailscale address
 
 On the **hub** Mac:
 
-```bash
-tailscale ip -4
-```
+1. Click the Tailscale triangle icon in the menu bar.
+2. At the top of the menu you'll see **This device** with the Mac's
+   name (something like *arpan-mbp*).
+3. Below the name is an address like `100.64.12.34`. **That's the
+   hub address.** Hover over it to highlight, then click to copy.
 
-You'll see something like:
-
-```
-100.64.12.34
-```
-
-That's the **hub address** — every friend will type this when
-joining as a worker. Write it down.
+Write it down or message it to your friends — every friend will type
+this address when running the worker command.
 
 ---
 
-## Step 5 — Verify the connection
+## Step 6 — Verify the connection
 
-On a friend's Mac (not the hub), run:
+On a friend's Mac (not the hub):
 
-```bash
-tailscale ping 100.64.12.34
-```
+1. Click the Tailscale triangle icon in the menu bar.
+2. Scroll down to the **Network devices** or **Other devices** section.
+3. You should see the hub Mac listed by name (e.g. *arpan-mbp*),
+   with a small green dot next to it meaning *online*.
 
-(Replace with your hub's actual address.)
+If you see the hub in the list with a green dot, you're connected.
+Go back to [setup.md](./setup.md#step-4--start-the-hub) → Step 4 and
+start the hub.
 
-You should see replies in 50–200 ms:
-
-```
-pong from arpan-mbp (100.64.12.34) via direct ... in 45ms
-```
-
-If it says **`via DERP`** instead of `direct`, your traffic is being
-relayed through Tailscale's servers — it still works, just adds
-50–100 ms. Most networks negotiate direct after a few seconds. If you
-stay on DERP, restart Tailscale on both Macs (click the icon →
-**Quit**, then reopen).
-
-If you don't see any pongs at all, see
-[troubleshooting.md](./troubleshooting.md#tailscale-issues).
-
----
-
-## You're done
-
-Now go back to [setup.md](./setup.md#step-4--start-the-hub) → Step 4
-and start the hub.
+If you don't see the hub, or its dot is grey/red, see the
+[Tailscale section in troubleshooting.md](./troubleshooting.md#tailscale-issues).
 
 ---
 
 ## A note on speed
 
-dots ships small intermediate state over the network on every token
-generated. The further apart your Macs are, the slower it'll be:
+dots sends small messages over the network on every word the model
+generates. The further apart your Macs are, the slower this'll be:
 
 | Setup | Typical speed |
 |---|---|
-| Same city on Tailscale | 10–20 tokens/sec |
-| Cross-country on Tailscale | 5–10 tokens/sec |
-| Across continents on Tailscale | 3–6 tokens/sec |
+| Same city on Tailscale | 10–20 words/sec |
+| Cross-country on Tailscale | 5–10 words/sec |
+| Across continents on Tailscale | 3–6 words/sec |
 
-A token is roughly three-quarters of an English word, so even 5 tok/s
-is about 4 words per second — workable for chat, just not snappy.
+Even 5 words/sec is faster than most people type — workable for chat,
+just not snappy.
