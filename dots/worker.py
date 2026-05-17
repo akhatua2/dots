@@ -26,7 +26,7 @@ from . import ui
 from .peer import PeerConnection
 from .protocol import decode_array, encode_array
 from .shard import Shard, ShardSpec
-from .util import free_ram_gb, load_or_create_identity
+from .util import free_ram_gb, load_or_create_identity, save_last_hub
 
 log = logging.getLogger("dots.worker")
 
@@ -106,6 +106,12 @@ class Worker:
         self.model_id = ack.get("model_id")
         self.n_layers = ack.get("n_layers")
         ui.info(f"hub accepted; model={self.model_id} ({self.n_layers} layers)")
+        # Persist this hub address so the next `dots chat` / `dots worker`
+        # invocation can default to it when the user omits the argument.
+        try:
+            save_last_hub(f"{self.hub_host}:{self.hub_port}")
+        except Exception:
+            log.debug("failed to persist last_hub", exc_info=True)
         await self._welcome.wait()
 
     async def wait_until_disconnected(self) -> None:
