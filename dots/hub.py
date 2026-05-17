@@ -53,13 +53,17 @@ class Conversation:
 @dataclass
 class Participant:
     """A connected worker. Each one is also a chatter with their own conv."""
-    id: int
+    id: str                                    # worker's stable UUID
     addr: str
     free_ram_gb: float
     conn: PeerConnection
     layer_range: tuple[int, int] | None = None
     ready: bool = False
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
+
+    @property
+    def short_id(self) -> str:
+        return self.id[:8] if self.id else "?"
 
 
 class TopologyChanged(Exception):
@@ -102,8 +106,7 @@ class Hub:
         self.tokenizer = None
         self.n_layers = 0
 
-        self.participants: dict[int, Participant] = {}
-        self._next_id = 1
+        self.participants: dict[str, Participant] = {}
         self._pool_lock = asyncio.Lock()
         self._pool_ready = asyncio.Event()  # at least one ready participant
         # Set after the model is loaded AND the server is listening — useful
@@ -139,9 +142,11 @@ class Hub:
     ) -> None:
         peer_addr = writer.get_extra_info("peername")
         addr_str = f"{peer_addr[0]}:{peer_addr[1]}"
-        worker_id = self._next_id
-        self._next_id += 1
 
+        # worker_id is resolved from the HELLO payload below. Until then
+        # we can't route worker-initiated messages (prompt / reset), so the
+        # handler closes over a small holder that gets filled in after HELLO.
+        wid_holder: dict[str, str | None] = {"id": None}
         hello_fut: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
 
         async def handler(msg: dict) -> dict | None:
@@ -151,33 +156,49 @@ class Hub:
                     hello_fut.set_result(msg)
                 return {"kind": "hello_ack", "n_layers": self.n_layers,
                         "model_id": self.model_id}
-            if kind == "prompt":
-                return await self._on_prompt(worker_id, msg)
-            if kind == "reset":
-                return await self._on_reset(worker_id)
+            wid = wid_holder["id"]
+            if kind == "prompt" and wid is not None:
+                return await self._on_prompt(wid, msg)
+            if kind == "reset" and wid is not None:
+                return await self._on_reset(wid)
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
 
         conn = PeerConnection(reader, writer, addr_str, handler)
-        log.info("worker %d connected from %s", worker_id, addr_str)
+        log.info("connection from %s", addr_str)
 
         try:
             hello_msg = await asyncio.wait_for(hello_fut, timeout=HELLO_TIMEOUT_SEC)
         except asyncio.TimeoutError:
-            log.warning("worker %d: HELLO timeout, dropping", worker_id)
+            log.warning("connection from %s: HELLO timeout, dropping", addr_str)
             await conn.close()
             return
 
+        worker_id = hello_msg.get("worker_id")
+        if not isinstance(worker_id, str) or not worker_id:
+            log.warning("HELLO without worker_id from %s; dropping", addr_str)
+            await conn.close()
+            return
+        wid_holder["id"] = worker_id
         free_ram = float(hello_msg.get("free_ram_gb", 0.0))
-        participant = Participant(
-            id=worker_id, addr=addr_str, free_ram_gb=free_ram, conn=conn,
-        )
+
+        # If a worker with this identity is already in the pool (process
+        # restart whose old connection hasn't been read-detected yet), close
+        # the stale one and replace it.
         async with self._pool_lock:
+            stale = self.participants.get(worker_id)
+            if stale is not None and stale.conn is not conn:
+                ui.notice(f"w[{worker_id[:8]}] reconnected; replacing stale connection")
+                try:
+                    await stale.conn.close()
+                except Exception:
+                    pass
+            participant = Participant(
+                id=worker_id, addr=addr_str, free_ram_gb=free_ram, conn=conn,
+            )
             self.participants[worker_id] = participant
-        ui.notice(f"w{worker_id} joined ({addr_str}, free_ram={free_ram:.1f}GB)")
+        ui.notice(f"w[{participant.short_id}] joined ({addr_str}, free_ram={free_ram:.1f}GB)")
         await self._on_pool_changed()
-        # Tell this worker which conv_id we assigned them, so the chat REPL
-        # knows what to send back.
         try:
             await conn.notify("welcome", conv_id=participant.conv.id)
         except Exception:
@@ -187,8 +208,11 @@ class Hub:
             await conn._closed.wait()
         finally:
             async with self._pool_lock:
-                self.participants.pop(worker_id, None)
-            ui.notice(f"w{worker_id} left")
+                # Only remove if we're still the entry — guards the
+                # takeover-on-reconnect case.
+                if self.participants.get(worker_id) is participant:
+                    self.participants.pop(worker_id, None)
+            ui.notice(f"w[{participant.short_id}] left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
@@ -258,7 +282,7 @@ class Hub:
 
     # ────────────────────────────── one turn ────────────────────────────
 
-    async def _on_prompt(self, worker_id: int, msg: dict) -> dict:
+    async def _on_prompt(self, worker_id: str, msg: dict) -> dict:
         async with self._pool_lock:
             participant = self.participants.get(worker_id)
         if participant is None:
@@ -283,7 +307,7 @@ class Hub:
             log.exception("turn failed for w%d", worker_id)
             return {"kind": "error", "error": str(e)}
 
-    async def _on_reset(self, worker_id: int) -> dict:
+    async def _on_reset(self, worker_id: str) -> dict:
         async with self._pool_lock:
             participant = self.participants.get(worker_id)
             workers = list(self.participants.values())
