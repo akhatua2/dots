@@ -183,6 +183,29 @@ Schema:
 - Hub itself earning CU.
 - Display in chat UI (separate cosmetic PR).
 
+## Invariant: append-only
+
+The ledger is **append-only by design.** No code path edits or removes a
+recorded turn entry. There is intentionally no `dots credits reset`
+subcommand and no `Ledger.delete_account()` method. This is load-bearing:
+
+- [[cryptographic-ledger]] (a future plan) signs and hash-chains
+  entries. A mutable underlying log would invalidate every entry after
+  the edit point.
+- Negative balances are debts. If the ledger were resettable, users
+  could wipe their debts. Friend-pool trust depends on this not being
+  possible.
+- Future cross-pool transfer relies on signed balance proofs. A
+  forgeable history is worthless as a proof.
+
+Edge cases that look like "reset" but aren't:
+
+| Case | Behavior |
+|---|---|
+| Ledger file corrupted on disk | `_load` silently discards, starts fresh. Recovery, not feature. |
+| Version bump | Same path — file from old version is dropped, new one is empty until the first turn. |
+| Dev cleanup during local testing | `rm ~/.dots/credits.json` out of band. Treat as destructive. |
+
 ## Known limitations (v1)
 
 These are real but accepted for the friend-pool target. Each has a
