@@ -43,11 +43,15 @@ def mock_model(monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def hub() -> AsyncIterator[Hub]:
+async def hub(tmp_path) -> AsyncIterator[Hub]:
     """Start a hub on a random local port, yield it, then shut down all
-    associated worker connections + the hub's server task."""
+    associated worker connections + the hub's server task.
+
+    Ledger path is redirected to a per-test tmp dir so test turns can
+    record real CU without polluting the developer's ~/.dots/."""
     port = _free_port()
-    h = Hub(port=port, model_id=TEST_MODEL, host="127.0.0.1")
+    h = Hub(port=port, model_id=TEST_MODEL, host="127.0.0.1",
+            ledger_path=tmp_path / "credits.json")
     task = asyncio.create_task(h.start())
     try:
         await asyncio.wait_for(h.started.wait(), timeout=5.0)

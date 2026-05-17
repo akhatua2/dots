@@ -2,12 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | proposed |
+| **Status** | in-progress |
 | **Effort** | S |
 | **Complexity** | low |
 | **Risk** | low |
 | **Depends on** | [[accounts-and-identity]] |
 | **Unlocks** | [[cryptographic-ledger]], fairness allocation, paid tiers |
+| **Branch** | `feat/compute-units-ledger` |
 
 ## Why
 
