@@ -42,12 +42,18 @@ class Worker:
         max_tokens: int = 128,
         headless: bool = False,
         identity: str | None = None,
+        max_load_gb: float | None = None,
     ):
         self.hub_host = hub_host
         self.hub_port = hub_port
         self.one_shot = one_shot
         self.max_tokens = max_tokens
         self.headless = headless
+        # Max RAM (gigabytes) this worker will commit to model weights.
+        # None means no cap — the hub may assign us anywhere from 1 layer
+        # to the whole model. The cap is the user's promise to the pool;
+        # the hub uses it as a constraint in the layer planner.
+        self.max_load_gb = max_load_gb
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
@@ -96,11 +102,13 @@ class Worker:
         self.conn = PeerConnection(
             reader, writer, f"{self.hub_host}:{self.hub_port}", self._handle,
         )
-        ack = await self.conn.call(
-            "hello",
-            worker_id=self.identity,
-            free_ram_gb=free_ram_gb(),
-        )
+        hello_payload: dict = {
+            "worker_id": self.identity,
+            "free_ram_gb": free_ram_gb(),
+        }
+        if self.max_load_gb is not None:
+            hello_payload["max_load_gb"] = float(self.max_load_gb)
+        ack = await self.conn.call("hello", **hello_payload)
         if ack.get("kind") != "hello_ack":
             raise RuntimeError(f"unexpected HELLO response: {ack}")
         self.model_id = ack.get("model_id")
