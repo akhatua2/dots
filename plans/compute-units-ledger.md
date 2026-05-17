@@ -2,12 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | proposed |
+| **Status** | in-progress |
 | **Effort** | S |
 | **Complexity** | low |
 | **Risk** | low |
 | **Depends on** | [[accounts-and-identity]] |
 | **Unlocks** | [[cryptographic-ledger]], fairness allocation, paid tiers |
+| **Branch** | `feat/compute-units-ledger` |
 
 ## Why
 
@@ -15,6 +16,11 @@ dots's eventual pitch is a closed credit economy: contribute compute, earn
 CU; query the pool, spend CU. We have no measurement of contribution today.
 Once accounts exist ([[accounts-and-identity]]), CU is the first non-trivial
 thing we can attribute to them.
+
+> **Design rationale** — for the trade-offs we walked through (turn-CU,
+> token-CU, wall-clock-CU, bytes-CU, FLOP-CU) and why we landed on
+> FLOP-CU, see [[compute-units-ledger-rationale]]. Includes a section
+> on why this is future-proof for GPU workers.
 
 ## What changes
 
@@ -30,43 +36,58 @@ thing we can attribute to them.
 
 ## The CU formula
 
+**1 CU = 1 TFLOP (10¹² floating-point operations).** Stored internally
+as integer μCU (1 μCU = 10⁶ FLOPs) for exact integer math; displayed
+divided by 10⁶.
+
 ```
-earned_by_worker_i  =  layers_owned_i  ×  tokens_total
-spent_by_querier    =  total_layers    ×  tokens_total
-                     =  sum_i(earned_by_worker_i)
+flops_done          = 2 × active_params × tokens_total
+                      (2× for forward-pass multiply-add accounting)
+
+spent_by_querier    = flops_done                     (in FLOPs)
+earned_by_worker_i  = flops_done × layers_owned_i / total_layers
+                      (with rounding remainder distributed)
+
+sum_i(earned_by_worker_i) == spent_by_querier        (zero-sum, exact)
 ```
 
-`tokens_total = prefill_tokens + decode_tokens`. Per-turn invariant:
-**sum of all credits == debit by querier**. Always.
+`tokens_total = prefill_tokens + decode_tokens`. `active_params` is read
+from the loaded model (for MoE models, this is the per-token active set
+— top-k × per-expert + dense components).
+
+For why FLOP-CU was chosen over token-CU, byte-CU, time-CU, etc., and
+how this future-proofs the design for GPU workers, see
+[[compute-units-ledger-rationale]].
 
 ## Worked examples
 
-**Solo** (one human, three Macs all under the same account, that account is
-also the querier):
+**Solo** (one human, three Macs all under the same account, querying
+Qwen-7B-4bit at 7B params, 100-token turn):
 
 ```
-27 layers × 100 tokens = 2700 CU total.
-  arpanet worker  (3 layers):    +300
-  gizmos worker   (5 layers):    +500
-  hfhvq3jkhy      (19 layers):  +1900
-                                 ─────
-  total credited to acc_arpan:  +2700
+flops_done = 2 × 7e9 × 100 = 1.4 TFLOPs
 
-  acc_arpan as querier:         −2700
-                                 ─────
-  acc_arpan net change:             0  ✓
+  arpanet worker  (4 of 28 layers):    +0.20 CU
+  gizmos worker   (6 of 28 layers):    +0.30 CU
+  hfhvq3jkhy      (18 of 28 layers):   +0.90 CU
+                                       ─────
+  total credited to acc_arpan:         +1.40 CU
+
+  acc_arpan as querier:                −1.40 CU
+                                       ─────
+  acc_arpan net change:                 0.00 CU  ✓
 ```
 
-**Mixed** (arpan + friend; friend's gizmos contributes; arpan queries):
+**Mixed** (arpan + gizmo; gizmo's Mac contributes; arpan queries):
 
 ```
-arpan workers earn:     +2200
-friend worker earns:     +500
-arpan as querier:       −2700
-                         ─────
-arpan net:   −500
-friend net:  +500
-pool sum:        0  ✓
+arpan workers earn  (22 of 28 layers): +1.10 CU
+gizmo worker earns  (6 of 28 layers):  +0.30 CU
+arpan as querier:                      −1.40 CU
+                                       ─────
+arpan net:   −0.30 CU
+gizmo net:   +0.30 CU
+pool sum:     0.00 CU  ✓
 ```
 
 The economy is zero-sum at the pool level. Always.
@@ -161,6 +182,50 @@ Schema:
 - Negative-balance enforcement.
 - Hub itself earning CU.
 - Display in chat UI (separate cosmetic PR).
+
+## Invariant: append-only
+
+The ledger is **append-only by design.** No code path edits or removes a
+recorded turn entry. There is intentionally no `dots credits reset`
+subcommand and no `Ledger.delete_account()` method. This is load-bearing:
+
+- [[cryptographic-ledger]] (a future plan) signs and hash-chains
+  entries. A mutable underlying log would invalidate every entry after
+  the edit point.
+- Negative balances are debts. If the ledger were resettable, users
+  could wipe their debts. Friend-pool trust depends on this not being
+  possible.
+- Future cross-pool transfer relies on signed balance proofs. A
+  forgeable history is worthless as a proof.
+
+Edge cases that look like "reset" but aren't:
+
+| Case | Behavior |
+|---|---|
+| Ledger file corrupted on disk | `_load` silently discards, starts fresh. Recovery, not feature. |
+| Version bump | Same path — file from old version is dropped, new one is empty until the first turn. |
+| Dev cleanup during local testing | `rm ~/.dots/credits.json` out of band. Treat as destructive. |
+
+## Known limitations (v1)
+
+These are real but accepted for the friend-pool target. Each has a
+deferred follow-up plan.
+
+| Limitation | Risk | Mitigation plan |
+|---|---|---|
+| **Junk-output workers earn CU for fake compute.** Worker can accept LOAD_SHARD and COMPUTE messages but return garbage hidden states. Hub doesn't verify output. | Bad actor earns CU without doing work; users get wrong responses. | spot-check-audits (deferred plan) |
+| **Account_id impersonation.** HELLO is unsigned. Anyone can claim any account_id. | Inflate someone else's balance; spend their credit. | [[cryptographic-ledger]] — signed HELLO with Ed25519 challenges. |
+| **Hub-operator tampering.** Hub owns the ledger file. Manual edits possible. | Operator can mint or burn CU at will. | [[cryptographic-ledger]] — hash-chained, dual-signed entries. |
+| **No balance gating.** Querier can run heavy turns going deep negative; hub keeps serving. | Resource abuse (RAM, electricity); not financial in v1. | future rate-limit plan |
+| **Failed-turn grief.** User triggers many failing turns; workers do prefill that's wasted. | Compute drain on contributors. | future: charge for compute done even on failure; or per-account rate limit |
+| **Quantization-blindness.** A bf16 worker and a 4-bit worker earn the same CU per layer-token. The bf16 worker pays more wall-clock + electricity. | Mild unfairness against bf16 hosts; documented trade-off. | none planned — this is a feature: model has an inherent compute cost; precision is a worker efficiency choice |
+| **Final-plan attribution on recovery.** If a worker dies mid-turn, the new workers get full credit; the dead worker gets none even if it did partial work. | Slight unfairness on rare failure paths. | acceptable simplification |
+| **Attention FLOPs approximation.** Formula uses `2 × params × tokens`, undercounting attention's O(seq²) for long contexts. | Slight undercharging on very long contexts (32k+ tokens). Error <5% for chat-length contexts. | acceptable; refine if/when long-context becomes common |
+
+These limitations are documented prominently so v1 users understand
+what trust assumptions they're operating under. For a friend pool where
+participants know each other, all are acceptable. For a public-pool
+deployment, the deferred crypto + audit plans become MUSTs.
 
 ## Followups
 

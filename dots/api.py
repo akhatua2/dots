@@ -46,6 +46,8 @@ class HttpApi:
         app = web.Application(client_max_size=4 * 1024 * 1024)
         app.router.add_post("/v1/chat/completions", self._chat_completions)
         app.router.add_get("/v1/models", self._models)
+        app.router.add_get("/v1/credits", self._credits_all)
+        app.router.add_get("/v1/credits/{account_id}", self._credits_one)
         app.router.add_get("/healthz", self._healthz)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -74,6 +76,20 @@ class HttpApi:
                 "owned_by": "dots",
             }],
         })
+
+    async def _credits_all(self, _request: web.Request) -> web.Response:
+        return web.json_response(self.hub.ledger.as_dict())
+
+    async def _credits_one(self, request: web.Request) -> web.Response:
+        account_id = request.match_info["account_id"]
+        acc = self.hub.ledger.account(account_id)
+        if acc is None:
+            return web.json_response(
+                {"error": {"message": f"unknown account {account_id}"}},
+                status=404,
+            )
+        from dataclasses import asdict
+        return web.json_response(asdict(acc) | {"balance": acc.balance})
 
     async def _healthz(self, _request: web.Request) -> web.Response:
         ready = self.hub._pool_ready.is_set()

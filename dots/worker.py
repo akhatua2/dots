@@ -29,6 +29,7 @@ from .shard import Shard, ShardSpec
 from .util import (
     clear_worker_pid,
     free_ram_gb,
+    load_or_create_account,
     load_or_create_identity,
     save_last_hub,
     write_worker_pid,
@@ -50,6 +51,8 @@ class Worker:
         identity: str | None = None,
         max_load_gb: float | None = None,
         compute: bool = True,
+        account_id: str | None = None,
+        account_alias: str | None = None,
     ):
         self.hub_host = hub_host
         self.hub_port = hub_port
@@ -70,6 +73,16 @@ class Worker:
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
         self.identity = identity if identity is not None else load_or_create_identity()
+        # Human-owner account: who earns/spends CU. Persisted across
+        # devices (copy ~/.dots/account to attribute multiple workers to
+        # the same account). Tests pass an explicit one to avoid touching
+        # the real ~/.dots/account file.
+        self.account_id = account_id if account_id is not None else load_or_create_account()
+        # Cosmetic short handle shown on the hub side. May be None.
+        from .util import load_account_alias
+        self.account_alias = (
+            account_alias if account_alias is not None else load_account_alias()
+        )
 
         self.conn: PeerConnection | None = None
         self.shard: Shard | None = None
@@ -116,9 +129,12 @@ class Worker:
         )
         hello_payload: dict = {
             "worker_id": self.identity,
+            "account_id": self.account_id,
             "free_ram_gb": free_ram_gb(),
             "compute": bool(self.compute),
         }
+        if self.account_alias:
+            hello_payload["account_alias"] = self.account_alias
         if self.max_load_gb is not None:
             hello_payload["max_load_gb"] = float(self.max_load_gb)
         ack = await self.conn.call("hello", **hello_payload)

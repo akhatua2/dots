@@ -73,8 +73,29 @@ dots installed.
 .venv/bin/dots --help
 ```
 
-You should see a help message listing `hub`, `chat`, and `worker`.
-You're done with installation.
+You should see a help message listing `hub`, `chat`, `worker`, `account`,
+and `credits`. You're done with installation.
+
+### 1d. (Optional but recommended) Set up your account
+
+Every contribution and every query gets attributed to an **account** — your
+identity in the pool. By default dots creates a random UUID for you, but
+you can also pick a name + email + password so you can recover the same
+account_id if you ever lose your `~/.dots/` directory.
+
+```bash
+.venv/bin/dots account create
+# Prompts for name, email, alias, and an optional password.
+# Same name + email + password always produces the same account_id.
+```
+
+After setup, `dots account show` displays what you've stored. Your
+**name** and **email** stay on this Mac only — they're never sent over the
+network. Only your **account_id** and **alias** appear in pool logs.
+
+> **Tip:** If you have multiple Macs, run the same `dots account create`
+> with the same inputs on each of them. They'll all credit one account,
+> so your contributions aggregate.
 
 ---
 
@@ -239,6 +260,29 @@ To summarize what's running:
 
 To restart everything tomorrow: open Terminal on each Mac and re-run
 the same commands. Nothing needs to be reinstalled.
+
+---
+
+## Step 7 — (Optional) Check your CU balance
+
+dots tracks a **closed compute-unit (CU) economy**. **1 CU = 1 TFLOP** of
+work (one trillion floating-point operations). Contributing compute earns
+CU; querying spends CU. Per-turn, every CU spent matches exactly what's
+credited to the workers that participated — so a solo user in their own
+pool always nets to zero, and across a friend pool credits flow naturally
+from heavy users to heavy contributors.
+
+The hub exposes an HTTP API on port `8080` by default (pass `--http-port 0`
+to disable). Check balances from any Mac:
+
+```bash
+.venv/bin/dots credits HUB_ADDRESS:8080            # your balance
+.venv/bin/dots credits HUB_ADDRESS:8080 --all      # everyone's
+```
+
+CU isn't real money — it's an internal accounting layer. There's no
+gating today (you can query even with a negative balance), it's purely
+transparency about who's contributing what.
 
 ---
 

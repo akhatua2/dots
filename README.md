@@ -172,11 +172,18 @@ ready (24 layers)
 
 **Leave this Terminal window open.** Closing it shuts down the hub.
 
-If you want the OpenAI-compatible HTTP API too (so you can point apps like
-Continue, Cursor, LangChain, or plain `curl` at dots):
+The hub also serves an OpenAI-compatible HTTP API on port `8080` by default
+(so you can point apps like Continue, Cursor, LangChain, or plain `curl` at
+dots without any extra flags). To use a different port:
 
 ```bash
-.venv/bin/dots hub --http-port 8080
+.venv/bin/dots hub --http-port 9090
+```
+
+Or to disable it entirely:
+
+```bash
+.venv/bin/dots hub --http-port 0
 ```
 
 ---
@@ -243,6 +250,41 @@ Press `Ctrl+C` to exit.
 > worker on that Mac, dots spawns a worker in the background so your machine
 > chips in compute too. It shuts down when you exit chat. Disable with
 > `--no-worker` if you want.
+
+---
+
+## Accounts and CU (credits)
+
+Every contribution and query is attributed to an **account** (a human
+owner, separate from per-device worker IDs). The hub runs a closed credit
+economy: **1 CU = 1 TFLOP of compute work**. Contributing earns CU,
+querying spends CU. Per-turn, credits and debits exactly match
+(zero-sum), so the pool sum is always exactly zero. Model-aware:
+queries on bigger models cost proportionally more CU.
+
+Optional one-time setup on each Mac:
+
+```bash
+.venv/bin/dots account create     # interactive: name, email, optional password
+.venv/bin/dots account show       # see what's stored
+```
+
+With a **password**, your account_id is deterministically derived from
+name + email + password. Same inputs → same account_id. If you lose
+`~/.dots/account`, re-running `dots account create` with the same inputs
+restores your account (and any credit history attached to it).
+
+Name and email stay local; only `account_id` and an optional `alias`
+travel over the network.
+
+To check balances (the HTTP API is on by default on port 8080):
+
+```bash
+.venv/bin/dots credits HUB:8080            # your balance
+.venv/bin/dots credits HUB:8080 --all      # whole leaderboard
+```
+
+The full design is in [`plans/compute-units-ledger.md`](./plans/compute-units-ledger.md).
 
 ---
 

@@ -43,11 +43,15 @@ def mock_model(monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def hub() -> AsyncIterator[Hub]:
+async def hub(tmp_path) -> AsyncIterator[Hub]:
     """Start a hub on a random local port, yield it, then shut down all
-    associated worker connections + the hub's server task."""
+    associated worker connections + the hub's server task.
+
+    Ledger path is redirected to a per-test tmp dir so test turns can
+    record real CU without polluting the developer's ~/.dots/."""
     port = _free_port()
-    h = Hub(port=port, model_id=TEST_MODEL, host="127.0.0.1")
+    h = Hub(port=port, model_id=TEST_MODEL, host="127.0.0.1",
+            ledger_path=tmp_path / "credits.json")
     task = asyncio.create_task(h.start())
     try:
         await asyncio.wait_for(h.started.wait(), timeout=5.0)
@@ -79,14 +83,22 @@ async def hub() -> AsyncIterator[Hub]:
 # manually and return a connected Worker that callers can issue send_prompt
 # against.
 async def connect_worker(hub: Hub) -> Worker:
-    # Give every test-spawned worker a unique identity so multiple workers
-    # in the same test don't share the on-disk ~/.dots/identity file (which
-    # would cause the hub's "same UUID reconnected" takeover path to fire).
-    w = Worker("127.0.0.1", hub.port, identity=str(uuid.uuid4()))
+    # Give every test-spawned worker a unique identity AND account so
+    # multiple workers in the same test don't share the on-disk
+    # ~/.dots/{identity,account} files (which would either trigger
+    # reconnect-takeover or accidentally pollute the developer's real
+    # account file).
+    w = Worker(
+        "127.0.0.1", hub.port,
+        identity=str(uuid.uuid4()),
+        account_id="acc-" + uuid.uuid4().hex,
+        account_alias="",
+    )
     reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
     w.conn = PeerConnection(reader, writer, f"127.0.0.1:{hub.port}", w._handle)
     ack = await w.conn.call(
-        "hello", worker_id=w.identity, free_ram_gb=free_ram_gb(),
+        "hello", worker_id=w.identity, account_id=w.account_id,
+        free_ram_gb=free_ram_gb(),
     )
     assert ack.get("kind") == "hello_ack"
     w.model_id = ack["model_id"]
