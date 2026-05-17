@@ -41,3 +41,19 @@ def load_or_create_identity() -> str:
     new_id = str(uuid.uuid4())
     f.write_text(new_id + "\n")
     return new_id
+
+
+def save_last_hub(addr: str) -> None:
+    """Persist the most recently successful hub address so the user can
+    run `dots chat` or `dots worker` without args next time."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "last_hub").write_text(addr.strip() + "\n")
+
+
+def load_last_hub() -> str | None:
+    f = dots_home() / "last_hub"
+    if not f.exists():
+        return None
+    addr = f.read_text().strip()
+    return addr or None
