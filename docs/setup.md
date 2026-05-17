@@ -64,7 +64,7 @@ click **Install**, wait 2–5 minutes, then re-run the three commands.
 Takes 2–3 minutes. When it finishes you'll see:
 
 ```
-✓ dots installed.
+dots installed.
 ```
 
 ### 1c. Confirm it works
@@ -102,9 +102,9 @@ Pick **one** of the two options below.
 
 Use this if every Mac is on the **exact same Wi-Fi network name**.
 
-⚠️ Most university, hotel, and corporate Wi-Fi networks block
-device-to-device traffic. If `ping` fails between your Macs, switch
-to Tailscale (Option B).
+**Heads up:** most university, hotel, and corporate Wi-Fi networks
+block device-to-device traffic. If `ping` fails between your Macs,
+switch to Tailscale (Option B).
 
 On the **hub** Mac:
 
@@ -150,16 +150,17 @@ cd ~/Desktop/dots
 .venv/bin/dots hub
 ```
 
-After 10–30 seconds (loading the model into memory), you'll see:
+After 10–30 seconds (loading the model into memory), you'll see
+something like:
 
 ```
-hub listening on 0.0.0.0:5555
-loading model mlx-community/Qwen2.5-0.5B-Instruct-4bit…
-ready (24 layers)
+loading model mlx-community/Qwen2.5-0.5B-Instruct-4bit on hub…
+model ready (24 layers)
+hub listening on ('0.0.0.0', 5555) — waiting for workers to join
 ```
 
-⚠️ Leave this Terminal window open. Closing it shuts down the hub.
-You can minimize it.
+**Important:** leave this Terminal window open. Closing it shuts down
+the hub. You can minimize it.
 
 ---
 
@@ -182,7 +183,7 @@ Replace `HUB_ADDRESS` with the address from Step 3:
 .venv/bin/dots worker 100.64.12.34:5555
 ```
 
-⚠️ **macOS firewall popup.** The first time you run a worker, macOS
+**macOS firewall popup.** The first time you run a worker, macOS
 asks if Python can accept incoming network connections. Click
 **Allow** — the worker can't be reached otherwise.
 

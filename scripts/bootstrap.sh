@@ -16,7 +16,7 @@ echo "→ installing dots and dependencies"
 uv pip install -e .
 
 echo
-echo "✓ dots installed."
+echo "dots installed."
 echo
 echo "Next steps:"
 echo "  • Run the hub on this Mac:        .venv/bin/dots hub"
@@ -24,4 +24,5 @@ echo "  • Donate compute to a hub:        .venv/bin/dots worker HUB_HOST:5555"
 echo "  • Open the chat:                  .venv/bin/dots chat HUB_HOST:5555"
 echo
 echo "If you and a friend are on Tailscale, HUB_HOST is the hub Mac's"
-echo "tailnet IP (find it with:  tailscale ip -4 )."
+echo "tailnet IP — click the Tailscale menu bar icon on the hub Mac"
+echo "and copy the address shown next to the Mac's name."

@@ -46,7 +46,7 @@ paid service.
 
 ## Install (one-time, on each Mac)
 
-> 📖 **First time setting this up?** Read [`docs/setup.md`](./docs/setup.md).
+> **First time setting this up?** Read [`docs/setup.md`](./docs/setup.md).
 > It walks through every step in plain language. For internet-pooling
 > setup see [`docs/tailscale.md`](./docs/tailscale.md). Stuck? See
 > [`docs/troubleshooting.md`](./docs/troubleshooting.md).
@@ -66,7 +66,7 @@ cd dots
 ./scripts/bootstrap.sh
 ```
 
-The setup takes 2-3 minutes. When it finishes, you'll see `✓ dots installed.`
+The setup takes 2-3 minutes. When it finishes, you'll see `dots installed.`
 
 You only need to do this once per Mac.
 

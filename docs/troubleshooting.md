@@ -55,46 +55,56 @@ Almost always a network problem:
 - **Same Wi-Fi?** Confirm both Macs are on the **exact same Wi-Fi
   network name**. Guest networks often block device-to-device traffic.
   Switch to your home network or use Tailscale.
-- **Tailscale?** On both Macs, click the menu bar icon and confirm
-  it says "Connected." Run `tailscale status` to see all peers.
+- **Tailscale?** On both Macs, click the menu bar icon (the small
+  triangle in the top-right) and confirm it says **Connected**.
+  Below that, you should see the other Mac listed with a green dot.
 - **Firewall?** On the **hub** Mac, go to **System Settings → Network
   → Firewall → Options**. Make sure Python is set to "Allow incoming
   connections."
 
 ### Tailscale issues
 
-If `tailscale ping HUB_ADDRESS` doesn't get any replies:
+**The other Mac doesn't show up in my Tailscale menu**
 
-- Make sure both Macs are signed into the **same tailnet** (check the
-  email address shown in the Tailscale menu).
-- Run `tailscale status` on both Macs. Each Mac should show up in the
-  other's list.
-- Friend hasn't accepted the invite yet? Resend it from
-  [login.tailscale.com](https://login.tailscale.com) → **Users**.
+- Both Macs need to be signed into the **same tailnet**. Check the
+  email address shown at the bottom of the Tailscale menu — it
+  should match across all the Macs in your pool.
+- The friend hasn't accepted the invitation yet. The hub owner can
+  resend it from [login.tailscale.com](https://login.tailscale.com)
+  → **Users**.
+- Their Tailscale is signed out. Have them click the menu bar icon
+  and confirm they're logged in.
 
-If `tailscale ping` says **`via DERP`**:
+**The other Mac shows up with a grey dot (offline)**
 
-Your traffic is being relayed through Tailscale's servers instead of
-going directly Mac-to-Mac. This adds 50–100 ms per hop. Restart
-Tailscale on both Macs (click the icon → **Quit**, then reopen). Most
-networks negotiate direct after a few seconds.
+The other Mac is asleep, Tailscale isn't running on it, or it lost
+internet. Wake the Mac and confirm Tailscale is signed in.
 
-Some carrier-grade NAT (mostly mobile networks) can't escape DERP at
-all. Tailscale still works, just slower.
+**The connection feels slower than it should**
+
+Tailscale sometimes routes traffic through a "relay" server when it
+can't punch a direct connection. This adds 50–100 ms per hop. Try:
+
+- On both Macs, click the Tailscale menu bar icon → **Quit
+  Tailscale**. Wait a few seconds, then reopen the app from your
+  Applications folder. Tailscale tries to renegotiate a direct
+  connection on every start.
+- Restart your Wi-Fi router if you control it.
+
+Some carrier-grade NAT setups (mostly mobile networks) can never
+get off the relay. Tailscale still works, just slower.
 
 ### Speed is much slower than expected
 
 Three causes, in rough order:
 
-1. **Long round-trip on Tailscale.** Cross-continent is ~150 ms RTT.
-   Each token does at least one full pipeline hop, so 5–6 tok/s is
-   the ceiling cross-continent.
-2. **DERP relay** instead of direct. See above.
+1. **Long distance over Tailscale.** Cross-continent adds ~150 ms
+   per word generated. So 5–6 words/sec is roughly the ceiling
+   when one friend is on a different continent.
+2. **Tailscale is on a relay** instead of a direct connection. See
+   *Tailscale issues* above.
 3. **Bigger model.** Try the default
    `mlx-community/Qwen2.5-0.5B-Instruct-4bit` first to isolate.
-
-Run `tailscale ping HUB_ADDRESS` to see the actual round-trip time
-and whether you're direct or via DERP.
 
 ---
 
@@ -111,15 +121,17 @@ The hub is up but no workers have finished loading yet. Either:
   worker (2–5 minutes). Look at each worker's Terminal to see
   progress.
 
-### "pool capacity X GB < Y GB required"
+### "pool capacity X layers < Y required"
 
-The model is bigger than the combined RAM of all your workers.
-Options:
+The pool can't hold the whole model. Each worker reports a layer
+capacity (derived from its free RAM and any `--max-ram` cap), and
+the sum across all workers is less than the model needs. Options:
 
 - Add more workers.
 - Switch to a smaller model with `--model
   mlx-community/Qwen2.5-0.5B-Instruct-4bit`.
-- If a worker has `--max-ram` set artificially low, raise it.
+- If a worker has `--max-ram` set artificially low, raise it or
+  remove it.
 
 ### Hub Mac sleeps and everyone disconnects
 
