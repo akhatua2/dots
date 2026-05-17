@@ -1,6 +1,7 @@
 """Shared utilities."""
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -41,6 +42,100 @@ def load_or_create_identity() -> str:
     new_id = str(uuid.uuid4())
     f.write_text(new_id + "\n")
     return new_id
+
+
+def load_or_create_account() -> str:
+    """Return the human-owner's account ID. Auto-generates a random one if
+    no account file exists; users can run `dots account create` for an
+    interactive setup that supports password-derived recovery."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    f = home / "account"
+    if f.exists():
+        existing = f.read_text().strip()
+        if existing:
+            return existing
+    new_id = "acc-" + uuid.uuid4().hex
+    f.write_text(new_id + "\n")
+    return new_id
+
+
+def save_account_id(account_id: str) -> None:
+    """Write account_id to {dots_home}/account. Used by `dots account create`."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "account").write_text(account_id.strip() + "\n")
+
+
+def derive_account_id(name: str, email: str, password: str) -> str:
+    """Deterministically derive an account_id from (name, email, password).
+
+    The same three inputs always produce the same account_id. That's the
+    recovery property: if you lose your `~/.dots/account` file, re-running
+    `dots account create` with the same inputs reproduces the same id and
+    your credit ledger history is preserved.
+
+    Uses PBKDF2-HMAC-SHA256 with 100k iterations to slow brute-force
+    attacks against weak passwords. Salt is a fixed project constant
+    (not secret — it only namespaces this derivation against unrelated
+    KDF uses elsewhere).
+    """
+    salt = b"dots-account-v1"
+    name_n = name.lower().strip()
+    email_n = email.lower().strip()
+    material = f"{name_n}|{email_n}|{password}".encode("utf-8")
+    h = hashlib.pbkdf2_hmac("sha256", material, salt, iterations=100_000)
+    return "acc-" + h.hex()[:32]
+
+
+def account_id_short(account_id: str) -> str:
+    """Short, log-friendly form. Strips the 'acc-' prefix if present."""
+    s = account_id[4:] if account_id.startswith("acc-") else account_id
+    return s[:8] if s else "?"
+
+
+def _read_account_field(name: str) -> str | None:
+    f = dots_home() / name
+    if not f.exists():
+        return None
+    val = f.read_text().strip()
+    return val or None
+
+
+def _write_account_field(name: str, value: str) -> None:
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / name).write_text(value.strip() + "\n")
+
+
+def load_account_alias() -> str | None:
+    """Cosmetic short handle for this account (e.g. 'arpan'). Sent on HELLO
+    so other pool members see a name instead of a UUID."""
+    return _read_account_field("account-alias")
+
+
+def save_account_alias(alias: str) -> None:
+    _write_account_field("account-alias", alias)
+
+
+def load_account_name() -> str | None:
+    """Full human-readable name. Stays local; not sent on HELLO unless the
+    user opts in (future). Useful for self-display."""
+    return _read_account_field("account-name")
+
+
+def save_account_name(name: str) -> None:
+    _write_account_field("account-name", name)
+
+
+def load_account_email() -> str | None:
+    """Contact email. Stays local; not sent on HELLO. Useful for the user
+    to remember which email they tied this account to."""
+    return _read_account_field("account-email")
+
+
+def save_account_email(email: str) -> None:
+    _write_account_field("account-email", email)
 
 
 def save_last_hub(addr: str) -> None:
