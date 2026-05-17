@@ -57,6 +57,7 @@ class Participant:
     addr: str
     free_ram_gb: float
     conn: PeerConnection
+    compute: bool = True                       # contributes layers to the pool
     max_load_gb: float | None = None           # None == no cap
     layer_range: tuple[int, int] | None = None
     ready: bool = False
@@ -146,9 +147,16 @@ def _per_layer_bytes(model, n_layers: int) -> int:
 
 
 class Hub:
-    def __init__(self, port: int, model_id: str, host: str = "0.0.0.0"):
+    def __init__(
+        self,
+        port: int,
+        model_id: str,
+        host: str = "0.0.0.0",
+        http_port: int | None = None,
+    ):
         self.host = host
         self.port = port
+        self.http_port = http_port
         self.model_id = model_id
 
         self.model = None
@@ -188,13 +196,25 @@ class Hub:
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
         self.started.set()
+
+        # Optional OpenAI-compatible HTTP API alongside the worker TCP server.
+        # Lives only for as long as the hub does; cancellation tears it down.
+        http_task: asyncio.Task | None = None
+        if self.http_port is not None:
+            from .api import HttpApi
+            api = HttpApi(self, host=self.host, port=self.http_port)
+            http_task = asyncio.create_task(api.serve_forever())
+
         try:
             await server.serve_forever()
         except asyncio.CancelledError:
-            # On cancel, close the listener but don't wait for in-flight
-            # connections to drain — the cancellation path is for shutdown
-            # and any leftover read loops will surface their own errors.
             server.close()
+            if http_task is not None:
+                http_task.cancel()
+                try:
+                    await http_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             raise
 
     # ─────────────────────────── connection lifecycle ────────────────────
@@ -245,6 +265,9 @@ class Hub:
         free_ram = float(hello_msg.get("free_ram_gb", 0.0))
         max_load_raw = hello_msg.get("max_load_gb")
         max_load_gb = float(max_load_raw) if max_load_raw is not None else None
+        # Default to compute=True if the client didn't say (so pre-PR-5
+        # workers keep behaving the same way).
+        compute = bool(hello_msg.get("compute", True))
 
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
@@ -259,11 +282,12 @@ class Hub:
                     pass
             participant = Participant(
                 id=worker_id, addr=addr_str, free_ram_gb=free_ram,
-                max_load_gb=max_load_gb, conn=conn,
+                compute=compute, max_load_gb=max_load_gb, conn=conn,
             )
             self.participants[worker_id] = participant
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
-        ui.notice(f"w[{participant.short_id}] joined "
+        role = "worker" if compute else "client"
+        ui.notice(f"{role}[{participant.short_id}] joined "
                   f"({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
@@ -279,7 +303,8 @@ class Hub:
                 # takeover-on-reconnect case.
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
-            ui.notice(f"w[{participant.short_id}] left")
+            left_role = "worker" if participant.compute else "client"
+            ui.notice(f"{left_role}[{participant.short_id}] left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
@@ -287,7 +312,12 @@ class Hub:
     async def _on_pool_changed(self) -> None:
         async with self._pool_lock:
             self._topology_gen += 1
-            workers = sorted(self.participants.values(), key=lambda w: w.id)
+            # Only compute-contributing participants get layers assigned;
+            # pure chat clients are tracked for their conversations only.
+            workers = sorted(
+                (p for p in self.participants.values() if p.compute),
+                key=lambda w: w.id,
+            )
             # Crucial: clear pool_ready *here*, not just on empty-pool. Any
             # topology change makes every worker's layer assignment stale
             # until LOAD_SHARD finishes; the retry path in _turn must wait
@@ -296,7 +326,7 @@ class Hub:
             # and over — the bug the user observed as 'their their their').
             self._pool_ready.clear()
             if not workers:
-                ui.notice("pool empty — waiting for workers")
+                ui.notice("no compute workers — waiting")
                 return
 
             caps = self._compute_caps(workers)
@@ -352,10 +382,13 @@ class Hub:
             ready_count = sum(1 for w in self.participants.values() if w.ready)
             if ready_count > 0:
                 self._pool_ready.set()
-                plan_str = " → ".join(
-                    f"w{w.id}[{w.layer_range[0]}:{w.layer_range[1]}]"
+                # Avoid `[uuid][a:b]` here — rich's markup parser would
+                # try to interpret the bracketed UUID as a style tag and
+                # silently swallow it. Use a colon-separated form instead.
+                plan_str = "  →  ".join(
+                    f"w·{w.short_id} layers {w.layer_range[0]}-{w.layer_range[1]}"
                     for w in sorted(self.participants.values(),
-                                    key=lambda x: x.layer_range[0])
+                                    key=lambda x: (x.layer_range or (0, 0))[0])
                     if w.ready and w.layer_range
                 )
                 ui.notice(f"pool ready ({ready_count}): {plan_str}")
@@ -382,167 +415,185 @@ class Hub:
     # ────────────────────────────── one turn ────────────────────────────
 
     async def _on_prompt(self, worker_id: str, msg: dict) -> dict:
+        """Wire-protocol entry point for chat-client PROMPT messages.
+        Owns conversation-history bookkeeping (append user msg / append
+        assistant response / rollback on failure) and delegates the
+        actual turn to `run_turn`."""
         async with self._pool_lock:
             participant = self.participants.get(worker_id)
         if participant is None:
             return {"kind": "error", "error": "worker no longer in pool"}
-
         if not self._pool_ready.is_set():
             return {"kind": "error", "error": "pool not ready"}
 
+        conv = participant.conv
+        conv.history.append({"role": "user", "content": msg["text"]})
+
+        async def emit(text: str) -> None:
+            await participant.conn.notify("token", text=text)
+
+        def alive() -> bool:
+            return participant.id in self.participants
+
         try:
-            stats = await self._turn(
-                participant,
-                msg["text"],
+            response_text, stats = await self.run_turn(
+                conv,
                 max_new_tokens=int(msg.get("max_tokens", DEFAULT_MAX_NEW_TOKENS)),
                 temperature=float(msg.get("temperature", DEFAULT_TEMPERATURE)),
+                on_token=emit,
+                is_alive=alive,
             )
-            return {"kind": "turn_done", **stats}
         except TopologyChanged:
+            if conv.history and conv.history[-1].get("role") == "user":
+                conv.history.pop()
             return {"kind": "error", "error": "topology changed during turn"}
         except ConnectionError as e:
+            if conv.history and conv.history[-1].get("role") == "user":
+                conv.history.pop()
             return {"kind": "error", "error": f"worker dropped mid-turn: {e}"}
         except Exception as e:
-            log.exception("turn failed for w%d", worker_id)
+            log.exception("turn failed for %s", worker_id)
+            if conv.history and conv.history[-1].get("role") == "user":
+                conv.history.pop()
             return {"kind": "error", "error": str(e)}
+
+        conv.history.append({"role": "assistant", "content": response_text})
+        return {"kind": "turn_done", **stats}
 
     async def _on_reset(self, worker_id: str) -> dict:
         async with self._pool_lock:
             participant = self.participants.get(worker_id)
-            workers = list(self.participants.values())
         if participant is None:
             return {"kind": "error", "error": "worker no longer in pool"}
-        conv_id = participant.conv.id
-        await asyncio.gather(
-            *[w.conn.call("reset_conversation", conv_id=conv_id) for w in workers],
-            return_exceptions=True,
-        )
+        await self.reset_conversation_on_workers(participant.conv.id)
         participant.conv.history.clear()
         participant.conv.token_count = 0
         return {"kind": "ok"}
 
-    async def _turn(self, p: Participant, user_msg: str,
-                    max_new_tokens: int, temperature: float) -> dict:
-        """One chat turn with transparent recovery from worker drops.
+    async def reset_conversation_on_workers(self, conv_id: str) -> None:
+        """Broadcast `reset_conversation` to every compute worker. Used by
+        both the chat-client /reset path and the HTTP API after each
+        stateless request, so workers' per-conv KV caches don't accumulate."""
+        async with self._pool_lock:
+            workers = [p for p in self.participants.values() if p.compute]
+        await asyncio.gather(
+            *[w.conn.call("reset_conversation", conv_id=conv_id) for w in workers],
+            return_exceptions=True,
+        )
 
-        If a worker disconnects mid-turn, _on_pool_changed re-plans the pool
-        and wipes every conv's token_count. We catch the exception, wait for
-        the new pool to be ready, and re-prefill from
-        history + everything-we've-already-streamed-to-the-user, then keep
-        decoding. From the user's side this is just a pause; they see no
-        truncation and no error message.
+    async def run_turn(
+        self,
+        conv: Conversation,
+        max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+        on_token=None,
+        is_alive=None,
+    ) -> tuple[str, dict]:
+        """Run one chat turn against `conv.history`.
+
+        The history must already end with the user message to answer.
+        Returns (response_text, stats_dict).
+
+        Does NOT mutate `conv.history` — the caller decides whether to
+        keep the response (chat-client path appends it; HTTP API throws
+        the whole conversation away after the response is delivered).
+
+        Survives worker drops mid-turn: if a `_pipeline` call raises
+        `ConnectionError` or `TopologyChanged`, the retry re-prefills the
+        full history + everything-we've-already-streamed-to-the-user on
+        the new pool. The user sees a pause, not a truncated response.
+
+        on_token, if given, is awaited for each streamed text chunk.
+        is_alive, if given, is checked at the top of every retry; when
+        it returns False we abort because the requester went away.
         """
-        conv = p.conv
-        conv.history.append({"role": "user", "content": user_msg})
-
         # State that lives across recovery attempts:
-        response_tokens: list[int] = []   # everything we've streamed to user
+        response_tokens: list[int] = []
         stop_ids = self._stop_token_ids()
-        first_prefill_tokens = 0           # for stats (initial prefill only)
+        first_prefill_tokens = 0
         first_prefill_ms = 0.0
         decode_start_ts: float | None = None
         attempt = 0
 
-        try:
-            full_ids = self.tokenizer.apply_chat_template(
-                conv.history, add_generation_prompt=True
-            )
+        full_ids = self.tokenizer.apply_chat_template(
+            conv.history, add_generation_prompt=True
+        )
 
-            while True:
-                try:
-                    if p.id not in self.participants:
-                        raise RuntimeError("chatter disconnected")
-                    await self._pool_ready.wait()
-                    my_gen = self._topology_gen
+        while True:
+            try:
+                if is_alive is not None and not is_alive():
+                    raise RuntimeError("requester disconnected")
+                await self._pool_ready.wait()
+                my_gen = self._topology_gen
 
-                    # Re-prefill whatever the new pool's caches don't have yet.
-                    # On the happy path, that's just the new user message.
-                    # After a worker drop, that's history + every token we've
-                    # already streamed to the user — caches were wiped by the
-                    # re-plan so we rebuild them silently.
-                    target_seq = full_ids + response_tokens
-                    if conv.token_count > len(target_seq):
-                        conv.token_count = 0
-                    prefill_ids = target_seq[conv.token_count:]
-
-                    if prefill_ids:
-                        t0 = time.perf_counter()
-                        prompt_ids = mx.array([prefill_ids])
-                        hidden = self.model.model.embed_tokens(prompt_ids)
-                        hidden = await self._pipeline(conv.id, hidden, my_gen)
-                        logits = self._head(hidden[:, -1:, :])
-                        token = self._sample(logits[0, -1], temperature)
-                        conv.token_count = len(target_seq)
-                        if attempt == 0:
-                            first_prefill_tokens = len(prefill_ids)
-                            first_prefill_ms = (time.perf_counter() - t0) * 1000
-                    else:
-                        # Caches are already current. Sample one more token
-                        # by feeding an empty step — shouldn't happen on
-                        # first attempt, but defensive.
-                        raise RuntimeError(
-                            "no tokens to prefill — caches are inconsistent"
-                        )
-
-                    if decode_start_ts is None:
-                        decode_start_ts = time.perf_counter()
-
-                    while (len(response_tokens) < max_new_tokens
-                           and token not in stop_ids):
-                        text = self.tokenizer.decode([token])
-                        await p.conn.notify("token", text=text)
-                        response_tokens.append(token)
-                        next_in = mx.array([[token]])
-                        next_hidden = self.model.model.embed_tokens(next_in)
-                        hidden = await self._pipeline(conv.id, next_hidden, my_gen)
-                        conv.token_count += 1
-                        logits = self._head(hidden[:, -1:, :])
-                        token = self._sample(logits[0, -1], temperature)
-
-                    # Push terminator through the pipeline so the cache
-                    # ends the turn cleanly.
-                    terminator = (token if token in stop_ids
-                                  else self._primary_eos())
-                    term_in = mx.array([[terminator]])
-                    term_hidden = self.model.model.embed_tokens(term_in)
-                    await self._pipeline(conv.id, term_hidden, my_gen)
-                    response_tokens.append(terminator)
-                    conv.token_count += 1
-                    break  # turn complete
-
-                except (ConnectionError, TopologyChanged) as e:
-                    # The chatter is always a worker (joined the pool when they
-                    # opened a chat), so the pool can never be permanently empty
-                    # while we have an active turn — the chatter themselves
-                    # remains. We retry without a cap; only the chatter going
-                    # away (caught at the top of the loop) stops us.
-                    attempt += 1
-                    ui.notice(
-                        f"w{p.id} turn interrupted (attempt {attempt}, {e}); reconciling…"
-                    )
-                    # _on_pool_changed already reset token_count to 0 for
-                    # every conv; force it again defensively in case our
-                    # timing raced. The retry prefills from scratch.
+                target_seq = full_ids + response_tokens
+                if conv.token_count > len(target_seq):
                     conv.token_count = 0
-                    # Give the disconnect handler time to run + re-plan.
-                    await asyncio.sleep(0.1)
-                    await self._pool_ready.wait()
+                prefill_ids = target_seq[conv.token_count:]
 
-            elapsed_ms = (time.perf_counter() - decode_start_ts) * 1000 \
-                if decode_start_ts else 0.0
-            response_text = self.tokenizer.decode(response_tokens)
-            conv.history.append({"role": "assistant", "content": response_text})
-            return {
-                "prefill_tokens": first_prefill_tokens,
-                "prefill_ms": first_prefill_ms,
-                "decode_tokens": len(response_tokens) - 1,  # exclude terminator
-                "decode_ms": elapsed_ms,
-                "recoveries": attempt,
-            }
-        except Exception:
-            if conv.history and conv.history[-1].get("role") == "user":
-                conv.history.pop()
-            raise
+                if prefill_ids:
+                    t0 = time.perf_counter()
+                    prompt_ids = mx.array([prefill_ids])
+                    hidden = self.model.model.embed_tokens(prompt_ids)
+                    hidden = await self._pipeline(conv.id, hidden, my_gen)
+                    logits = self._head(hidden[:, -1:, :])
+                    token = self._sample(logits[0, -1], temperature)
+                    conv.token_count = len(target_seq)
+                    if attempt == 0:
+                        first_prefill_tokens = len(prefill_ids)
+                        first_prefill_ms = (time.perf_counter() - t0) * 1000
+                else:
+                    raise RuntimeError(
+                        "no tokens to prefill — caches are inconsistent"
+                    )
+
+                if decode_start_ts is None:
+                    decode_start_ts = time.perf_counter()
+
+                while (len(response_tokens) < max_new_tokens
+                       and token not in stop_ids):
+                    text = self.tokenizer.decode([token])
+                    if on_token is not None:
+                        await on_token(text)
+                    response_tokens.append(token)
+                    next_in = mx.array([[token]])
+                    next_hidden = self.model.model.embed_tokens(next_in)
+                    hidden = await self._pipeline(conv.id, next_hidden, my_gen)
+                    conv.token_count += 1
+                    logits = self._head(hidden[:, -1:, :])
+                    token = self._sample(logits[0, -1], temperature)
+
+                terminator = (token if token in stop_ids
+                              else self._primary_eos())
+                term_in = mx.array([[terminator]])
+                term_hidden = self.model.model.embed_tokens(term_in)
+                await self._pipeline(conv.id, term_hidden, my_gen)
+                response_tokens.append(terminator)
+                conv.token_count += 1
+                break
+
+            except (ConnectionError, TopologyChanged) as e:
+                attempt += 1
+                ui.notice(
+                    f"turn interrupted (attempt {attempt}, {e}); reconciling…"
+                )
+                conv.token_count = 0
+                await asyncio.sleep(0.1)
+                await self._pool_ready.wait()
+
+        elapsed_ms = ((time.perf_counter() - decode_start_ts) * 1000
+                      if decode_start_ts else 0.0)
+        # response_tokens includes the trailing terminator (so the cache
+        # ends the turn cleanly), but we don't want it in the user-facing
+        # text — strip the last token.
+        response_text = self.tokenizer.decode(response_tokens[:-1])
+        return response_text, {
+            "prefill_tokens": first_prefill_tokens,
+            "prefill_ms": first_prefill_ms,
+            "decode_tokens": len(response_tokens) - 1,
+            "decode_ms": elapsed_ms,
+            "recoveries": attempt,
+        }
 
     async def _pipeline(self, conv_id: str, hidden: mx.array, my_gen: int) -> mx.array:
         if my_gen != self._topology_gen:
