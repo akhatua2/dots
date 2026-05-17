@@ -26,7 +26,7 @@ from . import ui
 from .peer import PeerConnection
 from .protocol import decode_array, encode_array
 from .shard import Shard, ShardSpec
-from .util import free_ram_gb, load_or_create_identity
+from .util import free_ram_gb, load_or_create_identity, save_last_hub
 
 log = logging.getLogger("dots.worker")
 
@@ -42,12 +42,18 @@ class Worker:
         max_tokens: int = 128,
         headless: bool = False,
         identity: str | None = None,
+        max_load_gb: float | None = None,
     ):
         self.hub_host = hub_host
         self.hub_port = hub_port
         self.one_shot = one_shot
         self.max_tokens = max_tokens
         self.headless = headless
+        # Max RAM (gigabytes) this worker will commit to model weights.
+        # None means no cap — the hub may assign us anywhere from 1 layer
+        # to the whole model. The cap is the user's promise to the pool;
+        # the hub uses it as a constraint in the layer planner.
+        self.max_load_gb = max_load_gb
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
@@ -96,16 +102,24 @@ class Worker:
         self.conn = PeerConnection(
             reader, writer, f"{self.hub_host}:{self.hub_port}", self._handle,
         )
-        ack = await self.conn.call(
-            "hello",
-            worker_id=self.identity,
-            free_ram_gb=free_ram_gb(),
-        )
+        hello_payload: dict = {
+            "worker_id": self.identity,
+            "free_ram_gb": free_ram_gb(),
+        }
+        if self.max_load_gb is not None:
+            hello_payload["max_load_gb"] = float(self.max_load_gb)
+        ack = await self.conn.call("hello", **hello_payload)
         if ack.get("kind") != "hello_ack":
             raise RuntimeError(f"unexpected HELLO response: {ack}")
         self.model_id = ack.get("model_id")
         self.n_layers = ack.get("n_layers")
         ui.info(f"hub accepted; model={self.model_id} ({self.n_layers} layers)")
+        # Persist this hub address so the next `dots chat` / `dots worker`
+        # invocation can default to it when the user omits the argument.
+        try:
+            save_last_hub(f"{self.hub_host}:{self.hub_port}")
+        except Exception:
+            log.debug("failed to persist last_hub", exc_info=True)
         await self._welcome.wait()
 
     async def wait_until_disconnected(self) -> None:
