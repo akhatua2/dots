@@ -57,6 +57,7 @@ class Participant:
     addr: str
     free_ram_gb: float
     conn: PeerConnection
+    compute: bool = True                       # contributes layers to the pool
     max_load_gb: float | None = None           # None == no cap
     layer_range: tuple[int, int] | None = None
     ready: bool = False
@@ -245,6 +246,9 @@ class Hub:
         free_ram = float(hello_msg.get("free_ram_gb", 0.0))
         max_load_raw = hello_msg.get("max_load_gb")
         max_load_gb = float(max_load_raw) if max_load_raw is not None else None
+        # Default to compute=True if the client didn't say (so pre-PR-5
+        # workers keep behaving the same way).
+        compute = bool(hello_msg.get("compute", True))
 
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
@@ -259,11 +263,12 @@ class Hub:
                     pass
             participant = Participant(
                 id=worker_id, addr=addr_str, free_ram_gb=free_ram,
-                max_load_gb=max_load_gb, conn=conn,
+                compute=compute, max_load_gb=max_load_gb, conn=conn,
             )
             self.participants[worker_id] = participant
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
-        ui.notice(f"w[{participant.short_id}] joined "
+        role = "worker" if compute else "client"
+        ui.notice(f"{role}[{participant.short_id}] joined "
                   f"({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
@@ -279,7 +284,8 @@ class Hub:
                 # takeover-on-reconnect case.
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
-            ui.notice(f"w[{participant.short_id}] left")
+            left_role = "worker" if participant.compute else "client"
+            ui.notice(f"{left_role}[{participant.short_id}] left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
@@ -287,7 +293,12 @@ class Hub:
     async def _on_pool_changed(self) -> None:
         async with self._pool_lock:
             self._topology_gen += 1
-            workers = sorted(self.participants.values(), key=lambda w: w.id)
+            # Only compute-contributing participants get layers assigned;
+            # pure chat clients are tracked for their conversations only.
+            workers = sorted(
+                (p for p in self.participants.values() if p.compute),
+                key=lambda w: w.id,
+            )
             # Crucial: clear pool_ready *here*, not just on empty-pool. Any
             # topology change makes every worker's layer assignment stale
             # until LOAD_SHARD finishes; the retry path in _turn must wait
@@ -296,7 +307,7 @@ class Hub:
             # and over — the bug the user observed as 'their their their').
             self._pool_ready.clear()
             if not workers:
-                ui.notice("pool empty — waiting for workers")
+                ui.notice("no compute workers — waiting")
                 return
 
             caps = self._compute_caps(workers)
@@ -352,10 +363,13 @@ class Hub:
             ready_count = sum(1 for w in self.participants.values() if w.ready)
             if ready_count > 0:
                 self._pool_ready.set()
-                plan_str = " → ".join(
-                    f"w{w.id}[{w.layer_range[0]}:{w.layer_range[1]}]"
+                # Avoid `[uuid][a:b]` here — rich's markup parser would
+                # try to interpret the bracketed UUID as a style tag and
+                # silently swallow it. Use a colon-separated form instead.
+                plan_str = "  →  ".join(
+                    f"w·{w.short_id} layers {w.layer_range[0]}-{w.layer_range[1]}"
                     for w in sorted(self.participants.values(),
-                                    key=lambda x: x.layer_range[0])
+                                    key=lambda x: (x.layer_range or (0, 0))[0])
                     if w.ready and w.layer_range
                 )
                 ui.notice(f"pool ready ({ready_count}): {plan_str}")

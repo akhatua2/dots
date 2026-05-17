@@ -26,7 +26,13 @@ from . import ui
 from .peer import PeerConnection
 from .protocol import decode_array, encode_array
 from .shard import Shard, ShardSpec
-from .util import free_ram_gb, load_or_create_identity, save_last_hub
+from .util import (
+    clear_worker_pid,
+    free_ram_gb,
+    load_or_create_identity,
+    save_last_hub,
+    write_worker_pid,
+)
 
 log = logging.getLogger("dots.worker")
 
@@ -43,6 +49,7 @@ class Worker:
         headless: bool = False,
         identity: str | None = None,
         max_load_gb: float | None = None,
+        compute: bool = True,
     ):
         self.hub_host = hub_host
         self.hub_port = hub_port
@@ -54,6 +61,11 @@ class Worker:
         # to the whole model. The cap is the user's promise to the pool;
         # the hub uses it as a constraint in the layer planner.
         self.max_load_gb = max_load_gb
+        # Whether this Worker hosts a model shard and participates in
+        # the compute pool. Setting False makes it a pure chat client:
+        # the hub assigns it a conversation but skips layer planning,
+        # so LOAD_SHARD / COMPUTE never arrive.
+        self.compute = compute
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
@@ -105,6 +117,7 @@ class Worker:
         hello_payload: dict = {
             "worker_id": self.identity,
             "free_ram_gb": free_ram_gb(),
+            "compute": bool(self.compute),
         }
         if self.max_load_gb is not None:
             hello_payload["max_load_gb"] = float(self.max_load_gb)
@@ -265,6 +278,9 @@ class Worker:
         return {"kind": "error", "error": f"unknown kind: {kind}"}
 
     async def _handle_load_shard(self, msg: dict) -> dict:
+        if not self.compute:
+            return {"kind": "error",
+                    "error": "this client doesn't host compute"}
         spec = ShardSpec(
             model_id=msg["model_id"],
             layer_start=int(msg["layer_start"]),
@@ -278,6 +294,9 @@ class Worker:
         return {"kind": "ready", "n_layers": self.shard.n_layers}
 
     async def _handle_compute(self, msg: dict) -> dict:
+        if not self.compute:
+            return {"kind": "error",
+                    "error": "this client doesn't host compute"}
         async with self._shard_lock:
             if self.shard is None:
                 return {"kind": "error", "error": "no shard loaded"}
