@@ -48,29 +48,74 @@ from .util import free_ram_gb
 INDENT = "  "
 
 
-class _Indenter:
-    """Prefixes every line of streamed text with INDENT. Tracks whether the
-    next character is at the start of a line."""
+class _Wrapper:
+    """Streaming word-wrapper that keeps every emitted visual line at the
+    same left margin. Buffers partial words until a space/newline arrives,
+    so wrapping happens at real word boundaries even when tokens split
+    mid-word (which they routinely do)."""
 
-    def __init__(self, indent: str = INDENT):
+    def __init__(self, indent: str = INDENT, width: int = 80):
         self.indent = indent
-        self.at_line_start = True
+        self.width = max(20, width)
+        self._reset()
 
-    def feed(self, text: str) -> str:
-        if not text:
-            return ""
-        out: list[str] = []
-        for ch in text:
-            if self.at_line_start:
-                out.append(self.indent)
-                self.at_line_start = False
-            out.append(ch)
-            if ch == "\n":
-                self.at_line_start = True
-        return "".join(out)
+    def _reset(self) -> None:
+        self.cur_col = 0
+        self.at_line_start = True
+        self.word_buf = ""
 
     def reset(self) -> None:
-        self.at_line_start = True
+        self._reset()
+
+    def set_width(self, width: int) -> None:
+        self.width = max(20, width)
+
+    def feed(self, text: str) -> str:
+        out: list[str] = []
+        for ch in text:
+            if ch == "\n":
+                self._flush_word(out)
+                out.append("\n")
+                self.at_line_start = True
+                self.cur_col = 0
+            elif ch == " " or ch == "\t":
+                self._flush_word(out)
+                if self.at_line_start:
+                    continue          # don't start a line with whitespace
+                if self.cur_col + 1 > self.width:
+                    out.append("\n")
+                    self.at_line_start = True
+                    self.cur_col = 0
+                else:
+                    out.append(ch)
+                    self.cur_col += 1
+            else:
+                self.word_buf += ch
+        return "".join(out)
+
+    def _flush_word(self, out: list[str]) -> None:
+        if not self.word_buf:
+            return
+        word, self.word_buf = self.word_buf, ""
+        if self.at_line_start:
+            out.append(self.indent)
+            self.cur_col = len(self.indent)
+            self.at_line_start = False
+        # Wrap to next line if the word doesn't fit on this one (but only
+        # if we'd actually save space — a word longer than the wrap width
+        # just gets emitted as-is).
+        if (self.cur_col + len(word) > self.width
+                and self.cur_col > len(self.indent)):
+            out.append("\n")
+            out.append(self.indent)
+            self.cur_col = len(self.indent)
+        out.append(word)
+        self.cur_col += len(word)
+
+    def flush(self) -> str:
+        out: list[str] = []
+        self._flush_word(out)
+        return "".join(out)
 
 log = logging.getLogger("dots.worker")
 
@@ -285,7 +330,8 @@ class Worker:
     ) -> None:
         history_buf = Buffer()
         input_buf = Buffer(multiline=False)
-        indenter = _Indenter()
+        # Response indent is 4 (under "  › ") and we wrap at the terminal width.
+        wrapper = _Wrapper(indent=INDENT + "  ", width=_ttysize()[0] - 1)
         prompt_queue: asyncio.Queue[str] = asyncio.Queue()
         generating = {"flag": False}     # mutable so closures can flip it
 
@@ -299,9 +345,15 @@ class Worker:
                                  bypass_readonly=True)
 
         def append_history(text: str) -> None:
+            # Auto-follow when the cursor is already at the end. If the user
+            # scrolled up to read past content, leave the cursor where they
+            # parked it so the view doesn't snap back to the bottom on every
+            # streamed token.
+            was_at_end = history_buf.cursor_position == len(history_buf.text)
             new_text = history_buf.text + text
+            new_cursor = len(new_text) if was_at_end else history_buf.cursor_position
             history_buf.set_document(
-                Document(new_text, cursor_position=len(new_text)),
+                Document(new_text, cursor_position=new_cursor),
                 bypass_readonly=True,
             )
             if self._app is not None:
@@ -350,10 +402,48 @@ class Worker:
             # we just clear the input. Real cancellation is a v2 feature.
             input_buf.reset()
 
+        # ── Scrolling: move the history buffer's cursor; the Window scrolls
+        #    to keep that cursor visible. Auto-follow (cursor at end) resumes
+        #    naturally once the user scrolls all the way back to the bottom.
+        def _scroll(rows: int) -> None:
+            doc = history_buf.document
+            target_row = max(0, doc.cursor_position_row + rows)
+            target_col = 0
+            new_pos = doc.translate_row_col_to_index(target_row, target_col)
+            history_buf.cursor_position = max(0, min(len(history_buf.text), new_pos))
+
+        @kb.add("pageup")
+        def _pgup(event):
+            _scroll(-10)
+
+        @kb.add("pagedown")
+        def _pgdn(event):
+            _scroll(10)
+
+        @kb.add("up")
+        def _up(event):
+            _scroll(-1)
+
+        @kb.add("down")
+        def _down(event):
+            _scroll(1)
+
+        @kb.add("home")
+        def _home(event):
+            history_buf.cursor_position = 0
+
+        @kb.add("end")
+        def _end(event):
+            history_buf.cursor_position = len(history_buf.text)
+
+        # History shrinks to its content; the input box sits right under it.
+        # The trailing empty Window absorbs any unused screen real estate so
+        # the box doesn't get yanked to the terminal's bottom edge when the
+        # conversation is short.
         layout = Layout(
             HSplit([
                 Window(BufferControl(history_buf, focusable=False),
-                       wrap_lines=True),
+                       wrap_lines=False, dont_extend_height=True),
                 Window(FormattedTextControl(top_rule), height=1),
                 Window(
                     BufferControl(
@@ -366,6 +456,7 @@ class Worker:
                 ),
                 Window(FormattedTextControl(bottom_rule), height=1),
                 Window(FormattedTextControl(status_text), height=1),
+                Window(),
             ]),
             focused_element=input_buf,
         )
@@ -391,14 +482,19 @@ class Worker:
                         pass
                     append_history(f"{INDENT}[conversation reset]\n\n")
                     continue
-                indenter.reset()
+                wrapper.set_width(_ttysize()[0] - 1)
+                wrapper.reset()
                 generating["flag"] = True
                 self._app.invalidate()
                 try:
                     _, resp = await self._send_prompt_streaming(
                         user_msg,
-                        on_token=lambda t: append_history(indenter.feed(t)),
+                        on_token=lambda t: append_history(wrapper.feed(t)),
                     )
+                    # Flush any final partial word that didn't end on a space.
+                    tail = wrapper.flush()
+                    if tail:
+                        append_history(tail)
                     decode_tokens = int(resp.get("decode_tokens", 0))
                     decode_s = float(resp.get("decode_ms", 0)) / 1000.0
                     if decode_tokens > 0 and decode_s > 0:
