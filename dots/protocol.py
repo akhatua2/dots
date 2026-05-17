@@ -41,37 +41,38 @@ async def write_msg(writer: asyncio.StreamWriter, msg: dict[str, Any]) -> None:
     await writer.drain()
 
 
+_BF16_WIRE = "bfloat16"
+
+
 def encode_array(x: mx.array) -> dict[str, Any]:
-    """mlx.array -> wire dict. bfloat16 isn't representable in numpy, so we
-    transport it as float16 and restore the original dtype on the other side."""
+    """mlx.array -> wire dict, lossless for every dtype we use.
+
+    For bfloat16 we *bit-cast* to uint16 and ship the raw 16-bit pattern.
+    The earlier scheme of casting bf16 → fp16 → bf16 truncated the lower
+    3 mantissa bits on each round-trip; over a few hundred decode hops
+    that drift was enough to push sampling into a repetition attractor
+    after a re-prefill following a worker drop.
+    """
     mx.eval(x)
-    orig_dtype = str(x.dtype).replace("mlx.core.", "")
     if x.dtype == mx.bfloat16:
-        wire_x = x.astype(mx.float16)
-        wire_dtype = "float16"
-    else:
-        wire_x = x
-        wire_dtype = orig_dtype
-    arr = np.array(wire_x)  # forced copy, safe across all mlx dtypes
+        u16 = x.view(mx.uint16)
+        arr = np.array(u16)
+        return {
+            "shape": list(arr.shape),
+            "dtype": _BF16_WIRE,
+            "data": arr.tobytes(),
+        }
+    arr = np.array(x)
     return {
         "shape": list(arr.shape),
-        "dtype": wire_dtype,
-        "orig_dtype": orig_dtype,
+        "dtype": str(arr.dtype),
         "data": arr.tobytes(),
     }
 
 
-_MLX_DTYPES = {
-    "float32": mx.float32, "float16": mx.float16, "bfloat16": mx.bfloat16,
-    "int32": mx.int32, "int8": mx.int8, "uint8": mx.uint8, "int64": mx.int64,
-}
-
-
 def decode_array(d: dict[str, Any]) -> mx.array:
+    if d["dtype"] == _BF16_WIRE:
+        arr = np.frombuffer(d["data"], dtype=np.uint16).reshape(d["shape"])
+        return mx.array(arr.copy()).view(mx.bfloat16)
     arr = np.frombuffer(d["data"], dtype=np.dtype(d["dtype"])).reshape(d["shape"])
-    # frombuffer returns a read-only view; copy so mlx owns the memory.
-    out = mx.array(arr.copy())
-    orig = d.get("orig_dtype")
-    if orig and orig != d["dtype"] and orig in _MLX_DTYPES:
-        out = out.astype(_MLX_DTYPES[orig])
-    return out
+    return mx.array(arr.copy())

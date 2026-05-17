@@ -114,14 +114,14 @@ class Hub:
     # ───────────────────────────── lifecycle ─────────────────────────────
 
     async def start(self) -> None:
-        ui.info(f"loading model {self.model_id} on hub…")
+        ui.notice(f"loading model {self.model_id} on hub…")
         self.model, self.tokenizer = await asyncio.to_thread(mlx_load, self.model_id)
         self.n_layers = len(self.model.model.layers)
-        ui.info(f"model ready ({self.n_layers} layers)")
+        ui.notice(f"model ready ({self.n_layers} layers)")
 
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-        ui.info(f"hub listening on {addrs} — waiting for workers to join")
+        ui.notice(f"hub listening on {addrs} — waiting for workers to join")
         self.started.set()
         try:
             await server.serve_forever()
@@ -174,7 +174,7 @@ class Hub:
         )
         async with self._pool_lock:
             self.participants[worker_id] = participant
-        ui.info(f"w{worker_id} joined ({addr_str}, free_ram={free_ram:.1f}GB)")
+        ui.notice(f"w{worker_id} joined ({addr_str}, free_ram={free_ram:.1f}GB)")
         await self._on_pool_changed()
         # Tell this worker which conv_id we assigned them, so the chat REPL
         # knows what to send back.
@@ -188,7 +188,7 @@ class Hub:
         finally:
             async with self._pool_lock:
                 self.participants.pop(worker_id, None)
-            ui.info(f"w{worker_id} left")
+            ui.notice(f"w{worker_id} left")
             await self._on_pool_changed()
 
     # ─────────────────────────── re-plan on change ──────────────────────
@@ -246,7 +246,7 @@ class Hub:
                                     key=lambda x: x.layer_range[0])
                     if w.ready and w.layer_range
                 )
-                ui.info(f"pool ready ({ready_count}): {plan_str}")
+                ui.notice(f"pool ready ({ready_count}): {plan_str}")
             else:
                 self._pool_ready.clear()
 
@@ -388,9 +388,8 @@ class Hub:
                     # remains. We retry without a cap; only the chatter going
                     # away (caught at the top of the loop) stops us.
                     attempt += 1
-                    log.info(
-                        "w%d turn interrupted (attempt %d, %s); reconciling…",
-                        p.id, attempt, e,
+                    ui.notice(
+                        f"w{p.id} turn interrupted (attempt {attempt}, {e}); reconciling…"
                     )
                     # _on_pool_changed already reset token_count to 0 for
                     # every conv; force it again defensively in case our
