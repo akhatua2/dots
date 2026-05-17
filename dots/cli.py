@@ -207,6 +207,78 @@ def _do_account_create() -> None:
     sys.stdout.write(f"saved to:   {account_file}\n")
 
 
+# ─────────────────────────── credits subcommand ─────────────────────────────
+
+
+def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
+    """`dots credits` — query the hub's /v1/credits endpoint and print
+    either your account balance or, with --all, every account."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    # The credits subcommand talks HTTP (not the dots TCP protocol).
+    # Default port for the OpenAI-compatible API is 8080. If the user
+    # passed only a host:port, we trust them. Otherwise resolve via
+    # last_hub but swap the port for 8080.
+    if hub_arg:
+        host, _, port_s = hub_arg.rpartition(":")
+        if not host or not port_s:
+            sys.stderr.write(f"expected host:port, got {hub_arg!r}\n")
+            sys.exit(2)
+        host, port = host, int(port_s)
+    else:
+        saved = load_last_hub()
+        if saved is None:
+            sys.stderr.write("no hub address given and no remembered hub\n")
+            sys.exit(2)
+        host = saved.rsplit(":", 1)[0]
+        port = 8080  # convention: HTTP API on 8080
+
+    url = f"http://{host}:{port}/v1/credits"
+    try:
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        sys.stderr.write(f"could not reach {url}: {e}\n")
+        sys.stderr.write("(the hub may not have --http-port enabled)\n")
+        sys.exit(1)
+
+    my_account = load_or_create_account()
+    accounts = data.get("accounts", {})
+
+    if show_all:
+        if not accounts:
+            sys.stdout.write("(ledger is empty)\n")
+            return
+        rows = sorted(accounts.items(),
+                      key=lambda kv: kv[1].get("balance", 0), reverse=True)
+        sys.stdout.write(f"{'account':<40} {'alias':<15} "
+                         f"{'earned':>8} {'spent':>8} {'balance':>8}\n")
+        for aid, a in rows:
+            marker = " ← you" if aid == my_account else ""
+            alias = a.get("alias") or "—"
+            sys.stdout.write(
+                f"{aid:<40} {alias:<15} "
+                f"{a.get('earned_lifetime', 0):>8} "
+                f"{a.get('spent_lifetime', 0):>8} "
+                f"{a.get('balance', 0):>8}{marker}\n"
+            )
+        return
+
+    mine = accounts.get(my_account)
+    if mine is None:
+        sys.stdout.write(f"account {my_account}: no activity yet\n")
+        return
+    sys.stdout.write(f"account: {my_account}\n")
+    sys.stdout.write(f"alias:   {mine.get('alias') or '(unset)'}\n")
+    sys.stdout.write(f"earned:  {mine.get('earned_lifetime', 0)} CU "
+                     f"across {mine.get('turns_as_worker', 0)} turns as a worker\n")
+    sys.stdout.write(f"spent:   {mine.get('spent_lifetime', 0)} CU "
+                     f"across {mine.get('turns_as_querier', 0)} turns as a querier\n")
+    sys.stdout.write(f"balance: {mine.get('balance', 0)} CU\n")
+
+
 # ────────────────────────────────── main ────────────────────────────────────
 
 
@@ -269,6 +341,19 @@ def main() -> None:
              "defaults to no cap.",
     )
 
+    p_credits = sub.add_parser(
+        "credits",
+        help="show your CU balance from a hub's /v1/credits endpoint.",
+    )
+    p_credits.add_argument(
+        "hub", nargs="?", default=None,
+        help="hub HTTP api as host:port (defaults to last hub on port 8080)",
+    )
+    p_credits.add_argument(
+        "--all", action="store_true",
+        help="show every account, not just yours",
+    )
+
     p_account = sub.add_parser(
         "account",
         help="manage this device's dots account (who earns/spends CU).",
@@ -309,6 +394,10 @@ def main() -> None:
             asyncio.run(hub.start())
         except KeyboardInterrupt:
             sys.exit(0)
+        return
+
+    if args.cmd == "credits":
+        _do_credits(args.hub, show_all=args.all)
         return
 
     if args.cmd == "account":

@@ -246,6 +246,39 @@ Press `Ctrl+C` to exit.
 
 ---
 
+## Accounts and CU (credits)
+
+Every contribution and query is attributed to an **account** (a human
+owner, separate from per-device worker IDs). The hub runs a closed credit
+economy: contributing earns CU, querying spends CU. Per-turn, credits and
+debits exactly match, so the pool sum is always zero.
+
+Optional one-time setup on each Mac:
+
+```bash
+.venv/bin/dots account create     # interactive: name, email, optional password
+.venv/bin/dots account show       # see what's stored
+```
+
+With a **password**, your account_id is deterministically derived from
+name + email + password. Same inputs → same account_id. If you lose
+`~/.dots/account`, re-running `dots account create` with the same inputs
+restores your account (and any credit history attached to it).
+
+Name and email stay local; only `account_id` and an optional `alias`
+travel over the network.
+
+To check balances (requires hub run with `--http-port`):
+
+```bash
+.venv/bin/dots credits HUB:8080            # your balance
+.venv/bin/dots credits HUB:8080 --all      # whole leaderboard
+```
+
+The full design is in [`plans/compute-units-ledger.md`](./plans/compute-units-ledger.md).
+
+---
+
 ## How fast will it be?
 
 Speed depends on two things: **how powerful each Mac is**, and **how fast the

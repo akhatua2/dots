@@ -33,8 +33,10 @@ import mlx.core as mx
 from mlx_lm import load as mlx_load
 
 from . import ui
+from .ledger import Ledger
 from .peer import PeerConnection
 from .protocol import decode_array, encode_array
+from .util import dots_home
 
 log = logging.getLogger("dots.hub")
 
@@ -171,6 +173,7 @@ class Hub:
         model_id: str,
         host: str = "0.0.0.0",
         http_port: int | None = None,
+        ledger_path=None,
     ):
         self.host = host
         self.port = port
@@ -192,6 +195,14 @@ class Hub:
         # for callers (tests, embeddings) that want a deterministic ready signal.
         self.started = asyncio.Event()
         self._topology_gen = 0
+        # Closed credit-unit economy. Persists per-account totals + a
+        # per-turn audit log. Tests pass an explicit path so they don't
+        # touch the developer's real ~/.dots/credits.json.
+        self.ledger = Ledger(ledger_path or (dots_home() / "credits.json"))
+        # Monotonic turn counter; used as the per-conv turn_idx in the
+        # ledger. Conversations carry their own count too; we rely on
+        # this for the ledger entry key.
+        self._turn_counter: dict[str, int] = {}
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -483,7 +494,47 @@ class Hub:
             return {"kind": "error", "error": str(e)}
 
         conv.history.append({"role": "assistant", "content": response_text})
+        # Closed-economy attribution. After a successful turn, credit each
+        # compute worker by (layers_owned × total_tokens) and debit the
+        # querier the same total. Quiet failure if anything goes wrong —
+        # the user-visible response should not be blocked by ledger I/O.
+        try:
+            self._attribute_turn(conv=conv, participant=participant, stats=stats)
+        except Exception:
+            log.exception("ledger attribution failed for %s", worker_id)
         return {"kind": "turn_done", **stats}
+
+    def _attribute_turn(
+        self, conv: "Conversation", participant: "Participant", stats: dict,
+    ) -> None:
+        """Record one successful turn in the ledger. Computes the plan
+        snapshot from currently-ready compute workers (post-turn state),
+        credits each by its layer share, and debits the querier."""
+        plan: list[tuple[str, str | None, int]] = []
+        total_layers_assigned = 0
+        for p in self.participants.values():
+            if not (p.compute and p.ready and p.layer_range and p.account_id):
+                continue
+            layers_owned = p.layer_range[1] - p.layer_range[0]
+            plan.append((p.account_id, p.account_alias, layers_owned))
+            total_layers_assigned += layers_owned
+        if not plan or total_layers_assigned == 0:
+            return  # nothing to attribute (e.g. failure or no compute)
+        if not participant.account_id:
+            log.debug("skipping ledger entry — chat client has no account_id")
+            return
+
+        self._turn_counter[conv.id] = self._turn_counter.get(conv.id, 0) + 1
+        self.ledger.record_turn(
+            conv_id=conv.id,
+            turn_idx=self._turn_counter[conv.id],
+            querier_account=participant.account_id,
+            querier_alias=participant.account_alias,
+            plan=plan,
+            prefill_tokens=int(stats.get("prefill_tokens", 0)),
+            decode_tokens=int(stats.get("decode_tokens", 0)),
+            total_layers=total_layers_assigned,
+        )
 
     async def _on_reset(self, worker_id: str) -> dict:
         async with self._pool_lock:

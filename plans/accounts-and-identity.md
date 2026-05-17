@@ -2,13 +2,14 @@
 
 | | |
 |---|---|
-| **Status** | in-progress |
+| **Status** | done (PR #9) |
 | **Effort** | S |
 | **Complexity** | low |
 | **Risk** | low |
 | **Depends on** | none |
 | **Unlocks** | [[compute-units-ledger]] |
 | **Branch** | `feat/accounts-and-identity` |
+| **PR** | #9 |
 
 ## Why
 
