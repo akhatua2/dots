@@ -398,9 +398,10 @@ class Worker:
 
         @kb.add("c-c")
         def _on_ctrl_c(event):
-            # If a generation is in-flight, this signals "abort" — for v1
-            # we just clear the input. Real cancellation is a v2 feature.
-            input_buf.reset()
+            # Same as Ctrl-D: exit the chat and disconnect from the hub.
+            # (Mid-turn cancellation of the in-flight generation is a v2
+            # feature; v1 just exits cleanly.)
+            event.app.exit()
 
         # ── Scrolling: move the history buffer's cursor; the Window scrolls
         #    to keep that cursor visible. Auto-follow (cursor at end) resumes
