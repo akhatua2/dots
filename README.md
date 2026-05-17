@@ -172,11 +172,18 @@ ready (24 layers)
 
 **Leave this Terminal window open.** Closing it shuts down the hub.
 
-If you want the OpenAI-compatible HTTP API too (so you can point apps like
-Continue, Cursor, LangChain, or plain `curl` at dots):
+The hub also serves an OpenAI-compatible HTTP API on port `8080` by default
+(so you can point apps like Continue, Cursor, LangChain, or plain `curl` at
+dots without any extra flags). To use a different port:
 
 ```bash
-.venv/bin/dots hub --http-port 8080
+.venv/bin/dots hub --http-port 9090
+```
+
+Or to disable it entirely:
+
+```bash
+.venv/bin/dots hub --http-port 0
 ```
 
 ---
@@ -268,7 +275,7 @@ restores your account (and any credit history attached to it).
 Name and email stay local; only `account_id` and an optional `alias`
 travel over the network.
 
-To check balances (requires hub run with `--http-port`):
+To check balances (the HTTP API is on by default on port 8080):
 
 ```bash
 .venv/bin/dots credits HUB:8080            # your balance

@@ -271,13 +271,10 @@ exactly what's credited to the workers that participated — so a solo user
 in their own pool always nets to zero, and across a friend pool credits
 flow naturally from heavy users to heavy contributors.
 
-To see your balance (requires the hub to be running with `--http-port`):
+The hub exposes an HTTP API on port `8080` by default (pass `--http-port 0`
+to disable). Check balances from any Mac:
 
 ```bash
-# Restart the hub with the HTTP API enabled:
-.venv/bin/dots hub --http-port 8080
-
-# Then from any Mac:
 .venv/bin/dots credits HUB_ADDRESS:8080            # your balance
 .venv/bin/dots credits HUB_ADDRESS:8080 --all      # everyone's
 ```
