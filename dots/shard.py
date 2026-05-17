@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 from mlx_lm import load as mlx_load
+from mlx_lm.models.base import create_attention_mask
 from mlx_lm.models.cache import make_prompt_cache
 
 
@@ -43,8 +44,15 @@ class Shard:
 
     def run_layers(self, hidden: mx.array) -> mx.array:
         # hidden: [batch, seq, hidden]. Mutates self.cache for our layer range.
-        for i in range(self.spec.layer_start, self.spec.layer_end):
-            hidden = self.model.model.layers[i](hidden, cache=self.cache[i])
+        # The causal mask depends on the current cache offset; create it from
+        # the slice of cache entries we'll actually use so positions line up.
+        cache_slice = [self.cache[i] for i in
+                       range(self.spec.layer_start, self.spec.layer_end)]
+        mask = create_attention_mask(hidden, cache_slice)
+        for idx, i in enumerate(range(self.spec.layer_start, self.spec.layer_end)):
+            hidden = self.model.model.layers[i](
+                hidden, mask=mask, cache=cache_slice[idx]
+            )
         return hidden
 
     def head(self, hidden: mx.array) -> mx.array:

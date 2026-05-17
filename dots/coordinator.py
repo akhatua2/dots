@@ -157,6 +157,13 @@ class DotsCluster:
             await write_msg(r.writer, {"kind": "reset_kv"})
             await read_msg(r.reader)  # consume "ok"
 
+    @staticmethod
+    def _sample(logits_row: mx.array, temperature: float) -> int:
+        """Sample one token id. logits_row is 1-D (last position logits)."""
+        if temperature <= 0:
+            return int(mx.argmax(logits_row, axis=-1).item())
+        return int(mx.random.categorical(logits_row / temperature).item())
+
     def _stop_token_ids(self) -> set[int]:
         """Collect every token id we treat as end-of-turn.
 
@@ -177,8 +184,9 @@ class DotsCluster:
                 ids.add(tid)
         return ids
 
-    async def generate(self, prompt: str, max_new_tokens: int = 128) -> None:
-        """Stream generation to stdout. Greedy sampling for the PoC."""
+    async def generate(self, prompt: str, max_new_tokens: int = 128,
+                       temperature: float = 0.7) -> None:
+        """Stream generation to stdout. Sampling = temperature; greedy if temp<=0."""
         tokenizer = self.local.tokenizer
         # Use the chat template if the tokenizer has one.
         if hasattr(tokenizer, "apply_chat_template"):
@@ -198,7 +206,7 @@ class DotsCluster:
         with ui.console.status("[dim]thinking…[/dim]", spinner="dots"):
             hidden = await self._run_pipeline(prompt_ids)
             logits = self.local.head(hidden[:, -1:, :])
-            token = int(mx.argmax(logits, axis=-1).item())
+            token = self._sample(logits[0, -1], temperature)
         prefill_ms = (time.perf_counter() - t0) * 1000
 
         # Decode loop: plain stdout so rich doesn't try to parse token text as markup.
@@ -212,7 +220,7 @@ class DotsCluster:
             next_in = mx.array([[token]])
             hidden = await self._run_pipeline(next_in)
             logits = self.local.head(hidden[:, -1:, :])
-            token = int(mx.argmax(logits, axis=-1).item())
+            token = self._sample(logits[0, -1], temperature)
 
         elapsed = time.perf_counter() - decode_start
         ui.stats(len(tokens_list), prefill_ms, n_decoded, elapsed)
@@ -231,6 +239,7 @@ async def chat(
     worker_addrs: list[tuple[str, int]],
     one_shot: str | None = None,
     max_tokens: int = 128,
+    temperature: float = 0.7,
 ):
     with ui.console.status("[dim]connecting to workers…[/dim]", spinner="dots"):
         cluster = await DotsCluster.assemble(model_id, worker_addrs)
@@ -244,7 +253,8 @@ async def chat(
 
     if one_shot is not None:
         try:
-            await cluster.generate(one_shot, max_new_tokens=max_tokens)
+            await cluster.generate(one_shot, max_new_tokens=max_tokens,
+                                   temperature=temperature)
             ui.console.print()
         finally:
             await cluster.close()
@@ -263,7 +273,8 @@ async def chat(
             prompt = prompt.strip()
             if not prompt:
                 continue
-            await cluster.generate(prompt, max_new_tokens=max_tokens)
+            await cluster.generate(prompt, max_new_tokens=max_tokens,
+                                   temperature=temperature)
             ui.console.print()
     finally:
         await cluster.close()

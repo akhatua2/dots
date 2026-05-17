@@ -55,6 +55,12 @@ def main() -> None:
         default=128,
         help="max tokens to generate per response",
     )
+    p_chat.add_argument(
+        "--temperature",
+        type=float,
+        default=0.7,
+        help="sampling temperature (0 = greedy)",
+    )
 
     args = p.parse_args()
 
@@ -68,7 +74,8 @@ def main() -> None:
         from .coordinator import chat
         try:
             asyncio.run(chat(args.model, args.workers,
-                             one_shot=args.prompt, max_tokens=args.max_tokens))
+                             one_shot=args.prompt, max_tokens=args.max_tokens,
+                             temperature=args.temperature))
         except KeyboardInterrupt:
             sys.exit(0)
 
