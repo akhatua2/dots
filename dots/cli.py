@@ -101,6 +101,12 @@ def main() -> None:
         "hub", nargs="?", default=None,
         help="hub address as host:port; defaults to ~/.dots/last_hub",
     )
+    p_worker.add_argument(
+        "--max-ram", type=float, default=None, metavar="GB",
+        help="maximum gigabytes of model weights this worker will hold. "
+             "the hub treats it as a layer-count cap when planning. "
+             "defaults to no cap.",
+    )
 
     args = p.parse_args()
     _configure_logging(args.verbose)
@@ -131,7 +137,7 @@ def main() -> None:
         except KeyboardInterrupt:
             sys.exit(0)
     elif args.cmd == "worker":
-        worker = Worker(host, port, headless=True)
+        worker = Worker(host, port, headless=True, max_load_gb=args.max_ram)
         try:
             asyncio.run(worker.start())
         except KeyboardInterrupt:

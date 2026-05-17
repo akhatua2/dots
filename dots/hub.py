@@ -57,6 +57,7 @@ class Participant:
     addr: str
     free_ram_gb: float
     conn: PeerConnection
+    max_load_gb: float | None = None           # None == no cap
     layer_range: tuple[int, int] | None = None
     ready: bool = False
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
@@ -70,30 +71,78 @@ class TopologyChanged(Exception):
     """Raised inside a turn when the pool changed under our feet."""
 
 
-def plan_layers(weights: list[float], n_layers: int) -> list[tuple[int, int]]:
-    """Split n_layers into len(weights) contiguous ranges, proportional to
-    weights. Each range gets at least 1 layer; rounding drift goes to the last."""
+def plan_layers(
+    weights: list[float],
+    n_layers: int,
+    caps: list[int] | None = None,
+) -> list[tuple[int, int]] | None:
+    """Split n_layers into len(weights) contiguous ranges proportional to
+    weights, optionally honoring a per-worker layer cap.
+
+    If `caps` is given, each worker's range is capped at caps[i] layers.
+    If the total capacity (sum of caps) is less than n_layers, returns
+    None — the model can't be distributed across this pool.
+    Otherwise returns a list of (start, end) tuples covering [0, n_layers).
+    """
     if not weights:
-        return []
+        return [] if n_layers == 0 else None
+    if caps is not None and sum(caps) < n_layers:
+        return None
+
     total = sum(weights) or 1.0
     raw = [w / total * n_layers for w in weights]
     sizes = [max(1, int(round(r))) for r in raw]
-    sizes[-1] += n_layers - sum(sizes)
-    if sizes[-1] < 1:
-        # Too many participants for too few layers; redistribute by stealing
-        # from the largest range.
-        while sizes[-1] < 1:
-            donor = sizes.index(max(sizes))
-            if sizes[donor] <= 1:
-                break
-            sizes[donor] -= 1
-            sizes[-1] += 1
+    if caps is not None:
+        sizes = [min(sizes[i], caps[i]) for i in range(len(sizes))]
+
+    # Reconcile rounding/cap drift to land on exactly n_layers.
+    while sum(sizes) != n_layers:
+        diff = n_layers - sum(sizes)
+        if diff > 0:
+            # Need more layers somewhere with spare room.
+            if caps is not None:
+                spare = [(caps[i] - sizes[i], i) for i in range(len(sizes))
+                         if caps[i] > sizes[i]]
+                if not spare:
+                    return None
+                _, i = max(spare)
+            else:
+                i = sizes.index(min(sizes))
+            sizes[i] += 1
+        else:
+            # Too many — drop one from a worker that has more than its
+            # minimum (1). Prefer the largest range so the distribution
+            # stays balanced.
+            candidates = [(sizes[i], i) for i in range(len(sizes))
+                          if sizes[i] > 1]
+            if not candidates:
+                return None
+            _, i = max(candidates)
+            sizes[i] -= 1
+
     ranges: list[tuple[int, int]] = []
     cur = 0
     for s in sizes:
         ranges.append((cur, cur + s))
         cur += s
     return ranges
+
+
+def _per_layer_bytes(model, n_layers: int) -> int:
+    """Approximate bytes-per-layer of `model`. Returns 0 if we can't compute
+    it (e.g. test fakes whose Modules don't expose .parameters)."""
+    try:
+        from mlx.utils import tree_flatten
+        total = 0
+        for layer in model.model.layers:
+            params = layer.parameters() if hasattr(layer, "parameters") else {}
+            for _, v in tree_flatten(params):
+                if hasattr(v, "nbytes"):
+                    total += v.nbytes
+        return total // n_layers if n_layers > 0 else 0
+    except Exception:
+        log.debug("per-layer bytes unavailable", exc_info=True)
+        return 0
 
 
 class Hub:
@@ -105,6 +154,10 @@ class Hub:
         self.model = None
         self.tokenizer = None
         self.n_layers = 0
+        # Approximate bytes for a single transformer block, computed once
+        # after the model loads. Used to translate a worker's max_load_gb
+        # into a max-layers cap when planning.
+        self.bytes_per_layer = 0
 
         self.participants: dict[str, Participant] = {}
         self._pool_lock = asyncio.Lock()
@@ -120,7 +173,16 @@ class Hub:
         ui.notice(f"loading model {self.model_id} on hub…")
         self.model, self.tokenizer = await asyncio.to_thread(mlx_load, self.model_id)
         self.n_layers = len(self.model.model.layers)
-        ui.notice(f"model ready ({self.n_layers} layers)")
+        self.bytes_per_layer = await asyncio.to_thread(
+            _per_layer_bytes, self.model, self.n_layers,
+        )
+        if self.bytes_per_layer:
+            ui.notice(
+                f"model ready ({self.n_layers} layers, "
+                f"{self.bytes_per_layer / 1e6:.1f} MB / layer)"
+            )
+        else:
+            ui.notice(f"model ready ({self.n_layers} layers)")
 
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
@@ -181,6 +243,8 @@ class Hub:
             return
         wid_holder["id"] = worker_id
         free_ram = float(hello_msg.get("free_ram_gb", 0.0))
+        max_load_raw = hello_msg.get("max_load_gb")
+        max_load_gb = float(max_load_raw) if max_load_raw is not None else None
 
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
@@ -194,10 +258,13 @@ class Hub:
                 except Exception:
                     pass
             participant = Participant(
-                id=worker_id, addr=addr_str, free_ram_gb=free_ram, conn=conn,
+                id=worker_id, addr=addr_str, free_ram_gb=free_ram,
+                max_load_gb=max_load_gb, conn=conn,
             )
             self.participants[worker_id] = participant
-        ui.notice(f"w[{participant.short_id}] joined ({addr_str}, free_ram={free_ram:.1f}GB)")
+        cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
+        ui.notice(f"w[{participant.short_id}] joined "
+                  f"({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
         await self._on_pool_changed()
         try:
             await conn.notify("welcome", conv_id=participant.conv.id)
@@ -232,7 +299,22 @@ class Hub:
                 ui.notice("pool empty — waiting for workers")
                 return
 
-            ranges = plan_layers([w.free_ram_gb for w in workers], self.n_layers)
+            caps = self._compute_caps(workers)
+            ranges = plan_layers(
+                [w.free_ram_gb for w in workers], self.n_layers, caps=caps,
+            )
+            if ranges is None:
+                # Total pool capacity is less than the model needs. Stay
+                # un-ready; the next join may close the gap.
+                total_cap = sum(caps) if caps else 0
+                ui.notice(
+                    f"pool capacity {total_cap} layers < {self.n_layers} required"
+                    f" — waiting for more workers"
+                )
+                for w in workers:
+                    w.layer_range = None
+                    w.ready = False
+                return
             for w, r in zip(workers, ranges, strict=True):
                 w.layer_range = r
                 w.ready = False
@@ -279,6 +361,23 @@ class Hub:
                 ui.notice(f"pool ready ({ready_count}): {plan_str}")
             else:
                 self._pool_ready.clear()
+
+    def _compute_caps(self, workers: list[Participant]) -> list[int] | None:
+        """Translate each worker's max_load_gb into a max-layers count.
+        Returns None if we can't compute per-layer bytes (e.g. fake model
+        in tests) — caller treats no caps as "no constraint"."""
+        if self.bytes_per_layer <= 0:
+            return None
+        if not any(w.max_load_gb is not None for w in workers):
+            return None
+        caps: list[int] = []
+        for w in workers:
+            if w.max_load_gb is None:
+                caps.append(self.n_layers)            # effectively uncapped
+            else:
+                max_l = max(1, int(w.max_load_gb * 1e9 // self.bytes_per_layer))
+                caps.append(min(max_l, self.n_layers))
+        return caps
 
     # ────────────────────────────── one turn ────────────────────────────
 
