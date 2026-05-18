@@ -30,6 +30,7 @@ from .peer import PeerConnection
 from .pool import resource_decl_to_hello_field
 from .scheduler import ResourceDecl
 from .util import (
+    best_peer_listen_host,
     clear_worker_pid,
     effective_tflops_estimate,
     free_ram_gb,
@@ -233,6 +234,13 @@ class Worker:
         }
         if self._peer_listen_port is not None:
             hello_payload["peer_listen_port"] = self._peer_listen_port
+            # Tell the hub the routable IP it should advertise to other
+            # workers for chain-forwarding. Connect-from address breaks
+            # cross-machine setups: a local worker connects to the hub via
+            # loopback, so other workers get told "reach me at 127.0.0.1"
+            # which from THEIR view points at themselves, not at this
+            # worker.
+            hello_payload["peer_listen_host"] = best_peer_listen_host()
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
         ack = await self.conn.call("hello", **hello_payload)
