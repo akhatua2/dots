@@ -420,6 +420,17 @@ class Hub:
                 return self._on_worker_ready(wid, msg)
             if kind == "delegate_token" and wid is not None:
                 return await self._on_delegate_token(wid, msg)
+            if kind == "status":
+                # Used by chat clients to pre-flight: don't show the
+                # input bar until ready. Returns the same simple
+                # {ready, state} a not_ready prompt response would —
+                # state ∈ {"loading", "waiting"} when not ready.
+                if self._pool_ready.is_set():
+                    return {"kind": "status", "ready": True}
+                return {
+                    "kind": "status", "ready": False,
+                    "state": ("loading" if self._current_placement else "waiting"),
+                }
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
 
