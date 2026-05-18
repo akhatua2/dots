@@ -2,9 +2,20 @@
 can show a real progress bar instead of an indefinite spinner.
 
 The download itself is what takes minutes during a first-time
-`load_units`. We surface progress by polling the HuggingFace cache
-directory for `model_id` and comparing total bytes-on-disk to the
-expected total (queried once at start via the HF API).
+`load_units`. We surface progress by polling two on-disk locations
+the HuggingFace stack writes into:
+
+  * `~/.cache/huggingface/hub/models--<repo>/` — the assembled cache.
+    `.incomplete` shards grow here as legacy LFS downloads stream;
+    Xet downloads only land here on file-reconstruction completion.
+  * `~/.cache/huggingface/xet/chunk-cache/` — where `hf_xet` stages
+    deduplicated chunks during transfer. For Xet-backed repos (the
+    common case for the mlx-community models we use), the bulk of
+    download bytes appear here long before any file is reconstructed
+    into the assembled cache.
+
+We measure both, with a per-run baseline on the Xet cache so chunks
+from earlier unrelated downloads don't inflate the bar.
 """
 from __future__ import annotations
 
@@ -45,6 +56,30 @@ def hf_cache_size_for(model_id: str) -> int:
     return total
 
 
+def xet_chunk_cache_size() -> int:
+    """Total bytes staged in the Xet chunk-cache across all repos.
+
+    `hf_xet` writes deduplicated chunks here during transfer; the
+    file in `hub/blobs/` only grows on file-reconstruction completion.
+    So during a multi-GB Xet-backed download, this directory is where
+    most of the download bytes live. Callers should snapshot this
+    once at start of a download and subtract to get the in-flight
+    delta for the active model.
+    """
+    cache = Path.home() / ".cache" / "huggingface" / "xet" / "chunk-cache"
+    if not cache.exists():
+        return 0
+    total = 0
+    for path in cache.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def estimated_repo_total_size(model_id: str) -> int:
     """Best-effort total bytes the worker needs to download.
 
@@ -68,20 +103,38 @@ def estimated_repo_total_size(model_id: str) -> int:
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 
+def _measure_bytes_now(model_id: str, xet_baseline: int, high_water: int) -> int:
+    """Combine assembled-cache bytes with the in-flight Xet chunk delta,
+    clamped monotonically by `high_water` so the bar never goes
+    backward when Xet evicts chunks after file reconstruction.
+    """
+    hub_bytes = hf_cache_size_for(model_id)
+    xet_now = xet_chunk_cache_size()
+    xet_delta = max(0, xet_now - xet_baseline)
+    return max(high_water, hub_bytes + xet_delta)
+
+
 async def monitor_download_progress(
     model_id: str,
     callback: ProgressCallback,
     interval_seconds: float = 0.6,
 ) -> None:
     """Until cancelled: every `interval_seconds`, measure how many bytes
-    of `model_id` are on disk and emit `(bytes_now, bytes_total)`
-    through `callback`. Cancellation is the normal stop signal (raised
-    when load completes).
+    of `model_id` are on disk (assembled cache + in-flight Xet chunks)
+    and emit `(bytes_now, bytes_total)` through `callback`.
+    Cancellation is the normal stop signal (raised when load completes).
     """
     bytes_total = await asyncio.to_thread(estimated_repo_total_size, model_id)
+    xet_baseline = await asyncio.to_thread(xet_chunk_cache_size)
+    high_water = 0
     try:
         while True:
-            bytes_now = await asyncio.to_thread(hf_cache_size_for, model_id)
+            bytes_now = await asyncio.to_thread(
+                _measure_bytes_now, model_id, xet_baseline, high_water,
+            )
+            if bytes_total:
+                bytes_now = min(bytes_now, bytes_total)
+            high_water = bytes_now
             try:
                 await callback(bytes_now, bytes_total)
             except Exception:
@@ -91,7 +144,11 @@ async def monitor_download_progress(
         # Final tick so the UI sees 100% when load finishes (rather than
         # stopping at whatever the last poll caught).
         try:
-            final_now = await asyncio.to_thread(hf_cache_size_for, model_id)
+            final_now = await asyncio.to_thread(
+                _measure_bytes_now, model_id, xet_baseline, high_water,
+            )
+            if bytes_total:
+                final_now = min(final_now, bytes_total)
             await callback(final_now, bytes_total)
         except Exception:
             pass
