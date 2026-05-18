@@ -141,10 +141,9 @@ class ChatUI:
     async def run(self) -> None:
         worker = self.worker
         hub_addr = f"{worker.hub_host}:{worker.hub_port}"
-        layer_range = (
-            (worker.shard.spec.layer_start, worker.shard.spec.layer_end)
-            if worker.shard is not None else None
-        )
+        # In the delegation architecture each compute worker hosts the
+        # full model, so there's no layer-range banner to show.
+        layer_range = None
 
         history_buf = Buffer()
         input_buf = Buffer(multiline=False)

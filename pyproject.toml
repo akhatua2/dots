@@ -18,6 +18,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+sim = [
+    "matplotlib>=3.7",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

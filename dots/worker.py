@@ -22,16 +22,21 @@ import logging
 import sys
 from typing import Callable
 
+from mlx_lm import load as mlx_load
+
 from . import ui
+from .inference import FullModelHost
 from .peer import PeerConnection
-from .protocol import decode_array, encode_array
-from .shard import Shard, ShardSpec
+from .pool import resource_decl_to_hello_field
+from .scheduler import ResourceDecl
 from .util import (
     clear_worker_pid,
+    effective_tflops_estimate,
     free_ram_gb,
     load_or_create_account,
     load_or_create_identity,
     save_last_hub,
+    supported_backends,
     write_worker_pid,
 )
 
@@ -85,16 +90,34 @@ class Worker:
         )
 
         self.conn: PeerConnection | None = None
-        self.shard: Shard | None = None
+        # Compute workers host the full model and serve `delegate_turn`
+        # requests from the hub. Chat-only clients (compute=False) never
+        # populate this — they just send prompts and receive token
+        # notifications. The host is loaded asynchronously after WELCOME
+        # so the hub can register us as joined before model load completes.
+        self.host: FullModelHost | None = None
+        self._host_ready = asyncio.Event()
+        self._host_load_task: asyncio.Task | None = None
+        # Peer server: compute workers also listen for incoming peer
+        # connections so the hub can ask them to probe each other (and so
+        # the future multi-worker pipeline can pass hidden states without
+        # routing through the hub).
+        self._peer_server: asyncio.Server | None = None
+        self._peer_listen_port: int | None = None
+        # Outgoing connections to chain peers (only populated when we're
+        # the head worker in a multi-worker placement). Keyed by peer
+        # worker_id; cached so the per-token hot path doesn't reconnect.
+        self._peer_conns: dict[str, PeerConnection] = {}
+        # Per-conversation handler lock: two delegate_turn calls for the
+        # same conv would corrupt the KV cache.
+        self._turn_locks: dict[str, asyncio.Lock] = {}
+
         self.conv_id: str | None = None        # assigned by hub via WELCOME
         self.model_id: str | None = None
         self.n_layers: int | None = None
 
-        # LOAD_SHARD vs COMPUTE must not interleave — a re-plan can swap the
-        # shard while a stale COMPUTE is still in flight otherwise.
-        self._shard_lock = asyncio.Lock()
-        # The hub sends WELCOME after registering us and broadcasting
-        # LOAD_SHARD; runners wait on this before considering us "ready".
+        # The hub sends WELCOME after registering us; runners wait on this
+        # before considering us "ready".
         self._welcome = asyncio.Event()
         # When set, every TOKEN notification fan-outs through this callback
         # in addition to whatever capture buffer send_prompt installed.
@@ -122,17 +145,38 @@ class Worker:
 
     async def connect(self) -> None:
         """Open TCP, send HELLO, wait for the hub's WELCOME."""
+        # Compute workers stand up a small peer-listen server before they
+        # phone the hub, so they can be probed and (in the future) be a
+        # target of worker-to-worker `compute_unit` calls.
+        if self.compute and self._peer_server is None:
+            await self._start_peer_server()
+
         ui.info(f"connecting to hub at {self.hub_host}:{self.hub_port}…")
         reader, writer = await asyncio.open_connection(self.hub_host, self.hub_port)
         self.conn = PeerConnection(
             reader, writer, f"{self.hub_host}:{self.hub_port}", self._handle,
         )
+        # Build the worker's resource declaration for the new scheduler.
+        # Older hubs ignore the `resources` field; newer ones prefer it
+        # over the legacy `free_ram_gb`. Both fields ship in HELLO so the
+        # transition is graceful.
+        decl = ResourceDecl(
+            worker_id=self.identity,
+            account_id=self.account_id,
+            ram_gb_free=free_ram_gb(),
+            compute_tflops_per_sec=effective_tflops_estimate(),
+            backends=supported_backends(),
+            cluster_id="",  # populated later when overlay-network info is wired
+        )
         hello_payload: dict = {
             "worker_id": self.identity,
             "account_id": self.account_id,
-            "free_ram_gb": free_ram_gb(),
+            "free_ram_gb": decl.ram_gb_free,        # legacy: kept for old hubs
             "compute": bool(self.compute),
+            "resources": resource_decl_to_hello_field(decl),
         }
+        if self._peer_listen_port is not None:
+            hello_payload["peer_listen_port"] = self._peer_listen_port
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
         if self.max_load_gb is not None:
@@ -149,7 +193,146 @@ class Worker:
             save_last_hub(f"{self.hub_host}:{self.hub_port}")
         except Exception:
             log.debug("failed to persist last_hub", exc_info=True)
+
+        # Compute workers load the model asynchronously so HELLO returns
+        # immediately and the hub can register us. The first `delegate_turn`
+        # waits on `_host_ready`.
+        if self.compute and self.model_id:
+            self._host_load_task = asyncio.create_task(
+                self._load_host_async(self.model_id)
+            )
+
         await self._welcome.wait()
+
+    # ────────────────────── peer-server lifecycle ───────────────────────
+
+    async def _start_peer_server(self) -> None:
+        """Bind a small TCP server for incoming peer connections.
+
+        The OS picks a free port. We bind to all interfaces so peers on
+        the same LAN / tailnet can reach us. The hub learns this port
+        from HELLO's `peer_listen_port` and tells other workers to use
+        it when probing.
+        """
+        self._peer_server = await asyncio.start_server(
+            self._on_peer_connect, host="0.0.0.0", port=0,
+        )
+        sock = self._peer_server.sockets[0]
+        self._peer_listen_port = sock.getsockname()[1]
+        log.info("peer server listening on port %d", self._peer_listen_port)
+
+    async def _on_peer_connect(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    ) -> None:
+        addr = writer.get_extra_info("peername")
+        addr_str = f"{addr[0]}:{addr[1]}" if addr else "?"
+        conn = PeerConnection(reader, writer, addr_str, self._handle_peer_msg)
+        try:
+            await conn._closed.wait()
+        finally:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+
+    async def _handle_peer_msg(self, msg: dict) -> dict | None:
+        """Dispatcher for messages arriving on the peer server.
+
+        Strict allowlist: peer connections may only request data-plane
+        operations. Control-plane ops (`load_unit`, `shutdown`, etc.)
+        are reserved for the hub channel (see [[worker-security-model]]).
+        """
+        kind = msg.get("kind")
+        if kind == "peer_ping":
+            # Hot-path latency primitive; just ack with the source ts so
+            # the caller can compute RTT locally.
+            return {"kind": "peer_pong", "ts_ns": msg.get("ts_ns")}
+        if kind == "compute_unit":
+            return await self._handle_compute_unit(msg)
+        return {"kind": "error", "error": f"unknown peer kind: {kind!r}"}
+
+    async def _handle_compute_unit(self, msg: dict) -> dict:
+        """Run a single hidden-state forward through this worker's
+        assigned layer range. Used by head workers chaining work
+        through multi-worker placements."""
+        from .protocol import decode_array, encode_array
+        try:
+            await asyncio.wait_for(self._host_ready.wait(), timeout=120.0)
+        except asyncio.TimeoutError:
+            return {"kind": "error", "error": "model not loaded yet"}
+        conv_id = msg["conv_id"]
+        start = int(msg["layer_start"])
+        end = int(msg["layer_end"])
+        hidden_in = decode_array(msg["hidden"])
+        assert self.host is not None
+        try:
+            hidden_out = self.host.forward_segment(conv_id, hidden_in, start, end)
+        except Exception as e:
+            log.exception("compute_unit failed")
+            return {"kind": "error", "error": str(e)}
+        return {
+            "kind": "compute_unit_out",
+            "hidden": encode_array(hidden_out),
+        }
+
+    async def _get_or_open_peer(self, peer_id: str, host: str, port: int) -> PeerConnection:
+        """Cached outgoing connection to a peer worker. Workers in the
+        head role open one of these per downstream chain member and reuse
+        it for every hidden-state hop across all tokens."""
+        existing = self._peer_conns.get(peer_id)
+        if existing is not None and not existing._closed.is_set():
+            return existing
+        reader, writer = await asyncio.open_connection(host, port)
+        # Peer-initiated connections only RECEIVE responses, never serve
+        # requests, so the handler is a no-op.
+        conn = PeerConnection(
+            reader, writer, f"{host}:{port}", lambda _m: None,
+        )
+        self._peer_conns[peer_id] = conn
+        return conn
+
+    async def _load_host_async(self, model_id: str) -> None:
+        """Background task: load the full model into a FullModelHost.
+
+        Workers in the new architecture host the entire model and serve
+        `delegate_turn` requests from the hub locally. Loading happens off
+        the event loop so the worker can ack HELLO immediately and let the
+        hub broadcast pool membership without blocking on a multi-GB load.
+        """
+        ui.info(f"loading model {model_id} on worker…")
+        try:
+            model, tokenizer = await asyncio.to_thread(mlx_load, model_id)
+        except Exception as e:
+            ui.error(f"model load failed on worker: {e}")
+            raise
+        self.host = FullModelHost(model, tokenizer)
+        self.n_layers = self.host.n_layers
+        self._host_ready.set()
+        ui.info(f"worker ready · {self.host.n_layers} layers · "
+                f"{self.host.active_params / 1e9:.2f}B active params")
+        # Tell the hub we're loaded and ready to serve turns.
+        # Sniff geometry from the live model so the hub can build the
+        # work-unit graph for scheduler-driven placement decisions.
+        from .work_units import geometry_from_mlx_model
+        geom = geometry_from_mlx_model(model)
+        geom_payload = (
+            {"hidden_size": geom.hidden_size,
+             "vocab_size": geom.vocab_size,
+             "n_layers": geom.n_layers}
+            if geom else None
+        )
+
+        if self.conn is not None:
+            try:
+                await self.conn.notify(
+                    "worker_ready",
+                    worker_id=self.identity,
+                    n_layers=self.host.n_layers,
+                    active_params=self.host.active_params,
+                    geometry=geom_payload,
+                )
+            except Exception:
+                log.debug("could not notify hub of worker_ready", exc_info=True)
 
     async def wait_until_disconnected(self) -> None:
         if self.conn is not None:
@@ -159,16 +342,16 @@ class Worker:
 
     async def _run_headless(self) -> None:
         short = self.identity[:8]
-        # If the shard hasn't finished loading yet, that's fine — just show
-        # what we know. The first COMPUTE will arrive after it's ready.
-        layer_str = (
-            f"layers {self.shard.spec.layer_start}:{self.shard.spec.layer_end}"
-            if self.shard is not None else "no shard assigned yet"
+        # If the host model hasn't finished loading yet, just show what we
+        # know. Delegated turns wait on _host_ready before serving.
+        status = (
+            f"{self.host.n_layers} layers loaded"
+            if self.host is not None else "loading…"
         )
         ui.console.print(
             f"\n[bold magenta]···[/bold magenta]  "
             f"[bold]dots[/bold]  "
-            f"[dim]worker {short} · {layer_str}[/dim]\n"
+            f"[dim]worker {short} · {status}[/dim]\n"
         )
         ui.console.print("[dim]ctrl-c to disconnect[/dim]\n")
         try:
@@ -179,18 +362,16 @@ class Worker:
 
     async def _run_one_shot(self) -> None:
         hub_addr = f"{self.hub_host}:{self.hub_port}"
-        # Give the shard a moment to load if it isn't ready yet.
-        for _ in range(50):
-            if self.shard is not None:
-                break
-            await asyncio.sleep(0.1)
-        layer_range = (
-            (self.shard.spec.layer_start, self.shard.spec.layer_end)
-            if self.shard is not None else None
-        )
+        # Wait briefly for the host to load if we're also a compute worker;
+        # otherwise we're a chat-only client and there's nothing to wait for.
+        if self.compute:
+            for _ in range(50):
+                if self._host_ready.is_set():
+                    break
+                await asyncio.sleep(0.1)
 
         ui.console.print()
-        ui.banner(self.model_id, hub_addr, layer_range)
+        ui.banner(self.model_id, hub_addr, None)
         ui.console.print(f"\n  › {self.one_shot}\n")
         try:
             _, resp = await self.send_prompt(
@@ -263,14 +444,14 @@ class Worker:
 
     async def _handle(self, msg: dict) -> dict | None:
         kind = msg.get("kind")
-        if kind == "load_shard":
-            return await self._handle_load_shard(msg)
-        if kind == "compute":
-            return await self._handle_compute(msg)
+        if kind == "delegate_turn":
+            return await self._handle_delegate_turn(msg)
+        if kind == "probe_peer":
+            return await self._handle_probe_peer(msg)
         if kind == "reset_conversation":
-            if self.shard:
-                async with self._shard_lock:
-                    self.shard.reset_conversation(msg["conv_id"])
+            conv_id = msg.get("conv_id")
+            if conv_id and self.host is not None:
+                self.host.reset_conversation(conv_id)
             return {"kind": "ok"}
         if kind == "token":
             # Notification — route through whichever consumer is installed
@@ -293,29 +474,228 @@ class Worker:
             return {"kind": "pong"}
         return {"kind": "error", "error": f"unknown kind: {kind}"}
 
-    async def _handle_load_shard(self, msg: dict) -> dict:
-        if not self.compute:
-            return {"kind": "error",
-                    "error": "this client doesn't host compute"}
-        spec = ShardSpec(
-            model_id=msg["model_id"],
-            layer_start=int(msg["layer_start"]),
-            layer_end=int(msg["layer_end"]),
-        )
-        ui.info(f"loading shard [{spec.layer_start}:{spec.layer_end}]…")
-        async with self._shard_lock:
-            self.shard = None
-            self.shard = await asyncio.to_thread(Shard, spec)
-        ui.info(f"shard ready [{spec.layer_start}:{spec.layer_end}]")
-        return {"kind": "ready", "n_layers": self.shard.n_layers}
+    async def _handle_delegate_turn(self, msg: dict) -> dict:
+        """The hub delegates an entire chat turn to us.
 
-    async def _handle_compute(self, msg: dict) -> dict:
+        Runs the inference loop locally on our `FullModelHost`, streaming
+        each generated token text fragment back to the hub via
+        `delegate_token` notifications. Returns `delegate_done` with
+        prefill / decode counts so the hub can attribute the FLOP-CU.
+        """
         if not self.compute:
             return {"kind": "error",
                     "error": "this client doesn't host compute"}
-        async with self._shard_lock:
-            if self.shard is None:
-                return {"kind": "error", "error": "no shard loaded"}
-            hidden = decode_array(msg["hidden"])
-            out = self.shard.run_layers(msg["conv_id"], hidden)
-            return {"kind": "compute_out", "hidden": encode_array(out)}
+
+        # Wait for the model to finish loading. The hub may call us right
+        # after HELLO; the load runs in background.
+        try:
+            await asyncio.wait_for(self._host_ready.wait(), timeout=120.0)
+        except asyncio.TimeoutError:
+            return {"kind": "error", "error": "model not loaded yet"}
+
+        conv_id = msg["conv_id"]
+        history = msg["history"]
+        max_tokens = int(msg.get("max_tokens", 256))
+        temperature = float(msg.get("temperature", 0.7))
+        # Optional multi-worker chain spec. Empty / missing = single-worker
+        # delegation (we run the whole model). Present = we're the head;
+        # each chain entry tells us where to send hidden states for the
+        # layers we don't own.
+        chain = msg.get("chain") or []
+        my_layer_end = int(msg.get("my_layer_end", self.host.n_layers if self.host else 0))
+
+        # One turn per conv at a time. Two interleaved decode loops on the
+        # same KV cache would corrupt it.
+        lock = self._turn_locks.setdefault(conv_id, asyncio.Lock())
+
+        async def on_token(text: str) -> None:
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify(
+                    "delegate_token", conv_id=conv_id, text=text,
+                )
+            except Exception:
+                log.debug("delegate_token notify failed", exc_info=True)
+
+        async with lock:
+            assert self.host is not None
+            try:
+                if chain:
+                    text, stats = await self._run_chain_turn(
+                        conv_id=conv_id, history=history,
+                        max_tokens=max_tokens, temperature=temperature,
+                        on_token=on_token,
+                        my_layer_end=my_layer_end, chain=chain,
+                    )
+                else:
+                    text, stats = await self.host.run_turn(
+                        conv_id=conv_id,
+                        history=history,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        on_token=on_token,
+                    )
+            except Exception as e:
+                log.exception("delegate_turn failed")
+                return {"kind": "error", "error": str(e)}
+
+        return {
+            "kind": "delegate_done",
+            "text": text,
+            "active_params": self.host.active_params,
+            **stats,
+        }
+
+    async def _run_chain_turn(
+        self,
+        *,
+        conv_id: str,
+        history: list,
+        max_tokens: int,
+        temperature: float,
+        on_token,
+        my_layer_end: int,
+        chain: list,
+    ) -> tuple[str, dict]:
+        """Generate a turn across multiple workers.
+
+        We are the head: we own embed, layers [0, my_layer_end), final
+        norm, lm_head, sample. Each `chain` entry tells us a downstream
+        worker, the layer range they own, and how to reach them. Hidden
+        state flows head → chain[0] → chain[1] → ... → back to us for
+        sampling.
+        """
+        import time as _time
+        import mlx.core as mx
+        from .inference import _sample, _stop_ids
+        from .protocol import decode_array, encode_array
+
+        host = self.host
+        assert host is not None
+
+        # Pre-open one connection per chain peer; reuse across the
+        # entire turn so per-token latency is just one round-trip.
+        peer_conns: list[tuple[PeerConnection, int, int]] = []
+        for entry in chain:
+            peer_id = str(entry["worker_id"])
+            host_addr = str(entry["host"])
+            port = int(entry["port"])
+            start = int(entry["layer_start"])
+            end = int(entry["layer_end"])
+            conn = await self._get_or_open_peer(peer_id, host_addr, port)
+            peer_conns.append((conn, start, end))
+
+        async def forward_through_chain(hidden):
+            # Our local segment first.
+            hidden = host.forward_segment(conv_id, hidden, 0, my_layer_end)
+            # Then each downstream chain segment.
+            for conn, start, end in peer_conns:
+                resp = await conn.call(
+                    "compute_unit",
+                    conv_id=conv_id,
+                    layer_start=start, layer_end=end,
+                    hidden=encode_array(hidden),
+                )
+                if resp.get("kind") != "compute_unit_out":
+                    raise RuntimeError(
+                        f"compute_unit failed: {resp.get('error', resp)}"
+                    )
+                hidden = decode_array(resp["hidden"])
+            return hidden
+
+        cache = host._get_cache(conv_id)
+        full_ids = host.tokenizer.apply_chat_template(
+            history, add_generation_prompt=True,
+        )
+        seen = host._token_counts.get(conv_id, 0)
+        if seen > len(full_ids):
+            host.reset_conversation(conv_id)
+            cache = host._get_cache(conv_id)
+            seen = 0
+        new_ids = full_ids[seen:]
+        if not new_ids:
+            return "", {"prefill_tokens": 0, "decode_tokens": 0,
+                        "prefill_ms": 0.0, "elapsed_ms": 0.0}
+
+        # Prefill: embed → chain → norm + lm_head → sample first token.
+        t0 = _time.perf_counter()
+        hidden = host.model.model.embed_tokens(mx.array([new_ids]))
+        hidden = await forward_through_chain(hidden)
+        hidden = host.model.model.norm(hidden)
+        logits = host._project_logits(hidden[:, -1:, :])
+        token = _sample(logits[0, -1], temperature)
+        prefill_tokens = len(new_ids)
+        prefill_ms = (_time.perf_counter() - t0) * 1000
+        host._token_counts[conv_id] = seen + len(new_ids)
+
+        stop = _stop_ids(host.tokenizer)
+        response_tokens: list[int] = []
+        decode_start = _time.perf_counter()
+        while len(response_tokens) < max_tokens and token not in stop:
+            text = host.tokenizer.decode([token])
+            await on_token(text)
+            response_tokens.append(token)
+            hidden = host.model.model.embed_tokens(mx.array([[token]]))
+            hidden = await forward_through_chain(hidden)
+            hidden = host.model.model.norm(hidden)
+            logits = host._project_logits(hidden[:, -1:, :])
+            token = _sample(logits[0, -1], temperature)
+            host._token_counts[conv_id] += 1
+
+        elapsed_ms = (_time.perf_counter() - decode_start) * 1000
+        text = host.tokenizer.decode(response_tokens)
+        return text, {
+            "prefill_tokens": prefill_tokens,
+            "decode_tokens": len(response_tokens),
+            "prefill_ms": prefill_ms,
+            "elapsed_ms": elapsed_ms,
+        }
+
+    async def _handle_probe_peer(self, msg: dict) -> dict:
+        """Hub-triggered probe: open a connection to the target peer,
+        time N pings, return the RTT statistics to the hub."""
+        import time as _time
+        target_id = msg.get("target_id")
+        target_host = msg.get("target_host")
+        target_port = msg.get("target_port")
+        samples = int(msg.get("samples", 3))
+        if not target_host or not target_port:
+            return {"kind": "probe_result", "target_id": target_id,
+                    "error": "missing target host/port"}
+        rtts: list[float] = []
+        try:
+            reader, writer = await asyncio.open_connection(target_host, target_port)
+            conn = PeerConnection(
+                reader, writer,
+                f"{target_host}:{target_port}",
+                lambda _m: None,
+            )
+            for _ in range(samples):
+                t0 = _time.perf_counter_ns()
+                try:
+                    resp = await asyncio.wait_for(
+                        conn.call("peer_ping", ts_ns=t0), timeout=2.0,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if resp.get("kind") != "peer_pong":
+                    continue
+                rtt_ms = (_time.perf_counter_ns() - t0) / 1e6
+                rtts.append(rtt_ms)
+            await conn.close()
+        except Exception as e:
+            return {"kind": "probe_result", "target_id": target_id,
+                    "error": str(e)}
+        if not rtts:
+            return {"kind": "probe_result", "target_id": target_id,
+                    "error": "no successful pings"}
+        rtts.sort()
+        return {
+            "kind": "probe_result",
+            "target_id": target_id,
+            "rtt_p50_ms": rtts[len(rtts) // 2],
+            "rtt_p99_ms": rtts[-1],
+            "samples": len(rtts),
+        }
+

@@ -1,25 +1,28 @@
 """Hub: pure orchestrator. The pool is the set of connected workers.
 
-Every connected worker is also a chatter — they joined to use the model AND
-to contribute their compute. The hub:
+The hub itself does no model compute. It:
 
-  • Loads the model locally for tokenizer + embed + norm + lm_head + sampling.
-    (No transformer layers are executed on the hub.)
-  • Accepts worker TCP connections. After HELLO with their free_ram_gb, the
-    worker is added to the pool, layers are re-planned across all current
-    participants, and LOAD_SHARD is broadcast.
-  • Maintains one Conversation per worker — their personal chat state.
-  • On worker PROMPT, runs a chat turn for that worker: builds new tokens
-    via chat template (history-aware), prefills the new portion through the
-    full pipeline, decodes, streaming each token back to the worker via a
-    fire-and-forget TOKEN notification.
-  • Empty pool → hub waits, can't serve. First worker joining → they run all
-    layers (solo). N workers → layers split N ways.
+  • Accepts worker TCP connections. On HELLO with a ResourceDecl, the
+    worker is added to the pool and asynchronously starts loading the
+    full model. On `worker_ready` notification it becomes eligible to
+    serve turns.
+  • Maintains one Conversation per chat-client participant.
+  • On a chat-client PROMPT, picks a compute worker via the scheduler,
+    sends `delegate_turn(conv_id, history, max_tokens, temperature)`, and
+    forwards each `delegate_token` notification back to the chat client
+    as a `token` notification. When the worker replies `delegate_done`,
+    the turn is finished and the ledger is updated.
 
-Topology change (any join/leave) increments a generation counter. In-flight
-turns check the counter at every pipeline step and abort cleanly if it
-moved. All conversations' caches are reset on topology change because the
-layer-→-cache mapping changes.
+Empty pool → hub returns errors until a worker joins.
+
+Architectural pieces:
+  • dots.scheduler    — placement algorithm (workers + latency → unit assignment)
+  • dots.sharding     — strategies (PP / TP / EP); v1 ships PP
+  • dots.compute_plane — abstraction the model talks to (wraps scheduler + sharding)
+  • dots.pool         — hub-side state (resources + latency matrix)
+  • dots.work_units   — per-token DAG (embed, layers, lm_head, sample)
+  • dots.inference    — the actual inference loop, owned by `FullModelHost`
+                        on each worker
 """
 from __future__ import annotations
 
@@ -29,14 +32,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-import mlx.core as mx
-from mlx_lm import load as mlx_load
-
 from . import ui
 from .ledger import Ledger
 from .peer import PeerConnection
-from .protocol import decode_array, encode_array
+from .pool import Pool, resource_decl_from_hello
+from .scheduler import Placement, WorkUnit, schedule
 from .util import dots_home
+from .work_units import ModelGeometry, units_for_geometry
 
 log = logging.getLogger("dots.hub")
 
@@ -60,7 +62,7 @@ class Participant:
     free_ram_gb: float
     conn: PeerConnection
     compute: bool = True                       # contributes layers to the pool
-    max_load_gb: float | None = None           # None == no cap
+    max_load_gb: float | None = None           # None == no cap (vestigial)
     layer_range: tuple[int, int] | None = None
     ready: bool = False
     # The human-owner account this worker contributes to. CU and the
@@ -68,7 +70,18 @@ class Participant:
     # per-process `id` above. Multiple Participants can share an account.
     account_id: str | None = None
     account_alias: str | None = None
+    # Where this worker accepts incoming peer connections (other workers
+    # talk to it on this port for probes + the future multi-worker
+    # pipeline). The host part comes from the TCP socket peername; the
+    # port comes from HELLO's `peer_listen_port`. None means the worker
+    # didn't open a peer server (chat-only clients).
+    peer_listen_port: int | None = None
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
+
+    @property
+    def peer_host(self) -> str:
+        """Host portion of `addr` for use as a probe target."""
+        return self.addr.split(":")[0]
 
     @property
     def short_id(self) -> str:
@@ -92,102 +105,6 @@ class TopologyChanged(Exception):
     """Raised inside a turn when the pool changed under our feet."""
 
 
-def plan_layers(
-    weights: list[float],
-    n_layers: int,
-    caps: list[int] | None = None,
-) -> list[tuple[int, int]] | None:
-    """Split n_layers into len(weights) contiguous ranges proportional to
-    weights, optionally honoring a per-worker layer cap.
-
-    If `caps` is given, each worker's range is capped at caps[i] layers.
-    If the total capacity (sum of caps) is less than n_layers, returns
-    None — the model can't be distributed across this pool.
-    Otherwise returns a list of (start, end) tuples covering [0, n_layers).
-    """
-    if not weights:
-        return [] if n_layers == 0 else None
-    if caps is not None and sum(caps) < n_layers:
-        return None
-
-    total = sum(weights) or 1.0
-    raw = [w / total * n_layers for w in weights]
-    sizes = [max(1, int(round(r))) for r in raw]
-    if caps is not None:
-        sizes = [min(sizes[i], caps[i]) for i in range(len(sizes))]
-
-    # Reconcile rounding/cap drift to land on exactly n_layers.
-    while sum(sizes) != n_layers:
-        diff = n_layers - sum(sizes)
-        if diff > 0:
-            # Need more layers somewhere with spare room.
-            if caps is not None:
-                spare = [(caps[i] - sizes[i], i) for i in range(len(sizes))
-                         if caps[i] > sizes[i]]
-                if not spare:
-                    return None
-                _, i = max(spare)
-            else:
-                i = sizes.index(min(sizes))
-            sizes[i] += 1
-        else:
-            # Too many — drop one from a worker that has more than its
-            # minimum (1). Prefer the largest range so the distribution
-            # stays balanced.
-            candidates = [(sizes[i], i) for i in range(len(sizes))
-                          if sizes[i] > 1]
-            if not candidates:
-                return None
-            _, i = max(candidates)
-            sizes[i] -= 1
-
-    ranges: list[tuple[int, int]] = []
-    cur = 0
-    for s in sizes:
-        ranges.append((cur, cur + s))
-        cur += s
-    return ranges
-
-
-def _per_layer_bytes(model, n_layers: int) -> int:
-    """Approximate bytes-per-layer of `model`. Returns 0 if we can't compute
-    it (e.g. test fakes whose Modules don't expose .parameters)."""
-    try:
-        from mlx.utils import tree_flatten
-        total = 0
-        for layer in model.model.layers:
-            params = layer.parameters() if hasattr(layer, "parameters") else {}
-            for _, v in tree_flatten(params):
-                if hasattr(v, "nbytes"):
-                    total += v.nbytes
-        return total // n_layers if n_layers > 0 else 0
-    except Exception:
-        log.debug("per-layer bytes unavailable", exc_info=True)
-        return 0
-
-
-def _active_params(model) -> int:
-    """Total active parameter count of `model`. Used in CU FLOP accounting.
-
-    For dense models, this equals total params. For MoE models we use
-    total params as a conservative approximation (slight overcount in
-    CU cost) — refining to top-k × per-expert is a follow-up.
-
-    Returns 0 if we can't compute it (test fakes, missing parameters
-    attribute) — caller treats that as "skip ledger attribution".
-    """
-    try:
-        from mlx.utils import tree_flatten
-        total = 0
-        for _, v in tree_flatten(model.parameters()):
-            if hasattr(v, "size"):
-                total += int(v.size)
-        return total
-    except Exception:
-        log.debug("active params unavailable", exc_info=True)
-        return 0
-
-
 class Hub:
     def __init__(
         self,
@@ -202,17 +119,11 @@ class Hub:
         self.http_port = http_port
         self.model_id = model_id
 
-        self.model = None
-        self.tokenizer = None
+        # The hub does not load a model in the delegation architecture.
+        # `n_layers` and `active_params` come in from workers via the
+        # `worker_ready` notification and are used by the ledger for
+        # FLOP-CU attribution.
         self.n_layers = 0
-        # Approximate bytes for a single transformer block, computed once
-        # after the model loads. Used to translate a worker's max_load_gb
-        # into a max-layers cap when planning.
-        self.bytes_per_layer = 0
-        # Total active parameters in the loaded model. Used for FLOP-based
-        # CU accounting (1 CU = 1 TFLOP = 2 × active_params × tokens / 1e12).
-        # For dense models this is total params. For MoE this is a conservative
-        # upper bound (refining to top-k × per-expert is a follow-up).
         self.active_params = 0
 
         self.participants: dict[str, Participant] = {}
@@ -230,29 +141,26 @@ class Hub:
         # ledger. Conversations carry their own count too; we rely on
         # this for the ledger entry key.
         self._turn_counter: dict[str, int] = {}
+        # Hub-side pool view: resource declarations + pairwise latency. Fed
+        # by HELLO (resources) and periodic hub→worker pings (used as a
+        # proxy for inter-worker RTT until true worker-to-worker probes
+        # land). Snapshots fed into the scheduler when planning a query.
+        self.pool_view = Pool()
+        # Cached model geometry for scheduler unit-graph building. Populated
+        # once after model load.
+        self._geometry: ModelGeometry | None = None
+        # conv_id → async callback for streaming tokens back to the chat
+        # client during a delegate_turn. Populated in `run_turn` and
+        # consulted in `_on_delegate_token`.
+        self._token_routers: dict[str, "asyncio.Future | object"] = {}
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
     async def start(self) -> None:
-        ui.notice(f"loading model {self.model_id} on hub…")
-        self.model, self.tokenizer = await asyncio.to_thread(mlx_load, self.model_id)
-        self.n_layers = len(self.model.model.layers)
-        self.bytes_per_layer = await asyncio.to_thread(
-            _per_layer_bytes, self.model, self.n_layers,
-        )
-        self.active_params = await asyncio.to_thread(_active_params, self.model)
-        params_str = (
-            f", {self.active_params / 1e9:.2f}B active params"
-            if self.active_params else ""
-        )
-        if self.bytes_per_layer:
-            ui.notice(
-                f"model ready ({self.n_layers} layers, "
-                f"{self.bytes_per_layer / 1e6:.1f} MB / layer{params_str})"
-            )
-        else:
-            ui.notice(f"model ready ({self.n_layers} layers{params_str})")
-
+        # In the delegation architecture the hub never loads a model.
+        # Workers load the full model themselves and announce via
+        # `worker_ready`. The hub just orchestrates and writes the ledger.
+        ui.notice(f"hub starting · default model = {self.model_id}")
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
@@ -305,6 +213,10 @@ class Hub:
                 return await self._on_prompt(wid, msg)
             if kind == "reset" and wid is not None:
                 return await self._on_reset(wid)
+            if kind == "worker_ready" and wid is not None:
+                return self._on_worker_ready(wid, msg)
+            if kind == "delegate_token" and wid is not None:
+                return await self._on_delegate_token(wid, msg)
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
 
@@ -336,6 +248,10 @@ class Hub:
         account_alias = (account_alias if isinstance(account_alias, str)
                          and account_alias else None)
 
+        # Extract the new-style resource declaration. Falls back to the
+        # legacy free_ram_gb if the worker is an older build.
+        resource_decl = resource_decl_from_hello(hello_msg, worker_id=worker_id)
+
         # If a worker with this identity is already in the pool (process
         # restart whose old connection hasn't been read-detected yet), close
         # the stale one and replace it.
@@ -347,12 +263,19 @@ class Hub:
                     await stale.conn.close()
                 except Exception:
                     pass
+            peer_port_raw = hello_msg.get("peer_listen_port")
+            peer_port = (int(peer_port_raw)
+                         if isinstance(peer_port_raw, int) and peer_port_raw > 0
+                         else None)
             participant = Participant(
                 id=worker_id, addr=addr_str, free_ram_gb=free_ram,
                 compute=compute, max_load_gb=max_load_gb, conn=conn,
                 account_id=account_id, account_alias=account_alias,
+                peer_listen_port=peer_port,
             )
             self.participants[worker_id] = participant
+            if resource_decl is not None:
+                self.pool_view.add_or_update(worker_id, resource_decl)
         cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
         role = "worker" if compute else "client"
         ui.notice(f"{role}·{participant.short_id} ({participant.display_owner}) "
@@ -371,6 +294,7 @@ class Hub:
                 # takeover-on-reconnect case.
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
+                    self.pool_view.remove(worker_id)
             left_role = "worker" if participant.compute else "client"
             ui.notice(f"{left_role}·{participant.short_id} "
                       f"({participant.display_owner}) left")
@@ -379,107 +303,25 @@ class Hub:
     # ─────────────────────────── re-plan on change ──────────────────────
 
     async def _on_pool_changed(self) -> None:
+        """In the delegation architecture, the hub no longer plans layer
+        ranges or broadcasts LOAD_SHARD. Compute workers load the full
+        model autonomously and notify `worker_ready` when they're done.
+
+        On topology change, we just clear pool_ready and let the next
+        worker_ready notification re-set it.
+        """
         async with self._pool_lock:
             self._topology_gen += 1
-            # Only compute-contributing participants get layers assigned;
-            # pure chat clients are tracked for their conversations only.
-            workers = sorted(
-                (p for p in self.participants.values() if p.compute),
-                key=lambda w: w.id,
-            )
-            # Crucial: clear pool_ready *here*, not just on empty-pool. Any
-            # topology change makes every worker's layer assignment stale
-            # until LOAD_SHARD finishes; the retry path in _turn must wait
-            # for that, otherwise _pipeline runs with zero ready workers
-            # and the hub samples from raw embeddings (the same token over
-            # and over — the bug the user observed as 'their their their').
+            workers = [p for p in self.participants.values() if p.compute]
             self._pool_ready.clear()
             if not workers:
                 ui.notice("no compute workers — waiting")
                 return
-
-            caps = self._compute_caps(workers)
-            ranges = plan_layers(
-                [w.free_ram_gb for w in workers], self.n_layers, caps=caps,
-            )
-            if ranges is None:
-                # Total pool capacity is less than the model needs. Stay
-                # un-ready; the next join may close the gap.
-                total_cap = sum(caps) if caps else 0
-                ui.notice(
-                    f"pool capacity {total_cap} layers < {self.n_layers} required"
-                    f" — waiting for more workers"
-                )
-                for w in workers:
-                    w.layer_range = None
-                    w.ready = False
-                return
-            for w, r in zip(workers, ranges, strict=True):
-                w.layer_range = r
-                w.ready = False
-
-            # Topology change invalidates every conversation's worker-side KV
-            # caches — but NOT the hub-side chat history, which is the source
-            # of truth we'll re-prefill from on the next compute call. Wiping
-            # history here used to drop the just-appended user message of any
-            # in-flight turn and left the model generating from a context
-            # missing the user's question; see test_user_message_survives_
-            # worker_drop.
-            for w in workers:
-                w.conv.token_count = 0
-
-            workers_snapshot = list(workers)
-
-        # Broadcast LOAD_SHARD (outside the lock).
-        loads = [
-            w.conn.call(
-                "load_shard",
-                model_id=self.model_id,
-                layer_start=w.layer_range[0],
-                layer_end=w.layer_range[1],
-            )
-            for w in workers_snapshot
-        ]
-        results = await asyncio.gather(*loads, return_exceptions=True)
-        async with self._pool_lock:
-            for w, res in zip(workers_snapshot, results, strict=True):
-                if isinstance(res, Exception):
-                    log.warning("w%d LOAD_SHARD failed: %s", w.id, res)
-                    self.participants.pop(w.id, None)
-                else:
-                    w.ready = True
-            ready_count = sum(1 for w in self.participants.values() if w.ready)
-            if ready_count > 0:
+            # If any compute worker is already loaded, immediately mark
+            # pool ready so chat clients connecting in the middle of a
+            # load don't have to wait for the next worker_ready event.
+            if any(p.ready for p in workers):
                 self._pool_ready.set()
-                # Avoid `[uuid][a:b]` here — rich's markup parser would
-                # try to interpret the bracketed UUID as a style tag and
-                # silently swallow it. Use a colon-separated form instead.
-                plan_str = "  →  ".join(
-                    f"w·{w.short_id} layers {w.layer_range[0]}-{w.layer_range[1]}"
-                    for w in sorted(self.participants.values(),
-                                    key=lambda x: (x.layer_range or (0, 0))[0])
-                    if w.ready and w.layer_range
-                )
-                ui.notice(f"pool ready ({ready_count}): {plan_str}")
-            else:
-                self._pool_ready.clear()
-
-    def _compute_caps(self, workers: list[Participant]) -> list[int] | None:
-        """Translate each worker's max_load_gb into a max-layers count.
-        Returns None if we can't compute per-layer bytes (e.g. fake model
-        in tests) — caller treats no caps as "no constraint"."""
-        if self.bytes_per_layer <= 0:
-            return None
-        if not any(w.max_load_gb is not None for w in workers):
-            return None
-        caps: list[int] = []
-        for w in workers:
-            if w.max_load_gb is None:
-                caps.append(self.n_layers)            # effectively uncapped
-            else:
-                max_l = max(1, int(w.max_load_gb * 1e9 // self.bytes_per_layer))
-                caps.append(min(max_l, self.n_layers))
-        return caps
 
     # ────────────────────────────── one turn ────────────────────────────
 
@@ -511,6 +353,7 @@ class Hub:
                 temperature=float(msg.get("temperature", DEFAULT_TEMPERATURE)),
                 on_token=emit,
                 is_alive=alive,
+                querier_account=participant.account_id,
             )
         except TopologyChanged:
             if conv.history and conv.history[-1].get("role") == "user":
@@ -611,167 +454,355 @@ class Hub:
         temperature: float = DEFAULT_TEMPERATURE,
         on_token=None,
         is_alive=None,
+        querier_account: str | None = None,
     ) -> tuple[str, dict]:
-        """Run one chat turn against `conv.history`.
+        """Run one chat turn against `conv.history` via delegation.
 
-        The history must already end with the user message to answer.
-        Returns (response_text, stats_dict).
-
-        Does NOT mutate `conv.history` — the caller decides whether to
-        keep the response (chat-client path appends it; HTTP API throws
-        the whole conversation away after the response is delivered).
-
-        Survives worker drops mid-turn: if a `_pipeline` call raises
-        `ConnectionError` or `TopologyChanged`, the retry re-prefills the
-        full history + everything-we've-already-streamed-to-the-user on
-        the new pool. The user sees a pause, not a truncated response.
-
-        on_token, if given, is awaited for each streamed text chunk.
-        is_alive, if given, is checked at the top of every retry; when
-        it returns False we abort because the requester went away.
+        The hub no longer does per-token compute. It picks a compute
+        worker via the scheduler (cheap mode: self-utilization wins when
+        a querier-owned worker exists; otherwise the highest-TPS worker
+        wins via the secondary tiebreak), sends `delegate_turn`, and
+        forwards the worker's `delegate_token` notifications to the chat
+        client (via the `on_token` callback registered for this conv).
         """
-        # State that lives across recovery attempts:
-        response_tokens: list[int] = []
-        stop_ids = self._stop_token_ids()
-        first_prefill_tokens = 0
-        first_prefill_ms = 0.0
-        decode_start_ts: float | None = None
-        attempt = 0
+        if is_alive is not None and not is_alive():
+            raise RuntimeError("requester disconnected")
+        await self._pool_ready.wait()
 
-        full_ids = self.tokenizer.apply_chat_template(
-            conv.history, add_generation_prompt=True
+        head, my_layer_end, chain_payload = self._build_chain_spec(
+            querier_account=querier_account,
         )
+        if head is None:
+            raise RuntimeError("no ready compute worker to delegate the turn to")
+        worker = head
 
-        while True:
-            try:
-                if is_alive is not None and not is_alive():
-                    raise RuntimeError("requester disconnected")
-                await self._pool_ready.wait()
-                my_gen = self._topology_gen
+        # Register the on_token callback so this hub instance can forward
+        # `delegate_token` notifications coming back from the worker. The
+        # routing key is the chat client's conv.id.
+        if on_token is not None:
+            self._token_routers[conv.id] = on_token
+        try:
+            t0 = time.perf_counter()
+            call_payload = dict(
+                conv_id=conv.id,
+                history=conv.history,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+            )
+            if chain_payload:
+                call_payload["my_layer_end"] = my_layer_end
+                call_payload["chain"] = chain_payload
+            resp = await worker.conn.call("delegate_turn", **call_payload)
+            wall_ms = (time.perf_counter() - t0) * 1000
+            # delegate_token notifications dispatch as fire-and-forget
+            # tasks; the response (delegate_done) may resolve before the
+            # last token task has run. Yield so trailing tasks complete
+            # before we tear down the router and the client misses tokens.
+            await asyncio.sleep(0)
+        finally:
+            self._token_routers.pop(conv.id, None)
 
-                target_seq = full_ids + response_tokens
-                if conv.token_count > len(target_seq):
-                    conv.token_count = 0
-                prefill_ids = target_seq[conv.token_count:]
+        if resp.get("kind") != "delegate_done":
+            raise RuntimeError(resp.get("error", "delegate_turn failed"))
 
-                if prefill_ids:
-                    t0 = time.perf_counter()
-                    prompt_ids = mx.array([prefill_ids])
-                    hidden = self.model.model.embed_tokens(prompt_ids)
-                    hidden = await self._pipeline(conv.id, hidden, my_gen)
-                    logits = self._head(hidden[:, -1:, :])
-                    token = self._sample(logits[0, -1], temperature)
-                    conv.token_count = len(target_seq)
-                    if attempt == 0:
-                        first_prefill_tokens = len(prefill_ids)
-                        first_prefill_ms = (time.perf_counter() - t0) * 1000
-                else:
-                    raise RuntimeError(
-                        "no tokens to prefill — caches are inconsistent"
-                    )
+        # Capture the worker's reported active_params for ledger CU math.
+        # The hub itself no longer loads the model, so this is the only
+        # path that surfaces param count to the attribution code.
+        active = int(resp.get("active_params") or 0)
+        if active and not self.active_params:
+            self.active_params = active
 
-                if decode_start_ts is None:
-                    decode_start_ts = time.perf_counter()
-
-                while (len(response_tokens) < max_new_tokens
-                       and token not in stop_ids):
-                    text = self.tokenizer.decode([token])
-                    if on_token is not None:
-                        await on_token(text)
-                    response_tokens.append(token)
-                    next_in = mx.array([[token]])
-                    next_hidden = self.model.model.embed_tokens(next_in)
-                    hidden = await self._pipeline(conv.id, next_hidden, my_gen)
-                    conv.token_count += 1
-                    logits = self._head(hidden[:, -1:, :])
-                    token = self._sample(logits[0, -1], temperature)
-
-                terminator = (token if token in stop_ids
-                              else self._primary_eos())
-                term_in = mx.array([[terminator]])
-                term_hidden = self.model.model.embed_tokens(term_in)
-                await self._pipeline(conv.id, term_hidden, my_gen)
-                response_tokens.append(terminator)
-                conv.token_count += 1
-                break
-
-            except (ConnectionError, TopologyChanged) as e:
-                attempt += 1
-                ui.notice(
-                    f"turn interrupted (attempt {attempt}, {e}); reconciling…"
-                )
-                conv.token_count = 0
-                await asyncio.sleep(0.1)
-                await self._pool_ready.wait()
-
-        elapsed_ms = ((time.perf_counter() - decode_start_ts) * 1000
-                      if decode_start_ts else 0.0)
-        # response_tokens includes the trailing terminator (so the cache
-        # ends the turn cleanly), but we don't want it in the user-facing
-        # text — strip the last token.
-        response_text = self.tokenizer.decode(response_tokens[:-1])
-        return response_text, {
-            "prefill_tokens": first_prefill_tokens,
-            "prefill_ms": first_prefill_ms,
-            "decode_tokens": len(response_tokens) - 1,
-            "decode_ms": elapsed_ms,
-            "recoveries": attempt,
+        return resp["text"], {
+            "prefill_tokens": int(resp.get("prefill_tokens", 0)),
+            "prefill_ms": float(resp.get("prefill_ms", 0.0)),
+            "decode_tokens": int(resp.get("decode_tokens", 0)),
+            "decode_ms": float(resp.get("elapsed_ms", wall_ms)),
+            "worker_id": worker.id,
         }
 
-    async def _pipeline(self, conv_id: str, hidden: mx.array, my_gen: int) -> mx.array:
-        if my_gen != self._topology_gen:
-            raise TopologyChanged()
+    # ─────────────────────── delegation helpers ──────────────────────
+
+    def _build_chain_spec(
+        self,
+        querier_account: str | None = None,
+    ) -> "tuple[Participant | None, int, list[dict]]":
+        """Pick head + chain for this turn.
+
+        Two outputs:
+          • `head` is the worker we send `delegate_turn` to. It hosts embed,
+            its own decoder-layer slice, final norm, lm_head, and the
+            sampler.
+          • `chain` is a list of `{worker_id, host, port, layer_start,
+            layer_end}` describing the downstream workers, in pipeline
+            order, that run their layer slices on hidden states received
+            from the head.
+
+        Single-worker case: chain is empty; head runs the whole model.
+        Multi-worker: scheduler decides the split via the decoder-layer
+        unit graph. Cheap mode + querier_account → self-utilization on
+        the head; non-dominated tiebreak picks the highest-TPS chain.
+        """
+        candidates = [
+            p for p in self.participants.values()
+            if p.compute and p.ready
+        ]
+        if not candidates:
+            return None, 0, []
+
+        # Single-worker fast path: only one candidate ⇒ no chain needed.
+        if len(candidates) == 1 or self._geometry is None or self.n_layers <= 1:
+            head = self._pick_delegate_worker(querier_account=querier_account)
+            return head, (head.layer_range[1] if head and head.layer_range else self.n_layers), []
+
+        # Multi-worker: ask the scheduler to place decoder-layer units.
+        workers_snapshot, latency = self.pool_view.snapshot()
+        ready_ids = {p.id for p in candidates}
+        workers_snapshot = [w for w in workers_snapshot if w.worker_id in ready_ids]
+
+        geom = self._geometry
+        # Use a small per-layer FLOP estimate so the cost model reflects
+        # real work (and the scheduler tiebreaks reasonably). RAM is set
+        # to 0 because every ready worker already has the full model
+        # loaded in v1 — they're not constrained by additional RAM here.
+        # Once partial loading lands, ram_required_gb gets the real number.
+        per_layer_params = 16 * geom.hidden_size ** 2
+        per_layer_flops = float(2 * per_layer_params)
+        units = [
+            WorkUnit(unit_id=f"block_{i}",
+                     ram_required_gb=0.0,
+                     flops_per_token=per_layer_flops)
+            for i in range(geom.n_layers)
+        ]
+        placement = schedule(
+            units, workers_snapshot, latency,
+            querier_account=querier_account,
+            mode="cheap",
+            max_segments=len(workers_snapshot),
+        )
+        if placement is None or not placement.segments:
+            head = self._pick_delegate_worker(querier_account=querier_account)
+            return head, geom.n_layers, []
+
+        # Convert segments (worker_id, [block_i, block_i+1, ...]) into
+        # contiguous layer ranges.
+        segs: list[tuple[str, int, int]] = []
+        cursor = 0
+        for worker_id, unit_ids in placement.segments:
+            count = len(unit_ids)
+            segs.append((worker_id, cursor, cursor + count))
+            cursor += count
+
+        head_id, _, head_end = segs[0]
+        head = next((p for p in candidates if p.id == head_id), None)
+        if head is None:
+            head = candidates[0]
+
+        chain_payload: list[dict] = []
+        for worker_id, start, end in segs[1:]:
+            p = next((p for p in candidates if p.id == worker_id), None)
+            if p is None or p.peer_listen_port is None:
+                # Chain peer unreachable — fall back to single-worker.
+                return head, geom.n_layers, []
+            chain_payload.append({
+                "worker_id": worker_id,
+                "host": p.peer_host,
+                "port": int(p.peer_listen_port),
+                "layer_start": start,
+                "layer_end": end,
+            })
+        return head, head_end, chain_payload
+
+    def _pick_delegate_worker(
+        self,
+        querier_account: str | None = None,
+    ) -> "Participant | None":
+        """Choose a compute worker via the resource-aware scheduler.
+
+        Uses a single virtual work unit representing the full model. With
+        cheap mode the scheduler's non-dominated set degenerates to:
+          • self-utilization (CU=0) when querier owns a ready worker
+          • highest-TPS worker otherwise (cheap mode tiebreaks on TPS)
+        That's the policy we want for single-worker delegation.
+        """
+        candidates = [
+            p for p in self.participants.values()
+            if p.compute and p.ready
+        ]
+        if not candidates:
+            return None
+
+        workers_snapshot, latency = self.pool_view.snapshot()
+        # Restrict the snapshot to currently-ready compute workers — the
+        # scheduler shouldn't try to place on a still-loading worker.
+        ready_ids = {p.id for p in candidates}
+        workers_snapshot = [w for w in workers_snapshot if w.worker_id in ready_ids]
+        if not workers_snapshot:
+            return candidates[0]
+
+        # In v1 the entire model lives on a single worker (no peer
+        # pipeline yet), so we feed the scheduler one virtual unit sized
+        # to fit on any ready worker. flops_per_token uses the model's
+        # active_params (reported in worker_ready) so the Pareto cost
+        # estimate reflects real work.
+        flops = 2 * (self.active_params or 1)
+        unit = WorkUnit(
+            unit_id="model",
+            ram_required_gb=0.0,  # already loaded; don't double-count
+            flops_per_token=float(flops),
+        )
+        placement = schedule(
+            [unit], workers_snapshot, latency,
+            querier_account=querier_account,
+            mode="cheap",
+            max_segments=1,
+        )
+        if placement is None:
+            return candidates[0]
+
+        chosen_id = placement.segments[0][0]
+        chosen = next((p for p in candidates if p.id == chosen_id), None)
+        return chosen or candidates[0]
+
+    def _on_worker_ready(self, worker_id: str, msg: dict) -> dict | None:
+        """Mark a worker as ready after it finished loading the model.
+
+        The worker streams this notification once its background
+        `mlx_load` completes. The hub starts routing turns to it after.
+        It also carries the model geometry (n_layers/hidden_size/vocab_size)
+        so the scheduler can build a real unit graph for placement.
+        """
+        p = self.participants.get(worker_id)
+        if p is None:
+            return None
+        p.ready = True
+        n_layers = int(msg.get("n_layers") or 0)
+        if n_layers and not self.n_layers:
+            self.n_layers = n_layers
+        active = int(msg.get("active_params") or 0)
+        if active and not self.active_params:
+            self.active_params = active
+        geom = msg.get("geometry")
+        if isinstance(geom, dict) and self._geometry is None:
+            try:
+                self._geometry = ModelGeometry(
+                    n_layers=int(geom["n_layers"]),
+                    hidden_size=int(geom["hidden_size"]),
+                    vocab_size=int(geom["vocab_size"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                log.debug("ignoring malformed geometry payload", exc_info=True)
+        # Synthesize a layer_range so the ledger attribution path keeps
+        # working. Each worker hosts the entire model in v1, so the range
+        # is the full set.
+        if self.n_layers:
+            p.layer_range = (0, self.n_layers)
+        self._pool_ready.set()
+        ui.notice(f"worker·{p.short_id} ({p.display_owner}) ready "
+                  f"({self.n_layers} layers loaded)")
+        # Now that this worker can serve, kick off pairwise RTT probes
+        # between it and every other ready compute worker. Each pair
+        # produces one cell in `pool_view.latency`.
+        if p.compute and p.peer_listen_port is not None:
+            asyncio.create_task(self._probe_pairs_for(worker_id))
+        return None
+
+    async def _probe_pairs_for(self, worker_id: str) -> None:
+        """For each existing ready compute worker, ask both sides to
+        ping each other and record the median RTT into pool_view."""
         async with self._pool_lock:
-            ordered = sorted(
-                (w for w in self.participants.values() if w.ready and w.layer_range),
-                key=lambda w: w.layer_range[0],
+            me = self.participants.get(worker_id)
+            if me is None or not me.compute or not me.ready:
+                return
+            others = [
+                p for p in self.participants.values()
+                if (p.id != worker_id and p.compute and p.ready
+                    and p.peer_listen_port is not None)
+            ]
+        for other in others:
+            asyncio.create_task(self._probe_one(me.id, other.id,
+                                                 other.peer_host,
+                                                 other.peer_listen_port))
+            asyncio.create_task(self._probe_one(other.id, me.id,
+                                                 me.peer_host,
+                                                 me.peer_listen_port))
+
+    async def _probe_one(
+        self,
+        source_id: str,
+        target_id: str,
+        target_host: str,
+        target_port: int,
+    ) -> None:
+        p = self.participants.get(source_id)
+        if p is None:
+            return
+        try:
+            resp = await p.conn.call(
+                "probe_peer",
+                target_id=target_id,
+                target_host=target_host,
+                target_port=int(target_port),
+                samples=3,
             )
-        for w in ordered:
-            if my_gen != self._topology_gen:
-                raise TopologyChanged()
-            resp = await w.conn.call(
-                "compute", conv_id=conv_id, hidden=encode_array(hidden),
+        except Exception:
+            log.debug("probe call failed (%s → %s)", source_id, target_id,
+                      exc_info=True)
+            return
+        if resp.get("kind") != "probe_result" or "error" in resp:
+            return
+        try:
+            self.pool_view.record_probe(
+                source_id, target_id,
+                float(resp["rtt_p50_ms"]),
+                float(resp.get("rtt_p99_ms", 0.0)),
+                int(resp.get("samples", 1)),
             )
-            if resp.get("kind") != "compute_out":
-                raise RuntimeError(f"w{w.id} compute failed: {resp}")
-            hidden = decode_array(resp["hidden"])
-        return hidden
+        except Exception:
+            log.debug("could not record probe result", exc_info=True)
 
-    # ──────────────────────────── helpers ───────────────────────────────
-
-    def _head(self, hidden: mx.array) -> mx.array:
-        normed = self.model.model.norm(hidden)
-        if self.model.args.tie_word_embeddings:
-            return self.model.model.embed_tokens.as_linear(normed)
-        return self.model.lm_head(normed)
-
-    @staticmethod
-    def _sample(logits_row: mx.array, temperature: float) -> int:
-        if temperature <= 0:
-            return int(mx.argmax(logits_row, axis=-1).item())
-        return int(mx.random.categorical(logits_row / temperature).item())
-
-    def _primary_eos(self) -> int:
-        if self.tokenizer.eos_token_id is not None:
-            return int(self.tokenizer.eos_token_id)
-        for marker in ("<|im_end|>", "<|endoftext|>", "<|eot_id|>"):
+    async def _on_delegate_token(self, worker_id: str, msg: dict) -> dict | None:
+        """A compute worker is streaming a token mid-turn. Forward to the
+        chat client whose conv_id is registered with this token."""
+        conv_id = msg.get("conv_id")
+        text = msg.get("text", "")
+        if not conv_id:
+            return None
+        cb = self._token_routers.get(conv_id)
+        if cb is not None:
             try:
-                tid = self.tokenizer.convert_tokens_to_ids(marker)
-                if isinstance(tid, int) and tid > 0:
-                    return tid
+                await cb(text)
             except Exception:
-                continue
-        return 0
+                log.debug("on_token callback failed", exc_info=True)
+        return None
 
-    def _stop_token_ids(self) -> set[int]:
-        ids: set[int] = set()
-        if self.tokenizer.eos_token_id is not None:
-            ids.add(int(self.tokenizer.eos_token_id))
-        for marker in ("<|im_end|>", "<|endoftext|>", "<|eot_id|>"):
-            try:
-                tid = self.tokenizer.convert_tokens_to_ids(marker)
-            except Exception:
-                continue
-            if isinstance(tid, int) and tid > 0:
-                ids.add(tid)
-        return ids
+    # ─────────────────────────── scheduler integration ──────────────────
+
+    def plan_placement(
+        self,
+        querier_account: str | None = None,
+        mode: str = "cheap",
+        layers_per_block: int = 1,
+        max_segments: int | None = None,
+    ) -> "Placement | None":
+        """Run the resource-aware scheduler on the current pool snapshot.
+
+        Used by callers that want to inspect *what* the scheduler would
+        pick (e.g. observability, the `dots credits` API, the future
+        multi-worker distributed compute plane). The live data plane uses
+        `_pick_delegate_worker` until multi-worker placement lands.
+
+        Returns the Pareto-optimal placement for `mode`, or None if no
+        feasible placement exists.
+        """
+        if self._geometry is None:
+            return None
+        units = units_for_geometry(self._geometry, layers_per_block=layers_per_block)
+        workers, latency = self.pool_view.snapshot()
+        if not workers:
+            return None
+        return schedule(
+            units, workers, latency,
+            querier_account=querier_account,
+            mode=mode,
+            max_segments=max_segments,
+        )

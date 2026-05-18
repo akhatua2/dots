@@ -18,7 +18,9 @@ import pytest_asyncio
 
 from dots.hub import Hub
 from dots.peer import PeerConnection
-from dots.util import free_ram_gb
+from dots.pool import resource_decl_to_hello_field
+from dots.scheduler import ResourceDecl
+from dots.util import effective_tflops_estimate, free_ram_gb, supported_backends
 from dots.worker import Worker
 
 from .fakes import (
@@ -36,10 +38,12 @@ def _free_port() -> int:
 
 @pytest.fixture(autouse=True)
 def mock_model(monkeypatch):
-    monkeypatch.setattr("dots.hub.mlx_load", fake_load)
-    monkeypatch.setattr("dots.shard.mlx_load", fake_load)
-    monkeypatch.setattr("dots.shard.make_prompt_cache", fake_make_prompt_cache)
-    monkeypatch.setattr("dots.shard.create_attention_mask", fake_create_attention_mask)
+    # Workers load the full model via mlx_load (now an attribute on
+    # dots.worker for monkey-patchability) and use the attention-mask /
+    # prompt-cache builders inside dots.inference.
+    monkeypatch.setattr("dots.worker.mlx_load", fake_load)
+    monkeypatch.setattr("dots.inference.make_prompt_cache", fake_make_prompt_cache)
+    monkeypatch.setattr("dots.inference.create_attention_mask", fake_create_attention_mask)
 
 
 @pytest_asyncio.fixture
@@ -94,20 +98,35 @@ async def connect_worker(hub: Hub) -> Worker:
         account_id="acc-" + uuid.uuid4().hex,
         account_alias="",
     )
+    # Start the worker's peer-listen server so probes from the hub work.
+    await w._start_peer_server()
     reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
     w.conn = PeerConnection(reader, writer, f"127.0.0.1:{hub.port}", w._handle)
+    # Build a real ResourceDecl so the hub's new pool_view ingests properly.
+    decl = ResourceDecl(
+        worker_id=w.identity,
+        account_id=w.account_id,
+        ram_gb_free=free_ram_gb(),
+        compute_tflops_per_sec=effective_tflops_estimate(),
+        backends=supported_backends(),
+        cluster_id="",
+    )
     ack = await w.conn.call(
         "hello", worker_id=w.identity, account_id=w.account_id,
-        free_ram_gb=free_ram_gb(),
+        free_ram_gb=decl.ram_gb_free,
+        resources=resource_decl_to_hello_field(decl),
+        peer_listen_port=w._peer_listen_port,
     )
     assert ack.get("kind") == "hello_ack"
     w.model_id = ack["model_id"]
     w.n_layers = ack["n_layers"]
+    # Manually kick off the model load (in the real worker this happens
+    # right after HELLO_ACK in `connect()`; tests drive HELLO themselves).
+    w._host_load_task = asyncio.create_task(w._load_host_async(w.model_id))
     await asyncio.wait_for(w._welcome.wait(), timeout=2.0)
-    deadline = asyncio.get_running_loop().time() + 2.0
-    while w.shard is None and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.01)
-    assert w.shard is not None, "worker shard did not load"
+    # Wait for the worker's host to finish loading + worker_ready to arrive
+    # at the hub. The hub fixture sets `p.ready = True` on receipt.
+    await asyncio.wait_for(w._host_ready.wait(), timeout=5.0)
     return w
 
 
