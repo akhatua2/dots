@@ -69,16 +69,25 @@ class Participant:
     account_id: str | None = None
     account_alias: str | None = None
     # Where this worker accepts incoming peer connections (other workers
-    # talk to it on this port for probes + the multi-worker chain). The
-    # host part comes from the TCP socket peername; the port comes from
-    # HELLO's `peer_listen_port`. None means the worker didn't open a
-    # peer server (chat-only clients).
+    # talk to it on this port for probes + the multi-worker chain).
+    # `peer_listen_port` comes from HELLO; None means chat-only.
+    # `peer_listen_host` is the routable IP the WORKER picked for itself
+    # (Tailscale CGNAT preferred, then RFC1918 LAN, then loopback). If
+    # missing, fall back to the connect-from IP — fine for single-machine
+    # pools, breaks cross-machine which is what the advertisement fixes.
     peer_listen_port: int | None = None
+    peer_listen_host: str | None = None
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
 
     @property
     def peer_host(self) -> str:
-        """Host portion of `addr` for use as a probe target."""
+        """Routable host for incoming peer connections.
+
+        Prefer the worker's own advertised address; fall back to the
+        IP they connected to the hub from for legacy workers.
+        """
+        if self.peer_listen_host:
+            return self.peer_listen_host
         return self.addr.split(":")[0]
 
     @property
@@ -524,11 +533,21 @@ class Hub:
             peer_port = (int(peer_port_raw)
                          if isinstance(peer_port_raw, int) and peer_port_raw > 0
                          else None)
+            # Worker-advertised peer host. Falls back to the connect-from
+            # IP when missing (older workers, or workers that couldn't
+            # determine a better address). The connect-from fallback is
+            # correct for single-machine pools and breaks only when a
+            # local worker needs to be addressed from a remote one —
+            # which the new advertisement path is designed to fix.
+            advertised_host = hello_msg.get("peer_listen_host")
+            peer_host = (advertised_host if isinstance(advertised_host, str)
+                         and advertised_host else None)
             participant = Participant(
                 id=worker_id, addr=addr_str,
                 compute=compute, conn=conn,
                 account_id=account_id, account_alias=account_alias,
                 peer_listen_port=peer_port,
+                peer_listen_host=peer_host,
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
