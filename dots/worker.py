@@ -22,10 +22,11 @@ import logging
 import sys
 from typing import Callable
 
-from mlx_lm import load as mlx_load
+from mlx_lm import load as mlx_load   # noqa: F401 — kept for test monkeypatch path
 
 from . import ui
 from .inference import FullModelHost
+from .partial_loader import load_partial
 from .peer import PeerConnection
 from .pool import resource_decl_to_hello_field
 from .scheduler import ResourceDecl
@@ -194,14 +195,10 @@ class Worker:
         except Exception:
             log.debug("failed to persist last_hub", exc_info=True)
 
-        # Compute workers load the model asynchronously so HELLO returns
-        # immediately and the hub can register us. The first `delegate_turn`
-        # waits on `_host_ready`.
-        if self.compute and self.model_id:
-            self._host_load_task = asyncio.create_task(
-                self._load_host_async(self.model_id)
-            )
-
+        # Compute workers used to auto-load the full model right here.
+        # Now they wait for the hub to tell them what layer range (and
+        # head modules) to load via a `load_units` notification. The
+        # _host_load_task is kicked off inside `_handle_load_units`.
         await self._welcome.wait()
 
     # ────────────────────── peer-server lifecycle ───────────────────────
@@ -291,22 +288,37 @@ class Worker:
         self._peer_conns[peer_id] = conn
         return conn
 
-    async def _load_host_async(self, model_id: str) -> None:
-        """Background task: load the full model into a FullModelHost.
+    async def _load_host_async(
+        self,
+        model_id: str,
+        layer_start: int = 0,
+        layer_end: int | None = None,
+        needs_head: bool = True,
+    ) -> None:
+        """Background task: load the assigned slice into a FullModelHost.
 
-        Workers in the new architecture host the entire model and serve
-        `delegate_turn` requests from the hub locally. Loading happens off
-        the event loop so the worker can ack HELLO immediately and let the
-        hub broadcast pool membership without blocking on a multi-GB load.
+        With partial loading, this worker only materializes the assigned
+        decoder layers + (if head) embed/norm/lm_head. Unowned layers
+        are kept on disk (mmap'd safetensors) so peak + steady-state RAM
+        stay bounded to the assignment.
         """
-        ui.info(f"loading model {model_id} on worker…")
+        slice_descr = (
+            f"layers [{layer_start}:{layer_end or '?'}]"
+            + (" + head" if needs_head else "")
+        )
+        ui.info(f"loading {model_id} {slice_descr} on worker…")
         try:
-            model, tokenizer = await asyncio.to_thread(mlx_load, model_id)
+            model, tokenizer, n_total = await asyncio.to_thread(
+                load_partial, model_id,
+                layer_start=layer_start,
+                layer_end=layer_end,
+                needs_head=needs_head,
+            )
         except Exception as e:
             ui.error(f"model load failed on worker: {e}")
             raise
         self.host = FullModelHost(model, tokenizer)
-        self.n_layers = self.host.n_layers
+        self.n_layers = n_total
         self._host_ready.set()
         ui.info(f"worker ready · {self.host.n_layers} layers · "
                 f"{self.host.active_params / 1e9:.2f}B active params")
@@ -444,6 +456,8 @@ class Worker:
 
     async def _handle(self, msg: dict) -> dict | None:
         kind = msg.get("kind")
+        if kind == "load_units":
+            return await self._handle_load_units(msg)
         if kind == "delegate_turn":
             return await self._handle_delegate_turn(msg)
         if kind == "probe_peer":
@@ -473,6 +487,31 @@ class Worker:
         if kind == "ping":
             return {"kind": "pong"}
         return {"kind": "error", "error": f"unknown kind: {kind}"}
+
+    async def _handle_load_units(self, msg: dict) -> dict | None:
+        """Hub-driven model load. Idempotent — re-issuing with the same
+        assignment is a no-op; re-issuing with a different assignment
+        kicks off a fresh load (the previous host is replaced)."""
+        if not self.compute:
+            return None
+        model_id = msg.get("model_id") or self.model_id
+        layer_start = int(msg.get("layer_start", 0))
+        layer_end_raw = msg.get("layer_end")
+        layer_end = int(layer_end_raw) if layer_end_raw is not None else None
+        needs_head = bool(msg.get("needs_head", True))
+        # Already loaded with this exact assignment? Nothing to do.
+        if (self.host is not None
+                and self.model_id == model_id
+                and self._host_ready.is_set()):
+            return None
+        self.model_id = model_id
+        self._host_ready.clear()
+        self._host_load_task = asyncio.create_task(
+            self._load_host_async(
+                model_id, layer_start, layer_end, needs_head,
+            )
+        )
+        return None
 
     async def _handle_delegate_turn(self, msg: dict) -> dict:
         """The hub delegates an entire chat turn to us.
