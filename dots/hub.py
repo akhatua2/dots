@@ -304,15 +304,13 @@ class Hub:
             self._current_placement = out
             return out
 
-        # Below this point: no single worker fits, so we need a
-        # partition. Re-check the cache — if it's a locked partition
-        # placement and all members are present, reuse it.
-        if (self._current_placement
-                and len(self._current_placement) >= 2
-                and self._current_placement[0][2] < self.n_layers):
-            cached_ids = {w_id for w_id, *_ in self._current_placement}
-            if cached_ids.issubset({p.id for p in compute_workers}):
-                return list(self._current_placement)
+        # No single worker fits — partition every pool change. We used
+        # to lock the first partition to "avoid restarting downloads on
+        # each topology change", but partial_loader uses the HF disk
+        # cache (which the OS keeps across re-loads), so re-running
+        # load_partial with a different layer range only re-filters
+        # the tensors that go into RAM. Cheap enough to do whenever a
+        # new worker joins and might enable a better split.
 
         # Partition via the scheduler. The unit graph is one WorkUnit
         # per decoder layer; layer 0 carries the head overhead so the
@@ -487,25 +485,28 @@ class Hub:
                 state = "loading" if self._current_placement else "waiting"
                 resp = {"kind": "status", "ready": False, "state": state}
                 if state == "loading" and self._current_placement:
-                    # Sum bytes across all reporting workers in the
-                    # placement. This is more rewarding visually than
-                    # `min` (which sits at 0% if any worker hasn't
-                    # started reporting) and reflects the true amount
-                    # of work the pool has done. Workers we haven't
-                    # heard from yet are simply absent from the sum.
-                    total_now = 0
-                    total_total = 0
-                    for seg in self._current_placement:
-                        snap = self._load_progress.get(seg[0])
-                        if snap is None:
-                            continue
-                        n, t = snap
-                        total_now += n
-                        total_total += t
-                    if total_total > 0:
-                        resp["progress"] = total_now / total_total
-                        resp["bytes_now"] = total_now
-                        resp["bytes_total"] = total_total
+                    # Show the SLOWEST currently-reporting worker. Workers
+                    # we haven't heard from yet are skipped — otherwise a
+                    # just-joined worker (no data) would drag the bar to
+                    # 0% even when another worker is most of the way
+                    # through. Showing the slowest reporter is honest
+                    # ("this is the worker the pool is waiting on") and
+                    # the numbers stay at per-worker scale (e.g. "55 MB
+                    # / 18.4 GB") rather than confusingly summed pool-wide.
+                    reporters = [
+                        (n, t) for n, t in (
+                            self._load_progress.get(seg[0]) or (None, None)
+                            for seg in self._current_placement
+                        )
+                        if n is not None and t and t > 0
+                    ]
+                    if reporters:
+                        n_slow, t_slow = min(
+                            reporters, key=lambda nt: nt[0] / nt[1]
+                        )
+                        resp["progress"] = n_slow / t_slow
+                        resp["bytes_now"] = n_slow
+                        resp["bytes_total"] = t_slow
                 return resp
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
@@ -1097,14 +1098,45 @@ class Hub:
         if resp.get("kind") != "probe_result" or "error" in resp:
             return
         try:
+            rtt_p50 = float(resp["rtt_p50_ms"])
             self.pool_view.record_probe(
-                source_id, target_id,
-                float(resp["rtt_p50_ms"]),
+                source_id, target_id, rtt_p50,
                 float(resp.get("rtt_p99_ms", 0.0)),
                 int(resp.get("samples", 1)),
             )
+            self._log_latency_mesh()
         except Exception:
             log.debug("could not record probe result", exc_info=True)
+
+    def _log_latency_mesh(self) -> None:
+        """Pretty-print the current pairwise RTT matrix between compute
+        workers. Called whenever a probe updates a cell so the operator
+        can watch the mesh fill in as workers join."""
+        workers = sorted(
+            (p for p in self.participants.values()
+             if p.compute and p.peer_listen_port is not None),
+            key=lambda p: p.id,
+        )
+        if len(workers) < 2:
+            return
+        # Column header / label width: max of "X→" label + short_id length
+        labels = [f"{p.short_id} ({p.display_owner})" for p in workers]
+        col_w = max(len(lab) for lab in labels) + 1
+        header = " " * (col_w + 2) + "  ".join(f"{lab:>{col_w}}" for lab in labels)
+        rows = [header]
+        for row_p, row_label in zip(workers, labels):
+            cells = []
+            for col_p in workers:
+                if row_p.id == col_p.id:
+                    cells.append(f"{'—':>{col_w}}")
+                    continue
+                rtt = self.pool_view.get_rtt(row_p.id, col_p.id)
+                if rtt is None:
+                    cells.append(f"{'·':>{col_w}}")
+                else:
+                    cells.append(f"{rtt:>{col_w - 3}.1f} ms")
+            rows.append(f"{row_label:>{col_w}}  " + "  ".join(cells))
+        ui.notice("latency mesh (ms):\n  " + "\n  ".join(rows))
 
     async def _on_delegate_token(self, worker_id: str, msg: dict) -> dict | None:
         """A compute worker is streaming a token mid-turn. Forward to the
