@@ -52,7 +52,21 @@ _PROMPT_STYLE = Style.from_dict({
     "status.marker": "fg:ansimagenta bg:default bold",
     "status.tps": "fg:ansicyan bg:default",
     "status.dim": "fg:#888888 bg:default",
+    "status.spinner": "fg:ansicyan bold bg:default",
+    "status.notice": "fg:#aaaaaa bg:default",
 })
+
+
+# Star-burst spinner — matches the visual style Claude Code uses. The
+# rotation grows from a small dot through several star shapes for a
+# pleasant breathing animation rather than a strict mechanical spin.
+_SPINNER_FRAMES = ("·", "✦", "✢", "✻", "✺", "✽", "✶")
+
+
+_POOL_STATE_TEXT = {
+    "loading": "Loading the model",
+    "waiting": "Waiting for more machines",
+}
 
 
 def _ttysize() -> tuple[int, int]:
@@ -137,9 +151,58 @@ class ChatUI:
         self.worker = worker
         self._app: Application | None = None
         self._latest_tps: float | None = None
+        # Pool state shown in the status row when the hub reports
+        # `not_ready`. None = serving normally; otherwise one of the
+        # values in _POOL_STATE_TEXT.
+        self._pool_state: str | None = None
+        self._spinner_frame = 0
+
+    async def _wait_for_pool_ready(self, worker: "Worker") -> None:
+        """Pre-flight: animate a spinner on stdout until the hub reports
+        the pool can serve. Updates in place via `\r`; clears the line
+        when ready. Ctrl-C cancels (raises asyncio.CancelledError)."""
+        import sys
+        # Try once first — if the pool is already serving, skip the
+        # spinner entirely (no flicker).
+        try:
+            status = await worker.get_pool_status()
+        except Exception:
+            status = {"ready": True}    # fail open; chat surface will show real errors
+        if status.get("ready"):
+            return
+        try:
+            frame = 0
+            last_msg = ""
+            while True:
+                state = status.get("state", "loading")
+                msg = _POOL_STATE_TEXT.get(state, "Loading")
+                spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
+                line = f"  {spinner}  {msg}…"
+                # Pad to clear any leftover characters from a longer
+                # previous message (waiting → loading is shorter).
+                pad = max(0, len(last_msg) - len(line))
+                sys.stdout.write("\r" + line + (" " * pad))
+                sys.stdout.flush()
+                last_msg = line
+                frame += 1
+                await asyncio.sleep(0.18)
+                try:
+                    status = await worker.get_pool_status()
+                except Exception:
+                    break
+                if status.get("ready"):
+                    break
+        finally:
+            # Clear the spinner line so the chat UI starts clean.
+            sys.stdout.write("\r" + " " * (max(len(last_msg), 60)) + "\r")
+            sys.stdout.flush()
 
     async def run(self) -> None:
         worker = self.worker
+        # Pre-flight: don't show the input bar until the pool can serve.
+        # Animated spinner that updates in place on a single line; clears
+        # itself once the hub reports ready.
+        await self._wait_for_pool_ready(worker)
         hub_addr = f"{worker.hub_host}:{worker.hub_port}"
         # In the delegation architecture each compute worker hosts the
         # full model, so there's no layer-range banner to show.
@@ -179,6 +242,16 @@ class ChatUI:
             parts: list[tuple[str, str]] = [
                 ("class:status.marker", f"{INDENT}‣‣ "),
             ]
+            # Pool-state spinner takes precedence over tok/s and
+            # "generating" — when the pool isn't ready, the only thing
+            # the user wants to know is what we're waiting on.
+            if self._pool_state is not None:
+                frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+                msg = _POOL_STATE_TEXT.get(self._pool_state, "Loading")
+                parts.append(("class:status.spinner", f"{frame} "))
+                parts.append(("class:status.notice", f"{msg}  ·  "))
+                parts.append(("class:status.dim", "ctrl-c to cancel"))
+                return parts
             if self._latest_tps is not None:
                 parts.append(("class:status.tps",
                               f"{self._latest_tps:.1f} tok/s"))
@@ -292,21 +365,18 @@ class ChatUI:
                 try:
                     from .worker import PoolNotReadyError
 
-                    # If the pool isn't ready yet, show a single friendly
-                    # status line under the prompt and auto-retry. The
-                    # status line updates if the pool transitions
-                    # (waiting → loading → serving). Ctrl-C cancels.
-                    state_text = {
-                        "loading": "Loading the model…",
-                        "waiting": "Waiting for more machines…",
-                    }
-                    notice_shown = False
+                    # If the pool transitions to not_ready mid-session
+                    # (e.g. a worker drops and replacement is loading),
+                    # show the spinner in the status row instead of
+                    # appending to history. Auto-retry every 2s; Ctrl-C
+                    # cancels.
                     while True:
                         try:
                             _, resp = await worker.send_prompt(
                                 user_msg, max_tokens=256,
                                 on_token=lambda t: append_history(wrapper.feed(t)),
                             )
+                            self._pool_state = None
                             tail = wrapper.flush()
                             if tail:
                                 append_history(tail)
@@ -316,19 +386,17 @@ class ChatUI:
                                 self._latest_tps = decode_tokens / decode_s
                             break
                         except PoolNotReadyError as nr:
-                            if not notice_shown:
-                                append_history(
-                                    f"{INDENT}"
-                                    f"{state_text.get(nr.state, 'Loading…')}\n"
-                                )
-                                notice_shown = True
+                            self._pool_state = nr.state
+                            if self._app is not None:
+                                self._app.invalidate()
                             await asyncio.sleep(2.0)
                 except RuntimeError as e:
                     append_history(f"{INDENT}{e}\n")
                 except asyncio.CancelledError:
-                    append_history(f"{INDENT}(cancelled while waiting)\n")
+                    self._pool_state = None
                     raise
                 finally:
+                    self._pool_state = None
                     generating["flag"] = False
                     text = history_buf.text.rstrip("\n") + "\n\n"
                     history_buf.set_document(
@@ -337,13 +405,28 @@ class ChatUI:
                     )
                     self._app.invalidate()
 
+        async def spinner_tick() -> None:
+            """While `_pool_state` is set, advance the spinner frame and
+            invalidate the layout so the status row redraws. Idle when
+            the pool is serving normally."""
+            while True:
+                await asyncio.sleep(0.18)
+                if self._pool_state is None:
+                    continue
+                self._spinner_frame = (self._spinner_frame + 1) % len(_SPINNER_FRAMES)
+                if self._app is not None:
+                    self._app.invalidate()
+
         processor_task = asyncio.create_task(chat_processor())
+        spinner_task = asyncio.create_task(spinner_tick())
         try:
             await self._app.run_async()
         finally:
             processor_task.cancel()
-            try:
-                await processor_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            spinner_task.cancel()
+            for t in (processor_task, spinner_task):
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
             self._app = None
