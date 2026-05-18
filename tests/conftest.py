@@ -38,12 +38,28 @@ def _free_port() -> int:
 
 @pytest.fixture(autouse=True)
 def mock_model(monkeypatch):
-    # Workers load the full model via mlx_load (now an attribute on
-    # dots.worker for monkey-patchability) and use the attention-mask /
-    # prompt-cache builders inside dots.inference.
-    monkeypatch.setattr("dots.worker.mlx_load", fake_load)
+    # Tests use a faked load path: worker.load_partial returns a fake
+    # model + tokenizer + layer count without touching mlx_lm. Hub's
+    # config-priming step is also stubbed (no HF download in tests).
+    def fake_partial(model_id, *, layer_start=0, layer_end=None, needs_head=True):
+        from .fakes import DEFAULT_LAYERS
+        m, t = fake_load(model_id)
+        return m, t, DEFAULT_LAYERS
+
+    monkeypatch.setattr("dots.worker.load_partial", fake_partial)
     monkeypatch.setattr("dots.inference.make_prompt_cache", fake_make_prompt_cache)
     monkeypatch.setattr("dots.inference.create_attention_mask", fake_create_attention_mask)
+
+    # Stub the hub's eager geometry primer so the hub fixture doesn't
+    # try to download a real model on test setup.
+    async def fake_prime(self):
+        from dots.work_units import ModelGeometry
+        from .fakes import DEFAULT_LAYERS, HIDDEN_DIM, VOCAB_SIZE
+        self.n_layers = DEFAULT_LAYERS
+        self._geometry = ModelGeometry(
+            n_layers=DEFAULT_LAYERS, hidden_size=HIDDEN_DIM, vocab_size=VOCAB_SIZE,
+        )
+    monkeypatch.setattr("dots.hub.Hub._prime_geometry_from_config", fake_prime)
 
 
 @pytest_asyncio.fixture
@@ -120,12 +136,10 @@ async def connect_worker(hub: Hub) -> Worker:
     assert ack.get("kind") == "hello_ack"
     w.model_id = ack["model_id"]
     w.n_layers = ack["n_layers"]
-    # Manually kick off the model load (in the real worker this happens
-    # right after HELLO_ACK in `connect()`; tests drive HELLO themselves).
-    w._host_load_task = asyncio.create_task(w._load_host_async(w.model_id))
+    # In the new lifecycle the hub broadcasts `load_units` after the
+    # worker joins; the worker handler kicks off load_partial. So we
+    # just wait for both WELCOME and the resulting _host_ready.
     await asyncio.wait_for(w._welcome.wait(), timeout=2.0)
-    # Wait for the worker's host to finish loading + worker_ready to arrive
-    # at the hub. The hub fixture sets `p.ready = True` on receipt.
     await asyncio.wait_for(w._host_ready.wait(), timeout=5.0)
     return w
 
