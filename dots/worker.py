@@ -462,6 +462,18 @@ class Worker:
             raise RuntimeError(resp.get("error", "turn failed"))
         return "".join(captured), resp
 
+    async def get_pool_status(self) -> dict:
+        """Ask the hub if the pool can serve right now.
+
+        Returns a dict shaped:
+          {"kind": "status", "ready": True}                       — serving
+          {"kind": "status", "ready": False, "state": "loading"}  — workers loading
+          {"kind": "status", "ready": False, "state": "waiting"}  — need more workers
+        """
+        if self.conn is None:
+            raise RuntimeError("not connected to hub")
+        return await self.conn.call("status")
+
     # ─────────────────────────── hub→worker handler ─────────────────────
 
     async def _handle(self, msg: dict) -> dict | None:
