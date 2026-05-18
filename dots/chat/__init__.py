@@ -52,7 +52,7 @@ INDENT = "  "
 # Subtle dark fill behind the user's input row + echoed prompts.
 # Visually separates "what the user said" from "what the model said"
 # above it (matches the Claude-Code look).
-_PROMPT_BG = "#1f1f1f"
+_PROMPT_BG = "#2d2d2d"
 
 
 _PROMPT_STYLE = Style.from_dict({
@@ -163,6 +163,8 @@ class ChatUI:
         # replace it on every token). None when nothing is generating.
         self._streaming_idx: int | None = None
         self._latest_tps: float | None = None
+        self._latest_decode_tokens: int = 0
+        self._latest_decode_s: float = 0.0
         # Pool state shown in the status row when the hub reports
         # `not_ready`. None = serving normally; otherwise one of the
         # values in _POOL_STATE_TEXT.
@@ -260,9 +262,12 @@ class ChatUI:
                 parts.append(("class:status.dim", "ctrl-c to cancel"))
                 return parts
             if self._latest_tps is not None:
-                parts.append(("class:status.tps",
-                              f"{self._latest_tps:.1f} tok/s"))
-                parts.append(("class:status.dim", "  ·  "))
+                parts.append((
+                    "class:status.dim",
+                    f"{self._latest_tps:.1f} tok/s · "
+                    f"{self._latest_decode_tokens} tokens in "
+                    f"{self._latest_decode_s:.1f}s  ·  ",
+                ))
             if generating["flag"]:
                 parts.append(("class:status.dim", "generating · "))
             parts.append(("class:status.dim", "ctrl-c to interrupt"))
@@ -394,6 +399,10 @@ class ChatUI:
                 await self._stream_one_turn(user_msg)
             finally:
                 generating["flag"] = False
+                # Blank-line spacer between turns so the next `›` prompt
+                # in history doesn't visually butt against the previous
+                # response.
+                self._append_history("\n")
                 if self._app is not None:
                     self._app.invalidate()
 
@@ -431,6 +440,8 @@ class ChatUI:
                 decode_s = float(resp.get("decode_ms", 0)) / 1000.0
                 if decode_tokens > 0 and decode_s > 0:
                     self._latest_tps = decode_tokens / decode_s
+                    self._latest_decode_tokens = decode_tokens
+                    self._latest_decode_s = decode_s
                 break
             except PoolNotReadyError as nr:
                 self._pool_state = nr.state
