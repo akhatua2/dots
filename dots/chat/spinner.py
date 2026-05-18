@@ -15,10 +15,17 @@ SPINNER_FRAMES: tuple[str, ...] = (
 )
 
 
-# User-facing labels for the two non-ready pool states the hub
-# distinguishes. Plain language; no numbers, no model ids.
+# User-facing labels for the non-ready pool states the hub distinguishes.
+# Plain language; no numbers, no model ids.
+#
+#   loading        — this machine is still downloading the model.
+#   loading_peers  — this machine is done; waiting for the other
+#                    machines in the pool to finish their downloads.
+#   waiting        — the pool can't be assembled yet (no compute workers
+#                    or not enough RAM to fit the model).
 POOL_STATE_TEXT: dict[str, str] = {
     "loading": "Loading the model",
+    "loading_peers": "Waiting for other machines",
     "waiting": "Waiting for more machines",
 }
 
