@@ -151,10 +151,13 @@ class Hub:
         # both for `load_units` broadcasts and for building the chain
         # spec at delegation time so the two views can't drift.
         self._current_placement: list[tuple[str, int, int, bool]] = []
-        # Per-worker download progress (0.0–1.0). Workers emit periodic
-        # `load_progress` notifications during load_partial; we aggregate
-        # for the chat client's progress bar.
-        self._load_progress: dict[str, float] = {}
+        # Per-worker (bytes_now, bytes_total) snapshots. Workers emit
+        # periodic `load_progress` notifications during load_partial; we
+        # aggregate the slowest worker's pair into the chat client's
+        # status response (bar + raw "X / Y GB" so users can tell
+        # something is happening on a slow connection even when the
+        # rounded percentage is still 0).
+        self._load_progress: dict[str, tuple[int, int]] = {}
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -466,7 +469,12 @@ class Hub:
                 bytes_now = int(msg.get("bytes_now") or 0)
                 bytes_total = int(msg.get("bytes_total") or 0)
                 if bytes_total > 0:
-                    self._load_progress[wid] = min(1.0, bytes_now / bytes_total)
+                    # Clamp so workers reporting bytes_now > bytes_total
+                    # (rare, but possible if HF API under-estimated) don't
+                    # drag the bar past 100%.
+                    self._load_progress[wid] = (
+                        min(bytes_now, bytes_total), bytes_total,
+                    )
                 return None
             if kind == "status":
                 # Used by chat clients to pre-flight: don't show the
@@ -479,12 +487,25 @@ class Hub:
                 state = "loading" if self._current_placement else "waiting"
                 resp = {"kind": "status", "ready": False, "state": state}
                 if state == "loading" and self._current_placement:
-                    progs = [
-                        self._load_progress.get(seg[0], 0.0)
-                        for seg in self._current_placement
-                    ]
-                    if progs:
-                        resp["progress"] = min(progs)
+                    # Sum bytes across all reporting workers in the
+                    # placement. This is more rewarding visually than
+                    # `min` (which sits at 0% if any worker hasn't
+                    # started reporting) and reflects the true amount
+                    # of work the pool has done. Workers we haven't
+                    # heard from yet are simply absent from the sum.
+                    total_now = 0
+                    total_total = 0
+                    for seg in self._current_placement:
+                        snap = self._load_progress.get(seg[0])
+                        if snap is None:
+                            continue
+                        n, t = snap
+                        total_now += n
+                        total_total += t
+                    if total_total > 0:
+                        resp["progress"] = total_now / total_total
+                        resp["bytes_now"] = total_now
+                        resp["bytes_total"] = total_total
                 return resp
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
