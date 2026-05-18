@@ -1,19 +1,26 @@
-"""Real-model recovery test.
+"""Real-model recovery test (LEGACY — pending rewrite).
 
-This is the only test that loads an actual mlx-lm model (Qwen2.5-0.5B,
-~300 MB cached after first run). It's the missing link between the fast
-fake-backed tests and what the user actually experiences: it verifies
-that after a worker drops mid-generation, the recovery produces a
-*coherent* continuation rather than collapsing into single-token
-repetition (the bug pattern the user observed in production:
-'their their their their…').
+This was written against the pre-delegation architecture where the
+hub loaded the model itself (`dots.hub.mlx_load`) and workers had a
+`dots.shard` module that defined per-shard forward passes. Both are
+gone in the current architecture:
 
-Marked slow so it's opt-in:
+  * Hub is a pure orchestrator now (no `mlx_load`).
+  * Per-worker compute lives in `dots/compute_plane/local.py`.
+  * Workers host the *full* model via `FullModelHost`, with optional
+    partial weight loading via `partial_loader.py`.
 
-    .venv/bin/python -m pytest tests/test_recovery_real_model.py -v
+The recovery story the test was pinning (worker drops mid-generation,
+remaining workers continue without collapsing into single-token
+repetition) is still a real concern in the chain-protocol world, but
+the test fixture mechanics — monkeypatching `dots.shard.*`, expecting
+`Worker.shard` to populate — no longer apply. The test needs a full
+rewrite against `delegate_turn` / chain-peer messaging.
 
-It does NOT run with the default `pytest tests/` invocation, which
-intentionally stays under a second.
+Skipping at module level so pytest doesn't fail to *collect* the file
+(the bare `import dots.shard` at the top of the original fixture
+raised `ModuleNotFoundError` before any test even ran, producing a
+permanent collection error in every CI run).
 """
 from __future__ import annotations
 
@@ -25,10 +32,17 @@ from typing import AsyncIterator
 import pytest
 import pytest_asyncio
 
-from dots.hub import Hub
-from dots.peer import PeerConnection
-from dots.util import free_ram_gb
-from dots.worker import Worker
+pytest.skip(
+    "Test was written for the pre-delegation architecture (dots.shard / "
+    "hub-side mlx_load). Needs a rewrite against the chain-protocol "
+    "worker recovery path before it can be re-enabled.",
+    allow_module_level=True,
+)
+
+from dots.hub import Hub                              # noqa: E402
+from dots.peer import PeerConnection                  # noqa: E402
+from dots.util import free_ram_gb                     # noqa: E402
+from dots.worker import Worker                        # noqa: E402
 
 # This file deliberately skips the autouse model-fake fixture from
 # conftest.py — we want the real model here.
