@@ -92,6 +92,26 @@ Plans are listed in roughly dependency order. Earlier ones unlock later ones.
   load only their assigned layer slice from disk. Unlocks 70B+ models on
   consumer Macs.
 
+### Hub refactor wave
+
+These three plans ship as one coherent architectural shift: hub becomes a
+pure scheduler, workers become resource bags, data plane moves to direct
+worker-to-worker connections. Read together; implement in roughly this
+order.
+
+- [`hybrid-pipeline.md`](./hybrid-pipeline.md) — Hub off the per-token
+  data plane. Workers send hidden states directly to each other. Hub
+  loads no model weights. Supersedes
+  [`mlx-decoupled-hub.md`](./mlx-decoupled-hub.md).
+- [`resource-scheduling.md`](./resource-scheduling.md) — Workers
+  declare resources (RAM, CPU, GPU, backends); hub builds a pairwise
+  latency graph via hub-triggered probing; placement is a constrained
+  shortest-path problem over the resource+latency graph.
+- [`worker-security-model.md`](./worker-security-model.md) — Bounded
+  hub → worker API surface; scope-split between hub-only ops and
+  peer-allowed ops; session-token-authenticated peer connections;
+  LAN-only bind defaults.
+
 ### Performance + topology
 
 - [`microbatching.md`](./microbatching.md) — N tokens in flight through
@@ -102,11 +122,6 @@ Plans are listed in roughly dependency order. Earlier ones unlock later ones.
 These came up in design conversations but don't have plan docs yet. Write
 them when you're ready to schedule:
 
-- **Hybrid pipeline** — hub stays as control + planning; workers ship
-  hidden states directly to each other for the data plane; workers
-  optimistically mirror their output back to the hub asynchronously so
-  the hub keeps full observability without being on the critical path.
-  Major architectural shift; deep dependency for usable big-pool latency.
 - **Multi-backend pool** — protocol-first design where each worker
   declares its inference stack (MLX, llama.cpp, vLLM, …). Hub stays
   framework-agnostic. Hidden-state-on-the-wire is the contract.
