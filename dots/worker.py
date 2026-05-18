@@ -144,21 +144,58 @@ class Worker:
 
     async def start(self) -> None:
         """High-level entry point used by the CLI: dispatches to the right
-        runner based on the flags passed at construction."""
+        runner based on the flags passed at construction.
+
+        We close the hub connection explicitly on exit so the hub sees a
+        FIN immediately. Without this, dropping out via Ctrl-C / Ctrl-D
+        left the StreamWriter to be torn down by asyncio's event-loop
+        shutdown — which doesn't reliably flush a FIN — and the hub
+        would keep the participant in its pool until TCP keepalive
+        timed it out (minutes later).
+        """
         await self.connect()
+        try:
+            if self.one_shot is not None:
+                await self._run_one_shot()
+                return
+            if self.headless:
+                await self._run_headless()
+                return
 
-        if self.one_shot is not None:
-            await self._run_one_shot()
-            return
-        if self.headless:
-            await self._run_headless()
-            return
+            # Default: open the interactive chat surface on top of this
+            # worker. Import lazily so the headless path stays cheap (no
+            # prompt_toolkit imports unless the user asked for chat).
+            from .chat import ChatUI
+            await self._run_with_chat(ChatUI(self))
+        finally:
+            await self._disconnect()
 
-        # Default: open the interactive chat surface on top of this worker.
-        # Import lazily so the headless path stays cheap (no prompt_toolkit
-        # imports unless the user asked for chat).
-        from .chat import ChatUI
-        await self._run_with_chat(ChatUI(self))
+    async def _disconnect(self) -> None:
+        """Tear down outgoing peer connections + the hub connection.
+
+        Idempotent — safe to call from a `finally` even if `connect()`
+        itself raised. Best-effort: swallows exceptions because we're on
+        the exit path and have nothing useful to do with them.
+        """
+        for peer in list(self._peer_conns.values()):
+            try:
+                await peer.close()
+            except Exception:
+                pass
+        self._peer_conns.clear()
+        if self._peer_server is not None:
+            try:
+                self._peer_server.close()
+                await self._peer_server.wait_closed()
+            except Exception:
+                pass
+            self._peer_server = None
+        if self.conn is not None:
+            try:
+                await self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
 
     async def connect(self) -> None:
         """Open TCP, send HELLO, wait for the hub's WELCOME."""
