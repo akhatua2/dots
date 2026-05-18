@@ -151,6 +151,10 @@ class Hub:
         # both for `load_units` broadcasts and for building the chain
         # spec at delegation time so the two views can't drift.
         self._current_placement: list[tuple[str, int, int, bool]] = []
+        # Per-worker download progress (0.0–1.0). Workers emit periodic
+        # `load_progress` notifications during load_partial; we aggregate
+        # for the chat client's progress bar.
+        self._load_progress: dict[str, float] = {}
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -386,24 +390,34 @@ class Hub:
 
     async def _broadcast_load_units(self, assignments) -> None:
         """Tell each worker which layer range to load + whether it's
-        the head (also owns embed/norm/lm_head/sample). Logs each
-        assignment so the operator can see exactly what's loading where
-        instead of staring at a blank hub log during a multi-GB download.
+        the head (also owns embed/norm/lm_head/sample).
+
+        Idempotent: a worker that already received this same assignment
+        is skipped. Otherwise every pool-change would re-trigger
+        load_units on in-progress workers and force them to restart
+        their multi-GB downloads from scratch.
         """
         instructed = 0
         for worker_id, layer_start, layer_end, needs_head in assignments:
             p = self.participants.get(worker_id)
-            if p is None or p.ready or not p.compute:
+            if p is None or not p.compute:
+                continue
+            new_range = (int(layer_start), int(layer_end))
+            # If this worker is already loading (or has loaded) exactly
+            # this slice, leave them alone. Re-broadcasting would
+            # restart the download.
+            if p.layer_range == new_range:
                 continue
             try:
                 await p.conn.notify(
                     "load_units",
                     model_id=self.model_id,
-                    layer_start=int(layer_start),
-                    layer_end=int(layer_end),
+                    layer_start=new_range[0],
+                    layer_end=new_range[1],
                     needs_head=bool(needs_head),
                 )
-                p.layer_range = (int(layer_start), int(layer_end))
+                p.layer_range = new_range
+                p.ready = False  # range changed → must re-validate via worker_ready
                 head_tag = " + head" if needs_head else ""
                 ui.notice(
                     f"worker·{p.short_id} ({p.display_owner}) "
@@ -448,17 +462,30 @@ class Hub:
                 return self._on_worker_ready(wid, msg)
             if kind == "delegate_token" and wid is not None:
                 return await self._on_delegate_token(wid, msg)
+            if kind == "load_progress" and wid is not None:
+                bytes_now = int(msg.get("bytes_now") or 0)
+                bytes_total = int(msg.get("bytes_total") or 0)
+                if bytes_total > 0:
+                    self._load_progress[wid] = min(1.0, bytes_now / bytes_total)
+                return None
             if kind == "status":
                 # Used by chat clients to pre-flight: don't show the
-                # input bar until ready. Returns the same simple
-                # {ready, state} a not_ready prompt response would —
+                # input bar until ready. Returns {ready, state, ?progress}.
                 # state ∈ {"loading", "waiting"} when not ready.
+                # progress (0-1) only present when state="loading";
+                # min across in-placement workers (slowest worker gates).
                 if self._pool_ready.is_set():
                     return {"kind": "status", "ready": True}
-                return {
-                    "kind": "status", "ready": False,
-                    "state": ("loading" if self._current_placement else "waiting"),
-                }
+                state = "loading" if self._current_placement else "waiting"
+                resp = {"kind": "status", "ready": False, "state": state}
+                if state == "loading" and self._current_placement:
+                    progs = [
+                        self._load_progress.get(seg[0], 0.0)
+                        for seg in self._current_placement
+                    ]
+                    if progs:
+                        resp["progress"] = min(progs)
+                return resp
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
 

@@ -117,18 +117,31 @@ def _spawn_companion_worker(
 
 def _shutdown_companion_worker(proc: subprocess.Popen) -> None:
     """Terminate a companion worker subprocess cleanly. Falls back to
-    SIGKILL if it doesn't exit promptly."""
+    SIGKILL if it doesn't exit promptly OR if the user is mashing
+    Ctrl-C and doesn't want to wait. The companion is detached, so
+    even a hard kill leaves no orphans for the parent shell."""
     if proc.poll() is not None:
         return
-    proc.terminate()
     try:
+        proc.terminate()
         proc.wait(timeout=3)
+        return
     except subprocess.TimeoutExpired:
-        proc.kill()
+        pass
+    except KeyboardInterrupt:
+        # User pressed Ctrl-C while we were waiting — they want out
+        # immediately. Hard-kill and stop waiting.
         try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+            proc.kill()
+        except Exception:
             pass
+        return
+    # First attempt timed out; escalate to SIGKILL.
+    try:
+        proc.kill()
+        proc.wait(timeout=2)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt, Exception):
+        pass
 
 
 # ─────────────────────────── account subcommand helpers ────────────────────
