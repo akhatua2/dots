@@ -222,54 +222,162 @@ class Hub:
             log.debug("could not prime geometry from config: %s", e)
 
     def _assign_units_to_workers(self) -> list[tuple[str, int, int, bool]]:
-        """Pick which workers host what.
+        """RAM-aware placement.
 
-        Default: every compute worker that joins gets the full model +
-        head. Each worker holds the whole model — no RAM split, but the
-        partial loader is exercised.
+        If the model fits on any single compute worker, place it entirely
+        on the one with the most free RAM — that's the optimal answer
+        (zero network, max TPS). Otherwise split decoder layers across
+        workers proportional to their free RAM, biggest-RAM worker as
+        the head (carries the embed + lm_head + sample overhead).
 
-        Set `DOTS_FORCE_PARTITION=1` to split decoder layers evenly across
-        the currently-connected compute workers and exercise the
-        multi-worker chain on real models. The first worker (sorted by
-        id) gets the head; the rest are chain segments. RAM savings are
-        real but placement is locked at first-pool-stable: a worker
-        joining/leaving after that does not re-place.
+        Returns `(worker_id, layer_start, layer_end, needs_head)` for
+        every worker that should load something. Workers not in the
+        return list stay idle (e.g. when one beefy worker hosts the
+        whole model, smaller workers don't bother loading).
+
+        Placement is locked at first-stable: workers joining later don't
+        force a re-placement (which would mean a multi-GB re-download
+        per already-loaded peer). New workers stay idle until the locked
+        members all leave.
         """
-        import os
-        if not self.n_layers:
+        if not self.n_layers or self._geometry is None:
             return []
-        workers = sorted(
+        compute_workers = sorted(
             (p for p in self.participants.values() if p.compute),
             key=lambda p: p.id,
         )
-        if not workers:
+        if not compute_workers:
             return []
 
-        force = os.environ.get("DOTS_FORCE_PARTITION", "").strip() not in ("", "0", "false")
-        # Lock partition placements after first computation — re-placing
-        # on every join would force already-loaded workers to download
-        # different layers (slow). New workers joining a locked
-        # partition just stay idle.
-        if force and self._current_placement and len(self._current_placement) >= 2:
+        model_ram_gb = self._estimate_model_ram_gb()
+        head_overhead_gb = self._estimate_head_overhead_gb()
+        layer_ram_gb = self._estimate_layer_ram_gb()
+        # Small margin so we never assign right up to a worker's edge.
+        margin_gb = 1.0
+
+        def free_ram(p: "Participant") -> float:
+            decl = self.pool_view.resources.get(p.id)
+            if decl is not None:
+                return decl.ram_gb_free
+            return p.free_ram_gb
+
+        # Default: every worker that can fit the model holds a full
+        # copy. This gives each querier self-utilization — their own
+        # machine answers their queries with zero network. Workers that
+        # can't fit the full model stay idle and can only chat (their
+        # queries route to whichever loaded worker the scheduler picks).
+        fitters = [
+            p for p in compute_workers
+            if free_ram(p) >= model_ram_gb + margin_gb
+        ]
+        if fitters:
+            # Don't cache — additional workers joining later should also
+            # load (they fit). New workers get the assignment on the
+            # next pool change.
+            out = [(p.id, 0, self.n_layers, True) for p in fitters]
+            self._current_placement = out
+            return out
+
+        # Below this point: at least one worker can't fit alone, so we
+        # need a partition. Re-check the cache — if it's a locked
+        # partition placement and all members are present, reuse it.
+        if (self._current_placement
+                and len(self._current_placement) >= 2
+                and self._current_placement[0][2] < self.n_layers):
             cached_ids = {w_id for w_id, *_ in self._current_placement}
-            if cached_ids.issubset({p.id for p in workers}):
+            if cached_ids.issubset({p.id for p in compute_workers}):
                 return list(self._current_placement)
 
-        if not force or len(workers) < 2:
-            out = [(p.id, 0, self.n_layers, True) for p in workers]
-        else:
-            # Even split of decoder layers; head worker also handles the
-            # extra (n_layers % k) layers if it doesn't divide evenly.
-            k = len(workers)
-            base, rem = divmod(self.n_layers, k)
-            out: list[tuple[str, int, int, bool]] = []
-            cursor = 0
-            for i, p in enumerate(workers):
-                count = base + (rem if i == 0 else 0)
-                out.append((p.id, cursor, cursor + count, i == 0))
-                cursor += count
+        # No single worker fits → partition. Largest worker becomes
+        # head (bears the head_overhead in addition to its layer share).
+        ranked = sorted(compute_workers, key=free_ram, reverse=True)
+        head = ranked[0]
+        chain = ranked[1:]
+        # Allocate per-worker layer budgets:
+        #   head:  (free_ram - head_overhead - margin) / layer_ram
+        #   chain: (free_ram - margin) / layer_ram
+        budgets: list[tuple["Participant", int]] = []
+        head_layer_budget = max(
+            0,
+            int((free_ram(head) - head_overhead_gb - margin_gb) / layer_ram_gb),
+        )
+        budgets.append((head, head_layer_budget))
+        for p in chain:
+            cap = max(0, int((free_ram(p) - margin_gb) / layer_ram_gb))
+            budgets.append((p, cap))
+        total_capacity = sum(c for _, c in budgets)
+        if total_capacity < self.n_layers:
+            ui.notice(
+                f"pool free RAM ({sum(free_ram(p) for p in compute_workers):.1f} GB) "
+                f"can't fit model (~{model_ram_gb:.1f} GB) even partitioned — "
+                f"waiting for more workers"
+            )
+            self._current_placement = []
+            return []
+        # Distribute n_layers across workers proportional to their
+        # budget, clipped at each worker's cap.
+        weights = [c for _, c in budgets]
+        total_w = sum(weights) or 1
+        sizes = [max(0, min(c, round(self.n_layers * w / total_w)))
+                 for (_, c), w in zip(budgets, weights)]
+        # Reconcile rounding drift to land on exactly n_layers, never
+        # exceeding any worker's cap.
+        diff = self.n_layers - sum(sizes)
+        i = 0
+        while diff != 0 and i < 10_000:
+            i += 1
+            if diff > 0:
+                spares = [
+                    (budgets[k][1] - sizes[k], k) for k in range(len(sizes))
+                    if sizes[k] < budgets[k][1]
+                ]
+                if not spares:
+                    break
+                _, idx = max(spares)
+                sizes[idx] += 1
+                diff -= 1
+            else:
+                shrinkable = [(sizes[k], k) for k in range(len(sizes)) if sizes[k] > 1]
+                if not shrinkable:
+                    break
+                _, idx = max(shrinkable)
+                sizes[idx] -= 1
+                diff += 1
+        if sum(sizes) != self.n_layers:
+            ui.notice("pool can't satisfy partition under per-worker caps")
+            self._current_placement = []
+            return []
+
+        out: list[tuple[str, int, int, bool]] = []
+        cursor = 0
+        for i, ((p, _), count) in enumerate(zip(budgets, sizes)):
+            if count <= 0:
+                continue
+            out.append((p.id, cursor, cursor + count, i == 0))
+            cursor += count
         self._current_placement = out
         return out
+
+    def _estimate_layer_ram_gb(self) -> float:
+        """Per-decoder-layer weight footprint at 4-bit (the common dots
+        target). 16·H² params × 0.5 B/param ≈ 8·H²; convert to GB."""
+        if self._geometry is None:
+            return 0.5  # safe-ish default
+        return 16 * (self._geometry.hidden_size ** 2) * 0.5 / 1e9
+
+    def _estimate_head_overhead_gb(self) -> float:
+        """Embed + lm_head storage on the head worker (bf16, unquantized)."""
+        if self._geometry is None:
+            return 1.0
+        head_params = self._geometry.vocab_size * self._geometry.hidden_size
+        # Roughly: embed (bf16) + lm_head (bf16) + working / KV margin.
+        return head_params * 2 * 2 / 1e9 + 0.5
+
+    def _estimate_model_ram_gb(self) -> float:
+        return (
+            self.n_layers * self._estimate_layer_ram_gb()
+            + self._estimate_head_overhead_gb()
+        )
 
     async def _broadcast_load_units(self, assignments) -> None:
         """Tell each worker which layer range to load + whether it's
