@@ -45,11 +45,15 @@ if TYPE_CHECKING:
 INDENT = "  "
 
 
-# prompt_toolkit input bar styling. Keep the magenta `›` consistent
-# with the rest of the dots look.
+# Subtle dark fill so the user's prompt line visually separates from
+# the model's response. Matches the Claude-Code look.
+_PROMPT_BG = "#1f1f1f"
+
+# prompt_toolkit input bar styling. Both the `›` marker and the
+# typed input get the same background; the marker stays magenta.
 _PROMPT_STYLE = Style.from_dict({
-    "prompt":  "ansimagenta bold",
-    "":        "",
+    "prompt":  f"ansimagenta bold bg:{_PROMPT_BG}",
+    "":        f"bg:{_PROMPT_BG}",
 })
 
 
