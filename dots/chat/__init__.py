@@ -30,7 +30,7 @@ from prompt_toolkit.styles import Style
 from .. import ui
 
 if TYPE_CHECKING:
-    from .worker import Worker
+    from ..worker import Worker
 
 
 # 2-space leading margin for everything in the chat area. `›` sits at col 2;
@@ -372,7 +372,13 @@ class ChatUI:
                 generating["flag"] = True
                 self._app.invalidate()
                 try:
-                    from .worker import PoolNotReadyError
+                    # dots.worker is one package level up from dots.chat;
+                    # `.worker` would resolve to dots.chat.worker (doesn't
+                    # exist), and the resulting ImportError killed the
+                    # chat_processor task on the very first prompt,
+                    # silently leaving the UI in "ctrl-c to interrupt"
+                    # state forever.
+                    from ..worker import PoolNotReadyError
 
                     # If the pool transitions to not_ready mid-session
                     # (e.g. a worker drops and replacement is loading),
