@@ -358,7 +358,11 @@ class Hub:
 
     async def _broadcast_load_units(self, assignments) -> None:
         """Tell each worker which layer range to load + whether it's
-        the head (also owns embed/norm/lm_head/sample)."""
+        the head (also owns embed/norm/lm_head/sample). Logs each
+        assignment so the operator can see exactly what's loading where
+        instead of staring at a blank hub log during a multi-GB download.
+        """
+        instructed = 0
         for worker_id, layer_start, layer_end, needs_head in assignments:
             p = self.participants.get(worker_id)
             if p is None or p.ready or not p.compute:
@@ -372,8 +376,19 @@ class Hub:
                     needs_head=bool(needs_head),
                 )
                 p.layer_range = (int(layer_start), int(layer_end))
+                head_tag = " + head" if needs_head else ""
+                ui.notice(
+                    f"worker·{p.short_id} ({p.display_owner}) "
+                    f"loading layers [{layer_start}:{layer_end}]{head_tag}…"
+                )
+                instructed += 1
             except Exception:
                 log.debug("load_units notify failed for %s", worker_id, exc_info=True)
+        if instructed > 1:
+            ui.notice(
+                f"(first-time downloads can take a few minutes — "
+                f"pool will be ready when each worker reports back)"
+            )
 
     # ─────────────────────────── connection lifecycle ────────────────────
 
@@ -523,7 +538,7 @@ class Hub:
         if participant is None:
             return {"kind": "error", "error": "worker no longer in pool"}
         if not self._pool_ready.is_set():
-            return {"kind": "error", "error": "pool not ready"}
+            return self._not_ready_status_response()
 
         conv = participant.conv
         conv.history.append({"role": "user", "content": msg["text"]})
@@ -619,6 +634,20 @@ class Hub:
         participant.conv.history.clear()
         participant.conv.token_count = 0
         return {"kind": "ok"}
+
+    def _not_ready_status_response(self) -> dict:
+        """Tell the chat client which of the two non-ready states the
+        pool is in. Only two values; the chat picks the friendly text.
+
+        Detail (RAM numbers, model id, worker counts) stays in the hub
+        log — never in the user-facing response.
+        """
+        compute_workers = [p for p in self.participants.values() if p.compute]
+        # If we've already decided a placement, workers are loading.
+        # Otherwise the pool either has no workers or can't fit the
+        # model — both look the same to the user: "need more machines".
+        state = "loading" if self._current_placement else "waiting"
+        return {"kind": "not_ready", "state": state}
 
     async def reset_conversation_on_workers(self, conv_id: str) -> None:
         """Broadcast `reset_conversation` to every compute worker. Used by
@@ -914,11 +943,21 @@ class Hub:
         # Synthesize a layer_range so the ledger attribution path keeps
         # working. Each worker hosts the entire model in v1, so the range
         # is the full set.
-        if self.n_layers:
+        # `layer_range` was set in _broadcast_load_units to the actual
+        # assignment (which may be a slice). Only fall back to "the
+        # whole model" if no load_units was ever sent (legacy path).
+        if self.n_layers and p.layer_range is None:
             p.layer_range = (0, self.n_layers)
+        was_ready = self._pool_ready.is_set()
         self._pool_ready.set()
+        a, b = p.layer_range or (0, self.n_layers)
         ui.notice(f"worker·{p.short_id} ({p.display_owner}) ready "
-                  f"({self.n_layers} layers loaded)")
+                  f"(layers [{a}:{b}])")
+        # Log a single "pool ready" line once every assigned worker has
+        # reported back, so the operator knows queries will now succeed.
+        compute_workers = [w for w in self.participants.values() if w.compute]
+        if compute_workers and all(w.ready for w in compute_workers) and not was_ready:
+            ui.notice("pool ready — accepting queries")
         # Now that this worker can serve, kick off pairwise RTT probes
         # between it and every other ready compute worker. Each pair
         # produces one cell in `pool_view.latency`.
