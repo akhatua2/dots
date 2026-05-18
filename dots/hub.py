@@ -153,6 +153,10 @@ class Hub:
         # client during a delegate_turn. Populated in `run_turn` and
         # consulted in `_on_delegate_token`.
         self._token_routers: dict[str, "asyncio.Future | object"] = {}
+        # Locked-in unit assignment from `_assign_units_to_workers`. Used
+        # both for `load_units` broadcasts and for building the chain
+        # spec at delegation time so the two views can't drift.
+        self._current_placement: list[tuple[str, int, int, bool]] = []
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
@@ -220,20 +224,52 @@ class Hub:
     def _assign_units_to_workers(self) -> list[tuple[str, int, int, bool]]:
         """Pick which workers host what.
 
-        v1 strategy: every compute worker that joins is told to load the
-        full model + head. The partial-loader machinery proves out
-        without changing placement behavior (each worker still has all
-        layers in RAM). Scheduler-driven partitioning — where a 70B
-        actually splits across multiple Macs' RAM — is the next PR; that
-        change touches placement re-planning on pool drops, mid-life
-        re-loads, and chain-routing defaults.
+        Default: every compute worker that joins gets the full model +
+        head. Each worker holds the whole model — no RAM split, but the
+        partial loader is exercised.
+
+        Set `DOTS_FORCE_PARTITION=1` to split decoder layers evenly across
+        the currently-connected compute workers and exercise the
+        multi-worker chain on real models. The first worker (sorted by
+        id) gets the head; the rest are chain segments. RAM savings are
+        real but placement is locked at first-pool-stable: a worker
+        joining/leaving after that does not re-place.
         """
+        import os
         if not self.n_layers:
             return []
-        return [
-            (p.id, 0, self.n_layers, True)
-            for p in self.participants.values() if p.compute
-        ]
+        workers = sorted(
+            (p for p in self.participants.values() if p.compute),
+            key=lambda p: p.id,
+        )
+        if not workers:
+            return []
+
+        force = os.environ.get("DOTS_FORCE_PARTITION", "").strip() not in ("", "0", "false")
+        # Lock partition placements after first computation — re-placing
+        # on every join would force already-loaded workers to download
+        # different layers (slow). New workers joining a locked
+        # partition just stay idle.
+        if force and self._current_placement and len(self._current_placement) >= 2:
+            cached_ids = {w_id for w_id, *_ in self._current_placement}
+            if cached_ids.issubset({p.id for p in workers}):
+                return list(self._current_placement)
+
+        if not force or len(workers) < 2:
+            out = [(p.id, 0, self.n_layers, True) for p in workers]
+        else:
+            # Even split of decoder layers; head worker also handles the
+            # extra (n_layers % k) layers if it doesn't divide evenly.
+            k = len(workers)
+            base, rem = divmod(self.n_layers, k)
+            out: list[tuple[str, int, int, bool]] = []
+            cursor = 0
+            for i, p in enumerate(workers):
+                count = base + (rem if i == 0 else 0)
+                out.append((p.id, cursor, cursor + count, i == 0))
+                cursor += count
+        self._current_placement = out
+        return out
 
     async def _broadcast_load_units(self, assignments) -> None:
         """Tell each worker which layer range to load + whether it's
@@ -362,6 +398,10 @@ class Hub:
                 if self.participants.get(worker_id) is participant:
                     self.participants.pop(worker_id, None)
                     self.pool_view.remove(worker_id)
+                # If this worker was part of the locked placement, clear
+                # the cache so the next pool-changed builds a fresh one.
+                if any(seg[0] == worker_id for seg in self._current_placement):
+                    self._current_placement = []
             left_role = "worker" if participant.compute else "client"
             ui.notice(f"{left_role}·{participant.short_id} "
                       f"({participant.display_owner}) left")
@@ -598,6 +638,10 @@ class Hub:
     ) -> "tuple[Participant | None, int, list[dict]]":
         """Pick head + chain for this turn.
 
+        If a partition placement is locked in (DOTS_FORCE_PARTITION), use
+        that directly so workers run only the layers they actually loaded.
+        Otherwise fall back to scheduler-picked single-worker delegation.
+
         Two outputs:
           • `head` is the worker we send `delegate_turn` to. It hosts embed,
             its own decoder-layer slice, final norm, lm_head, and the
@@ -618,6 +662,38 @@ class Hub:
         ]
         if not candidates:
             return None, 0, []
+
+        # If the hub locked a *true* multi-segment partition placement
+        # (each worker holds only its layer slice), use it directly. We
+        # detect this by the head segment's end being less than
+        # n_layers — otherwise it's a "full to everyone" placement and
+        # the chain path doesn't apply.
+        partition_active = (
+            self._current_placement
+            and len(self._current_placement) >= 2
+            and self._current_placement[0][2] < self.n_layers
+        )
+        if partition_active:
+            ready_ids = {p.id for p in candidates}
+            if all(seg[0] in ready_ids for seg in self._current_placement):
+                head_id, _, head_end, _ = self._current_placement[0]
+                head = next((p for p in candidates if p.id == head_id), None)
+                if head is not None:
+                    chain_payload: list[dict] = []
+                    for worker_id, start, end, _ in self._current_placement[1:]:
+                        p = next((p for p in candidates if p.id == worker_id), None)
+                        if p is None or p.peer_listen_port is None:
+                            chain_payload = []
+                            break
+                        chain_payload.append({
+                            "worker_id": worker_id,
+                            "host": p.peer_host,
+                            "port": int(p.peer_listen_port),
+                            "layer_start": int(start),
+                            "layer_end": int(end),
+                        })
+                    if chain_payload or len(self._current_placement) == 1:
+                        return head, int(head_end), chain_payload
 
         # Single-worker fast path: only one candidate ⇒ no chain needed.
         if len(candidates) == 1 or self._geometry is None or self.n_layers <= 1:
