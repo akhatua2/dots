@@ -20,6 +20,16 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from .util import load_dotenv_into_env as _load_dotenv
 _load_dotenv()
 
+# Opt every dots run into the fast Rust-based HF downloader when the
+# package is available. Brings multi-shard 30B-class downloads from
+# "Python single-stream, ~10 MB/s" to "parallel, often 100+ MB/s".
+# Honors an explicit `HF_HUB_ENABLE_HF_TRANSFER=0` if the user disables it.
+try:
+    import hf_transfer  # noqa: F401
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+except ImportError:
+    pass
+
 import argparse
 import asyncio
 import getpass
