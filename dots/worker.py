@@ -108,6 +108,13 @@ class Worker:
         self.host: FullModelHost | None = None
         self._host_ready = asyncio.Event()
         self._host_load_task: asyncio.Task | None = None
+        # Exact assignment that produced the currently-loaded host. Lets
+        # `_handle_load_units` distinguish "same instruction we already
+        # served" from "hub re-partitioned, need to re-load with new
+        # range/head".
+        self._loaded_assignment: (
+            tuple[str, int, int | None, bool] | None
+        ) = None
         # Peer server: compute workers also listen for incoming peer
         # connections so the hub can ask them to probe each other (and so
         # the future multi-worker pipeline can pass hidden states without
@@ -351,6 +358,11 @@ class Worker:
                 pass
         self.host = FullModelHost(model, tokenizer)
         self.n_layers = n_total
+        # Remember the assignment that produced this host, so future
+        # load_units with the same (model_id, range, head) become no-ops.
+        self._loaded_assignment = (
+            model_id, layer_start, layer_end, needs_head,
+        )
         self._host_ready.set()
         ui.info(f"worker ready · {self.host.n_layers} layers · "
                 f"{self.host.active_params / 1e9:.2f}B active params")
@@ -535,9 +547,12 @@ class Worker:
         return {"kind": "error", "error": f"unknown kind: {kind}"}
 
     async def _handle_load_units(self, msg: dict) -> dict | None:
-        """Hub-driven model load. Idempotent — re-issuing with the same
-        assignment is a no-op; re-issuing with a different assignment
-        kicks off a fresh load (the previous host is replaced)."""
+        """Hub-driven model load. Idempotent on the EXACT assignment —
+        re-issuing the same (model_id, layer_start, layer_end, needs_head)
+        is a no-op. If any field differs (hub re-partitioned after a
+        worker leave/join), we cancel any in-flight load and start a
+        fresh one with the new assignment.
+        """
         if not self.compute:
             return None
         model_id = msg.get("model_id") or self.model_id
@@ -545,18 +560,31 @@ class Worker:
         layer_end_raw = msg.get("layer_end")
         layer_end = int(layer_end_raw) if layer_end_raw is not None else None
         needs_head = bool(msg.get("needs_head", True))
-        # Already loaded with this exact assignment? Nothing to do.
-        if (self.host is not None
-                and self.model_id == model_id
+        assignment = (model_id, layer_start, layer_end, needs_head)
+        if (self._loaded_assignment == assignment
+                and self.host is not None
                 and self._host_ready.is_set()):
             return None
+        # Different assignment than what we have. Cancel any load in
+        # progress so we don't end up with two competing _load_host_async
+        # tasks racing to set `self.host`.
+        if self._host_load_task is not None and not self._host_load_task.done():
+            self._host_load_task.cancel()
+            try:
+                await self._host_load_task
+            except (asyncio.CancelledError, Exception):
+                pass
         self.model_id = model_id
         self._host_ready.clear()
+        self._loaded_assignment = None
         self._host_load_task = asyncio.create_task(
             self._load_host_async(
                 model_id, layer_start, layer_end, needs_head,
             )
         )
+        # Stash the assignment so a follow-up load_units for the same
+        # range becomes a no-op as soon as the load completes.
+        self._pending_assignment = assignment
         return None
 
     async def _handle_delegate_turn(self, msg: dict) -> dict:
