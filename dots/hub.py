@@ -1177,8 +1177,10 @@ class Hub:
         )
         if len(workers) < 2:
             return
-        # Column header / label width: max of "X→" label + short_id length
-        labels = [f"{p.short_id} ({p.display_owner})" for p in workers]
+        # Column / row labels: just the display owner. The short_id is
+        # in the join/leave lines already; tacking it onto every cell of
+        # an NxN mesh table is noise.
+        labels = [p.display_owner for p in workers]
         col_w = max(len(lab) for lab in labels) + 1
         header = " " * (col_w + 2) + "  ".join(f"{lab:>{col_w}}" for lab in labels)
         rows = [header]
