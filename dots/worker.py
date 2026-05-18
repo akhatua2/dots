@@ -24,6 +24,7 @@ from typing import Callable
 
 from . import ui
 from .inference import FullModelHost
+from .load_progress import monitor_download_progress
 from .partial_loader import load_partial
 from .peer import PeerConnection
 from .pool import resource_decl_to_hello_field
@@ -315,6 +316,23 @@ class Worker:
             + (" + head" if needs_head else "")
         )
         ui.info(f"loading {model_id} {slice_descr} on worker…")
+
+        async def emit_progress(bytes_now: int, bytes_total: int) -> None:
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify(
+                    "load_progress",
+                    worker_id=self.identity,
+                    bytes_now=int(bytes_now),
+                    bytes_total=int(bytes_total),
+                )
+            except Exception:
+                log.debug("load_progress notify failed", exc_info=True)
+
+        monitor = asyncio.create_task(
+            monitor_download_progress(model_id, emit_progress)
+        )
         try:
             model, tokenizer, n_total = await asyncio.to_thread(
                 load_partial, model_id,
@@ -325,6 +343,12 @@ class Worker:
         except Exception as e:
             ui.error(f"model load failed on worker: {e}")
             raise
+        finally:
+            monitor.cancel()
+            try:
+                await monitor
+            except (asyncio.CancelledError, Exception):
+                pass
         self.host = FullModelHost(model, tokenizer)
         self.n_layers = n_total
         self._host_ready.set()

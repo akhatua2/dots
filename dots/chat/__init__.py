@@ -27,7 +27,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.styles import Style
 
-from . import ui
+from .. import ui
 
 if TYPE_CHECKING:
     from .worker import Worker
@@ -57,16 +57,12 @@ _PROMPT_STYLE = Style.from_dict({
 })
 
 
-# Star-burst spinner — matches the visual style Claude Code uses. The
-# rotation grows from a small dot through several star shapes for a
-# pleasant breathing animation rather than a strict mechanical spin.
-_SPINNER_FRAMES = ("·", "✦", "✢", "✻", "✺", "✽", "✶")
-
-
-_POOL_STATE_TEXT = {
-    "loading": "Loading the model",
-    "waiting": "Waiting for more machines",
-}
+from .spinner import (
+    POOL_STATE_TEXT as _POOL_STATE_TEXT,
+    SPINNER_FRAMES as _SPINNER_FRAMES,
+    frame_at as _frame_at,
+    render_bar as _render_bar,
+)
 
 
 def _ttysize() -> tuple[int, int]:
@@ -176,10 +172,15 @@ class ChatUI:
             while True:
                 state = status.get("state", "loading")
                 msg = _POOL_STATE_TEXT.get(state, "Loading")
-                spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
-                line = f"  {spinner}  {msg}…"
-                # Pad to clear any leftover characters from a longer
-                # previous message (waiting → loading is shorter).
+                spinner = _frame_at(frame)
+                # When the hub knows download progress, show a real bar.
+                progress = status.get("progress")
+                if state == "loading" and isinstance(progress, (int, float)):
+                    line = f"  {spinner}  {msg}…  {_render_bar(float(progress))}"
+                else:
+                    line = f"  {spinner}  {msg}…"
+                # Pad to clear leftover characters from a longer previous
+                # message (waiting → loading is shorter; bar grows).
                 pad = max(0, len(last_msg) - len(line))
                 sys.stdout.write("\r" + line + (" " * pad))
                 sys.stdout.flush()
