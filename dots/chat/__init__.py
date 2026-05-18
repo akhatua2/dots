@@ -252,7 +252,7 @@ class ChatUI:
 
         def status_text():
             parts: list[tuple[str, str]] = [
-                ("class:status.marker", f"{INDENT}‣‣ "),
+                ("class:status.dim", INDENT),
             ]
             if self._pool_state is not None:
                 frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
