@@ -571,16 +571,40 @@ class Hub:
         async with self._pool_lock:
             self._topology_gen += 1
             workers = [p for p in self.participants.values() if p.compute]
-            self._pool_ready.clear()
             if not workers:
+                self._pool_ready.clear()
                 ui.notice("no compute workers — waiting")
                 return
             assignments = self._assign_units_to_workers()
-            if any(p.ready for p in workers):
-                self._pool_ready.set()
 
         if assignments:
             await self._broadcast_load_units(assignments)
+
+        # Reconcile pool_ready against the *new* placement. Multi-worker
+        # chains need EVERY assigned worker ready before serving — a
+        # single ready worker can't carry the chain alone. Previously
+        # this was `any(...)` which set pool_ready as soon as one worker
+        # came back, so chat UIs opened prematurely and the first prompt
+        # would hang on a partially-loaded chain.
+        async with self._pool_lock:
+            self._refresh_pool_ready()
+
+    def _refresh_pool_ready(self) -> None:
+        """Set or clear `_pool_ready` based on whether every worker in
+        the current placement has reported ready. Idempotent — safe to
+        call from anywhere a worker's readiness might change."""
+        placement_ids = {seg[0] for seg in self._current_placement}
+        if not placement_ids:
+            self._pool_ready.clear()
+            return
+        ready_ids = {
+            wid for wid, p in self.participants.items()
+            if p.compute and p.ready
+        }
+        if placement_ids.issubset(ready_ids):
+            self._pool_ready.set()
+        else:
+            self._pool_ready.clear()
 
     # ────────────────────────────── one turn ────────────────────────────
 
@@ -1067,7 +1091,11 @@ class Hub:
         if self.n_layers and p.layer_range is None:
             p.layer_range = (0, self.n_layers)
         was_ready = self._pool_ready.is_set()
-        self._pool_ready.set()
+        # Only mark the pool ready when EVERY worker in the placement
+        # has reported back. A single ready worker in a multi-worker
+        # chain can't serve a turn alone — the chain breaks at the
+        # un-loaded peer and the chat prompt hangs forever.
+        self._refresh_pool_ready()
         a, b = p.layer_range or (0, self.n_layers)
         ui.notice(f"worker·{p.short_id} ({p.display_owner}) ready "
                   f"(layers [{a}:{b}])")

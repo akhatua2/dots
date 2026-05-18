@@ -159,6 +159,43 @@ def test_status_switches_to_waiting_for_peers_when_local_done():
     )
 
 
+def test_pool_ready_requires_ALL_workers_in_placement():
+    """Multi-worker chains break if pool_ready fires before every
+    assigned worker reports back: arpan finishes its 1 layer + head,
+    pool flips ready, chat UI opens, first prompt hits arpan, arpan
+    forwards hidden state to arpan-nvidia — which is still loading
+    63 layers — and the chain hangs forever.
+
+    The previous version used `any(p.ready)` here; pinning the fix to
+    `all(p.ready for p in placement_workers)` so the regression can't
+    return."""
+    hub = _seed_hub_with_two_workers()
+    hub._pool_ready.clear()
+    # fast: ready. slow: still loading.
+    hub.participants["W-fast"].ready = True
+    hub.participants["W-slow"].ready = False
+    hub._refresh_pool_ready()
+    assert not hub._pool_ready.is_set(), (
+        "pool must NOT be ready while a placement worker is still loading"
+    )
+    # Once the slow one finishes loading too:
+    hub.participants["W-slow"].ready = True
+    hub._refresh_pool_ready()
+    assert hub._pool_ready.is_set(), (
+        "pool should become ready when every placement worker is ready"
+    )
+
+
+def test_pool_ready_clears_when_no_placement():
+    """No placement → no pool. Trivially: a hub with no workers in
+    its current placement can never be 'ready'."""
+    hub = _seed_hub_with_two_workers()
+    hub._current_placement = []
+    hub._pool_ready.set()
+    hub._refresh_pool_ready()
+    assert not hub._pool_ready.is_set()
+
+
 def test_status_returns_ready_when_pool_ready():
     """Once `_pool_ready` is set, the chat client gets the minimal
     `ready: True` response and dismisses the spinner immediately."""
