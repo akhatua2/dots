@@ -256,8 +256,11 @@ def clear_worker_pid(only_if: int | None = None) -> None:
 
 
 def read_live_worker_pid() -> int | None:
-    """Returns the PID of a `dots worker` running on this machine, or None
-    if no PID is recorded or the recorded process is dead."""
+    """Returns the PID of a *real* `dots worker` running on this machine,
+    or None if no PID is recorded, the recorded process is dead, or the
+    PID got recycled to an unrelated program. We confirm by reading the
+    process's command line; if it doesn't look like a dots worker, we
+    treat the file as stale and clear it."""
     f = worker_pid_file()
     if not f.exists():
         return None
@@ -268,10 +271,25 @@ def read_live_worker_pid() -> int | None:
     try:
         os.kill(pid, 0)        # signal 0 = liveness probe, no actual signal
     except OSError:
-        # stale entry — process is gone
         try:
             f.unlink()
         except OSError:
             pass
         return None
+    # Verify it's actually a dots worker by inspecting the command line.
+    # `ps -p PID -o command=` returns the cmdline minus the PID/header.
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL, text=True,
+        )
+        if "dots" not in out or "worker" not in out:
+            # Recycled to an unrelated program — drop the stale file.
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            return None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
     return pid
