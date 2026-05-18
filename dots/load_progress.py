@@ -17,11 +17,15 @@ log = logging.getLogger("dots.load_progress")
 
 
 def hf_cache_size_for(model_id: str) -> int:
-    """Sum of fully-downloaded files in the HF cache for this model.
+    """Bytes on disk in the HF cache for this model — including
+    in-flight `.incomplete` partial downloads.
 
-    Excludes `.incomplete` partial downloads so the progress only ever
-    increases as shards finish (rather than jittering with in-flight
-    bytes). Returns 0 if nothing's cached yet.
+    Including `.incomplete` bytes is important for a smooth progress
+    bar: HF downloads shards into `<name>.safetensors.incomplete` and
+    renames on completion, so a multi-GB shard contributes zero to a
+    "completed files only" view for the full duration of its download.
+    Counting partial bytes lets the bar grow steadily during each
+    shard rather than jumping in big steps every few minutes.
     """
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
@@ -32,7 +36,7 @@ def hf_cache_size_for(model_id: str) -> int:
         return 0
     total = 0
     for path in model_dir.rglob("*"):
-        if not path.is_file() or path.name.endswith(".incomplete"):
+        if not path.is_file():
             continue
         try:
             total += path.stat().st_size
