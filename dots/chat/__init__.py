@@ -176,9 +176,9 @@ class ChatUI:
                 # When the hub knows download progress, show a real bar.
                 progress = status.get("progress")
                 if state == "loading" and isinstance(progress, (int, float)):
-                    line = f"  {spinner}  {msg}…  {_render_bar(float(progress))}"
+                    line = f"  {spinner}  {msg}  {_render_bar(float(progress))}"
                 else:
-                    line = f"  {spinner}  {msg}…"
+                    line = f"  {spinner}  {msg}"
                 # Pad to clear leftover characters from a longer previous
                 # message (waiting → loading is shorter; bar grows).
                 pad = max(0, len(last_msg) - len(line))
