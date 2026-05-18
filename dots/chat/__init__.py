@@ -1,44 +1,36 @@
-"""Interactive chat UI for dots.
+"""Interactive chat UI — terminal-native scrollback, rich-rendered output.
 
-Hybrid layout: prompt_toolkit owns the persistent shell (banner up top,
-history pane in the middle, rules + always-on input bar + status row
-pinned at the bottom). `rich` owns the *content* rendering — each
-assistant response goes through `rich.markdown.Markdown` and is
-captured as ANSI-encoded text that the history pane displays.
+Everything visible above the input bar is printed via `rich.Console`
+straight to the terminal, so the terminal's own scrollback captures
+the entire conversation. Mouse-wheel scroll just works; resizing the
+terminal redraws naturally; older content never gets clipped by a
+managed window.
 
-That way:
-  * The input bar is always visible; the user can start typing the
-    next message immediately, even while a response is still streaming.
-  * `**bold**`, fenced code blocks, lists, headers — all render with
-    proper terminal styling, not as literal markdown syntax.
-  * Streaming works in-place: the in-flight response is the last
-    entry in the history list, re-rendered on every token chunk;
-    Application.invalidate() repaints the history pane.
+Only the single-line input bar is "live" — `prompt_toolkit`'s
+`PromptSession` owns the bottom row. `patch_stdout()` routes any
+output that arrives while a prompt is open to appear above the bar,
+so streaming responses don't fight the input cursor.
 
-The Worker handles the wire protocol; ChatUI only owns what the human
-types and sees.
+The Worker handles the wire protocol + token notifications; ChatUI
+just owns what the human types and sees.
 """
 from __future__ import annotations
 
 import asyncio
 import io
-import shutil
+import sys
 from typing import TYPE_CHECKING
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
+from rich.style import Style as RichStyle
 from rich.table import Table
-from rich.text import Text as RichText
+from rich.text import Text
 
 from .. import ui
 
@@ -48,27 +40,14 @@ if TYPE_CHECKING:
 
 INDENT = "  "
 
-
-# Subtle dark fill behind the user's input row + echoed prompts.
-# Visually separates "what the user said" from "what the model said"
-# above it (matches the Claude-Code look).
+# Subtle dark fill behind sent prompts so user messages visually
+# separate from the model's rendered markdown responses.
 _PROMPT_BG = "#2d2d2d"
 
 
 _PROMPT_STYLE = Style.from_dict({
-    "prompt":          "ansimagenta bold",
-    "rule":            "fg:#5a5a5a bg:default",
-    "banner.star":     "fg:ansiyellow bold bg:default",
-    "banner.dot":      "fg:#7a4b7a bg:default",
-    "banner.name":     "fg:ansimagenta bold bg:default",
-    "banner.version":  "fg:#888888 bg:default",
-    "banner.key":      "fg:ansicyan bg:default",
-    "banner.value":    "fg:default bg:default",
-    "status.marker":   "fg:ansimagenta bg:default bold",
-    "status.tps":      "fg:ansicyan bg:default",
-    "status.dim":      "fg:#888888 bg:default",
-    "status.spinner":  "fg:ansicyan bold bg:default",
-    "status.notice":   "fg:#aaaaaa bg:default",
+    "prompt": f"ansimagenta bold bg:{_PROMPT_BG}",
+    "":       f"bg:{_PROMPT_BG}",
 })
 
 
@@ -81,104 +60,18 @@ from .spinner import (
 )
 
 
-def _ttysize() -> tuple[int, int]:
-    return shutil.get_terminal_size((80, 24))
-
-
-def _render_markdown_to_ansi(text: str, width: int) -> str:
-    """Render markdown via rich and capture the ANSI-encoded output so
-    prompt_toolkit's FormattedTextControl can display it via ANSI().
-
-    Layout matches Claude Code: a dimmed `⎿ ` corner marker in a narrow
-    left column, then the markdown content overflowing into the right
-    column. Code blocks get monokai theming."""
-    buf = io.StringIO()
-    console = Console(
-        file=buf,
-        force_terminal=True,
-        color_system="truecolor",
-        width=max(20, width),
-        legacy_windows=False,
-        soft_wrap=False,
-    )
-    md = Markdown(text or "…", code_theme="monokai")
-    t = Table.grid(padding=(0, 0), pad_edge=False)
-    t.add_column(no_wrap=True, width=5)
-    t.add_column(overflow="fold")
-    t.add_row(RichText(f"{INDENT}⎿ ", style="dim"), md)
-    console.print(t)
-    return buf.getvalue()
-
-
-def _render_user_prompt_to_ansi(text: str, width: int) -> str:
-    """Echo a sent prompt as `  › <text>` with a dark full-width fill,
-    so user messages in history visually separate from the rendered
-    markdown responses above them.
-
-    Width-pad with spaces in the same background so the fill extends
-    to the right edge of the terminal — single-color text isn't enough
-    on its own because terminals don't auto-extend a bg past the
-    last visible character.
-    """
-    buf = io.StringIO()
-    console = Console(
-        file=buf, force_terminal=True, color_system="truecolor",
-        width=max(20, width), legacy_windows=False, soft_wrap=False,
-    )
-    line = RichText()
-    bg = f"on {_PROMPT_BG}"
-    line.append(f"{INDENT}› ", style=f"bold magenta {bg}")
-    line.append(text, style=bg)
-    pad = max(0, width - len(INDENT) - 2 - len(text))
-    if pad > 0:
-        line.append(" " * pad, style=bg)
-    console.print(line)
-    return buf.getvalue()
-
-
-def _render_plain_notice_to_ansi(text: str, width: int) -> str:
-    """Dim italic single-line note — used for /reset confirmations and
-    error messages that aren't model output."""
-    buf = io.StringIO()
-    console = Console(
-        file=buf, force_terminal=True, color_system="truecolor",
-        width=max(20, width), legacy_windows=False, soft_wrap=False,
-    )
-    console.print(RichText(f"{INDENT}{text}", style="dim italic"))
-    return buf.getvalue()
-
-
 class ChatUI:
-    """Interactive chat surface. Persistent HSplit Application from
-    prompt_toolkit; rich-rendered ANSI for the history content."""
+    """Interactive chat surface for a Worker that's already connected
+    to a hub. Output is stdout-native; only the prompt bar is live."""
 
     def __init__(self, worker: "Worker"):
         self.worker = worker
-        self._app: Application | None = None
-        # Ordered list of rendered ANSI strings, one per "history item"
-        # (user prompt, assistant response, notice, etc.). The history
-        # pane joins these into the text it displays.
-        self._history_items: list[str] = []
-        # Index of the in-flight assistant response (so streaming can
-        # replace it on every token). None when nothing is generating.
-        self._streaming_idx: int | None = None
-        # How many visible lines we've scrolled up from the bottom of
-        # history. 0 = pinned to the latest content (default). PageUp
-        # increases it; new content arriving while pinned (offset=0)
-        # keeps the view glued to the bottom — standard chat UX.
-        self._scroll_offset: int = 0
-        # Cumulative across the entire chat session — tokens decoded
-        # and seconds spent decoding. Average TPS is just the ratio.
-        # We report the running averages in the status row so the
-        # user has a session-level number, not just the most recent
-        # turn's spike or dip.
+        self._console = Console()
+        # Cumulative across the chat session. Average TPS is the ratio;
+        # `rprompt` (right-hand side of the live input bar) renders
+        # them as a single right-aligned dim string.
         self._total_decode_tokens: int = 0
         self._total_decode_s: float = 0.0
-        # Pool state shown in the status row when the hub reports
-        # `not_ready`. None = serving normally; otherwise one of the
-        # values in _POOL_STATE_TEXT.
-        self._pool_state: str | None = None
-        self._spinner_frame = 0
 
     # ─────────────────────────── pre-flight ──────────────────────────
 
@@ -186,7 +79,6 @@ class ChatUI:
         """Animate a spinner on stdout until the hub reports the pool
         can serve. `\\r`-rewrites a single line; clears it when ready.
         Ctrl-C cancels (raises asyncio.CancelledError)."""
-        import sys
         try:
             status = await worker.get_pool_status()
         except Exception:
@@ -233,267 +125,107 @@ class ChatUI:
     async def run(self) -> None:
         worker = self.worker
         await self._wait_for_pool_ready(worker)
+
         hub_addr = f"{worker.hub_host}:{worker.hub_port}"
-        banner_segments = ui.banner_segments(
-            worker.model_id, hub_addr, layer_range=None,
+        ui.banner(worker.model_id, hub_addr, layer_range=None)
+        self._console.print(
+            Text(INDENT + "/help · /reset · /usage · Ctrl-D to exit\n",
+                 style="dim"),
         )
 
-        input_buf = Buffer(multiline=False)
-        prompt_queue: asyncio.Queue[str] = asyncio.Queue()
-        generating = {"flag": False}
-
-        intro = (f"{INDENT}/help · /reset · /usage · Ctrl-D to exit\n")
-        self._history_items.append(
-            _render_plain_notice_to_ansi(intro, _ttysize()[0])
-        )
-
-        # Banner/rules/input/status take 4+1+1+1+1 = 8 fixed rows; the
-        # final filler Window collapses, so the rest is for the history
-        # pane. Subtract a 1-row safety margin so the bottom line is
-        # never clipped.
-        _CHROME_ROWS = 8
-
-        def _history_pane_height() -> int:
-            return max(3, _ttysize().lines - _CHROME_ROWS - 1)
-
-        def history_text():
-            """Show the last `pane_height` rendered lines of history,
-            offset upward by `_scroll_offset` lines for PageUp scroll.
-
-            ANSI escapes don't contain newlines so naive `splitlines()`
-            slicing preserves color spans across the chosen window —
-            prompt_toolkit's ANSI() adapter happily re-parses whatever
-            slice we hand it."""
-            full = "".join(self._history_items)
-            lines = full.split("\n")
-            pane_h = _history_pane_height()
-            # Clamp scroll_offset so it can't push past the top.
-            max_offset = max(0, len(lines) - pane_h)
-            if self._scroll_offset > max_offset:
-                self._scroll_offset = max_offset
-            end = len(lines) - self._scroll_offset
-            start = max(0, end - pane_h)
-            return ANSI("\n".join(lines[start:end]))
-
-        def top_rule():
-            width = max(20, _ttysize()[0] - 1)
-            return [("class:rule", INDENT + "─" * (width - len(INDENT)))]
-
-        bottom_rule = top_rule
-
-        def status_text():
-            # Pool-not-ready message stays left-aligned — it's the
-            # important live status the user wants to watch.
-            if self._pool_state is not None:
-                frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
-                msg = _POOL_STATE_TEXT.get(self._pool_state, "Loading")
-                return [
-                    ("class:status.dim", INDENT),
-                    ("class:status.spinner", f"{frame} "),
-                    ("class:status.notice", f"{msg}  ·  "),
-                    ("class:status.dim", "ctrl-c to cancel"),
-                ]
-
-            # Normal mode: tps + ctrl-c hint right-aligned (terminal
-            # right edge minus one column). Pad on the left so the
-            # content lands flush against the right rule, like Claude
-            # Code's status bar.
-            rhs: list[tuple[str, str]] = []
-            if self._total_decode_tokens > 0 and self._total_decode_s > 0:
-                avg_tps = self._total_decode_tokens / self._total_decode_s
-                rhs.append((
-                    "class:status.dim",
-                    f"{avg_tps:.1f} tok/s avg · "
-                    f"{self._total_decode_tokens} tokens in "
-                    f"{self._total_decode_s:.1f}s  ·  ",
-                ))
-            rhs.append(("class:status.dim", "ctrl-c to interrupt"))
-            visible = sum(len(t) for _, t in rhs)
-            pad = max(len(INDENT), _ttysize()[0] - visible - 1)
-            return [("class:status.dim", " " * pad)] + rhs
-
-        # ─────────── key bindings ───────────
-        kb = KeyBindings()
-
-        @kb.add("enter")
-        def _on_enter(event):
-            text = input_buf.text
-            input_buf.reset()
-            stripped = text.strip()
-            if not stripped:
-                return
-            prompt_queue.put_nowait(stripped)
-
-        @kb.add("c-d")
-        def _on_ctrl_d(event):
-            event.app.exit()
-
-        @kb.add("c-c")
-        def _on_ctrl_c(event):
-            event.app.exit()
-
-        # ─────────── history scrolling ───────────
-        @kb.add("pageup")
-        def _pgup(event):
-            self._scroll_offset += _history_pane_height() - 2
-
-        @kb.add("pagedown")
-        def _pgdn(event):
-            self._scroll_offset = max(
-                0, self._scroll_offset - (_history_pane_height() - 2),
+        def rprompt():
+            """Right-aligned content on the prompt line: cumulative
+            tok/s, total tokens, total decode seconds."""
+            if self._total_decode_s <= 0:
+                return ""
+            avg = self._total_decode_tokens / self._total_decode_s
+            return HTML(
+                f'<style fg="#888888">'
+                f'{avg:.1f} tok/s · {self._total_decode_tokens} tokens '
+                f'in {self._total_decode_s:.1f}s'
+                f'</style>'
             )
 
-        @kb.add("end")
-        def _end(event):
-            self._scroll_offset = 0
+        session: PromptSession = PromptSession(style=_PROMPT_STYLE)
 
-        # ─────────── layout ───────────
-        layout = Layout(
-            HSplit([
-                Window(FormattedTextControl(banner_segments),
-                       height=4, dont_extend_height=True),
-                # No dont_extend_height: the history window now claims
-                # all the space the banner/rules/input/status don't
-                # need, and history_text() slices the rendered ANSI to
-                # fit. The filler Window below is gone for the same
-                # reason — history IS the filler now.
-                Window(FormattedTextControl(history_text, focusable=False),
-                       wrap_lines=False),
-                Window(FormattedTextControl(top_rule), height=1),
-                Window(
-                    BufferControl(
-                        input_buf,
-                        input_processors=[BeforeInput(
-                            f"{INDENT}› ", style="class:prompt",
-                        )],
-                    ),
-                    height=1,
-                ),
-                Window(FormattedTextControl(bottom_rule), height=1),
-                Window(FormattedTextControl(status_text), height=1),
-            ]),
-            focused_element=input_buf,
-        )
-
-        self._app = Application(
-            layout=layout,
-            key_bindings=kb,
-            full_screen=False,
-            style=_PROMPT_STYLE,
-            mouse_support=False,
-        )
-
-        # ─────────── background tasks ───────────
-        processor_task = asyncio.create_task(self._chat_processor(prompt_queue, generating))
-        spinner_task = asyncio.create_task(self._spinner_tick())
-        try:
-            await self._app.run_async()
-        finally:
-            processor_task.cancel()
-            spinner_task.cancel()
-            for t in (processor_task, spinner_task):
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._app = None
-
-    # ─────────────────────────── helpers ─────────────────────────────
-
-    def _append_history(self, ansi_text: str) -> int:
-        """Append a rendered ANSI block to history and invalidate so
-        the pane redraws. Returns the index of the new item so callers
-        can replace it later (used for streaming responses)."""
-        self._history_items.append(ansi_text)
-        if self._app is not None:
-            self._app.invalidate()
-        return len(self._history_items) - 1
-
-    def _replace_history(self, idx: int, ansi_text: str) -> None:
-        """Overwrite an existing history item — used to update the
-        in-flight assistant response on every streamed token."""
-        if 0 <= idx < len(self._history_items):
-            self._history_items[idx] = ansi_text
-            if self._app is not None:
-                self._app.invalidate()
-
-    async def _spinner_tick(self) -> None:
-        """Advance the spinner frame while a pool-not-ready state is
-        active so the status row animates. Idle otherwise."""
         while True:
-            await asyncio.sleep(0.18)
-            if self._pool_state is None:
+            try:
+                with patch_stdout(raw=True):
+                    user_msg = await session.prompt_async(
+                        HTML('<prompt>  › </prompt>'),
+                        rprompt=rprompt,
+                    )
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            stripped = (user_msg or "").strip()
+            if not stripped:
                 continue
-            self._spinner_frame = (self._spinner_frame + 1) % len(_SPINNER_FRAMES)
-            if self._app is not None:
-                self._app.invalidate()
 
-    async def _chat_processor(
-        self, prompt_queue: asyncio.Queue, generating: dict,
-    ) -> None:
-        worker = self.worker
-        while True:
-            try:
-                user_msg = await prompt_queue.get()
-            except asyncio.CancelledError:
-                return
-
-            # Echo the user's line to history first (always — even if
-            # this turns out to be a slash command, the user wants
+            # Echo the user's line into scrollback first (always — even
+            # if it turns out to be a slash command, the user wants
             # the record of what they typed).
-            self._append_history(_render_user_prompt_to_ansi(
-                user_msg, _ttysize()[0],
-            ))
+            self._echo_user_prompt(stripped)
 
-            if user_msg.startswith("/"):
-                if await self._handle_slash_command(user_msg):
+            if stripped.startswith("/"):
+                if await self._handle_slash_command(stripped):
                     continue
-                # unknown slash command — fall through, treat as prompt
 
-            generating["flag"] = True
-            if self._app is not None:
-                self._app.invalidate()
-            try:
-                await self._stream_one_turn(user_msg)
-            finally:
-                generating["flag"] = False
-                # Blank-line spacer between turns so the next `›` prompt
-                # in history doesn't visually butt against the previous
-                # response.
-                self._append_history("\n")
-                if self._app is not None:
-                    self._app.invalidate()
+            await self._stream_turn(stripped)
 
-    async def _stream_one_turn(self, user_msg: str) -> None:
-        """One prompt → response cycle. Reserves a history slot for
-        the response and re-renders it on every streamed token."""
+    # ─────────────────────────── echo helpers ────────────────────────
+
+    def _echo_user_prompt(self, text: str) -> None:
+        """Print `  › <text>` to scrollback with a dark full-width
+        fill so user messages visually separate from rendered
+        markdown responses."""
+        bg = RichStyle(bgcolor=_PROMPT_BG)
+        marker_style = RichStyle(color="magenta", bold=True, bgcolor=_PROMPT_BG)
+        line = Text()
+        line.append(f"{INDENT}› ", style=marker_style)
+        line.append(text, style=bg)
+        # Pad to terminal width so the bg extends to the right edge.
+        pad = max(0, self._console.width - len(INDENT) - 2 - len(text))
+        if pad > 0:
+            line.append(" " * pad, style=bg)
+        self._console.print(line)
+
+    # ─────────────────────────── one turn ────────────────────────────
+
+    async def _stream_turn(self, prompt_text: str) -> None:
+        """One prompt → response cycle. rich.Live owns the rendering
+        area during streaming; on exit it commits the final state to
+        terminal scrollback as plain output."""
         worker = self.worker
-        # dots.worker is one package level up — `.worker` would resolve
-        # to dots.chat.worker (doesn't exist).
         from ..worker import PoolNotReadyError
 
-        # Reserve a slot; we'll replace it on each token.
-        self._streaming_idx = self._append_history(
-            _render_markdown_to_ansi("", _ttysize()[0]),
-        )
+        def render(text: str):
+            """Per-frame renderable. Table.grid puts a dim `⎿ ` marker
+            in a narrow left column, then markdown in the wide right
+            column — matches Claude Code's response gutter."""
+            md = Markdown(text or "…", code_theme="monokai")
+            t = Table.grid(padding=(0, 0), pad_edge=False)
+            t.add_column(no_wrap=True, width=5)
+            t.add_column(overflow="fold")
+            t.add_row(Text(f"{INDENT}⎿ ", style="dim"), md)
+            return t
+
         accumulated = {"value": ""}
-
-        def on_token(t: str) -> None:
-            accumulated["value"] += t
-            rendered = _render_markdown_to_ansi(
-                accumulated["value"], _ttysize()[0],
-            )
-            assert self._streaming_idx is not None
-            self._replace_history(self._streaming_idx, rendered)
-
-        # Retry loop for transient PoolNotReady (worker dropped, etc.).
         while True:
             try:
-                _, resp = await worker.send_prompt(
-                    user_msg, max_tokens=2048,
-                    on_token=on_token,
-                )
-                self._pool_state = None
+                with Live(
+                    render(""),
+                    console=self._console,
+                    refresh_per_second=15,
+                    transient=False,
+                ) as live:
+                    def on_token(t: str) -> None:
+                        accumulated["value"] += t
+                        live.update(render(accumulated["value"]))
+
+                    _, resp = await worker.send_prompt(
+                        prompt_text, max_tokens=2048, on_token=on_token,
+                    )
                 decode_tokens = int(resp.get("decode_tokens", 0))
                 decode_s = float(resp.get("decode_ms", 0)) / 1000.0
                 if decode_tokens > 0 and decode_s > 0:
@@ -501,26 +233,22 @@ class ChatUI:
                     self._total_decode_s += decode_s
                 break
             except PoolNotReadyError as nr:
-                self._pool_state = nr.state
-                if self._app is not None:
-                    self._app.invalidate()
-                await asyncio.sleep(2.0)
-            except RuntimeError as e:
-                # Replace the in-flight response with an error notice
-                # instead of leaving an empty response in history.
-                self._replace_history(
-                    self._streaming_idx,
-                    _render_plain_notice_to_ansi(str(e), _ttysize()[0]),
+                self._console.print(
+                    Text(f"{INDENT}{_POOL_STATE_TEXT.get(nr.state, 'Loading')}…",
+                         style="dim italic"),
                 )
-                self._streaming_idx = None
+                await asyncio.sleep(2.0)
+                continue
+            except RuntimeError as e:
+                self._console.print(Text(f"{INDENT}{e}", style="red"))
                 return
-        self._streaming_idx = None
+
+        # Trailing blank line so the next user prompt has breathing room.
+        self._console.print()
 
     # ──────────────────────── slash commands ─────────────────────────
 
     async def _handle_slash_command(self, cmd: str) -> bool:
-        """Return True if the command was handled. False means
-        "not one of ours; treat as a prompt"."""
         worker = self.worker
         head, _, _ = cmd.partition(" ")
         if head == "/reset":
@@ -528,42 +256,37 @@ class ChatUI:
                 await worker.conn.call("reset")
             except Exception:
                 pass
-            self._append_history(_render_plain_notice_to_ansi(
-                "[conversation reset]", _ttysize()[0],
-            ))
+            self._console.print(
+                Text(INDENT + "[conversation reset]", style="dim italic"),
+            )
+            self._console.print()
             return True
         if head == "/help":
-            self._render_help()
+            self._print_help()
             return True
         if head == "/usage":
-            await self._render_usage()
+            await self._print_usage()
             return True
         return False
 
-    def _render_help(self) -> None:
+    def _print_help(self) -> None:
         rows = [
             ("/help",  "show this help"),
             ("/reset", "clear the conversation history"),
             ("/usage", "show CU earned/spent across the pool"),
             ("Ctrl-D", "exit the chat"),
         ]
-        buf = io.StringIO()
-        console = Console(
-            file=buf, force_terminal=True, color_system="truecolor",
-            width=max(20, _ttysize()[0]), legacy_windows=False,
-        )
         t = Table.grid(padding=(0, 2))
         t.add_column(style="cyan", no_wrap=True)
         t.add_column(style="dim")
         for c, d in rows:
             t.add_row(f"{INDENT}{c}", d)
-        console.print(t)
-        self._append_history(buf.getvalue())
+        self._console.print(t)
+        self._console.print()
 
-    async def _render_usage(self) -> None:
+    async def _print_usage(self) -> None:
         worker = self.worker
-        hub_host = worker.hub_host
-        url = f"http://{hub_host}:8080/v1/credits"
+        url = f"http://{worker.hub_host}:8080/v1/credits"
         try:
             import json
             import urllib.request
@@ -571,18 +294,13 @@ class ChatUI:
             with urllib.request.urlopen(req, timeout=3.0) as r:
                 data = json.loads(r.read())
         except Exception as e:
-            self._append_history(_render_plain_notice_to_ansi(
-                f"/usage failed: {e}", _ttysize()[0],
-            ))
+            self._console.print(
+                Text(f"{INDENT}/usage failed: {e}", style="red"),
+            )
             return
 
         accounts = data.get("accounts", {}) or {}
         my_acc = getattr(worker, "account_id", None)
-        buf = io.StringIO()
-        console = Console(
-            file=buf, force_terminal=True, color_system="truecolor",
-            width=max(20, _ttysize()[0]), legacy_windows=False,
-        )
         t = Table(
             show_header=True, header_style="bold", box=None,
             padding=(0, 2, 0, 0),
@@ -610,5 +328,5 @@ class ChatUI:
                 str(a.get("turns_as_querier", 0)
                     + a.get("turns_as_worker", 0)),
             )
-        console.print(t)
-        self._append_history(buf.getvalue())
+        self._console.print(t)
+        self._console.print()
