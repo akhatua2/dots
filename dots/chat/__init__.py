@@ -162,6 +162,11 @@ class ChatUI:
         # Index of the in-flight assistant response (so streaming can
         # replace it on every token). None when nothing is generating.
         self._streaming_idx: int | None = None
+        # How many visible lines we've scrolled up from the bottom of
+        # history. 0 = pinned to the latest content (default). PageUp
+        # increases it; new content arriving while pinned (offset=0)
+        # keeps the view glued to the bottom — standard chat UX.
+        self._scroll_offset: int = 0
         # Cumulative across the entire chat session — tokens decoded
         # and seconds spent decoding. Average TPS is just the ratio.
         # We report the running averages in the status row so the
@@ -242,11 +247,33 @@ class ChatUI:
             _render_plain_notice_to_ansi(intro, _ttysize()[0])
         )
 
+        # Banner/rules/input/status take 4+1+1+1+1 = 8 fixed rows; the
+        # final filler Window collapses, so the rest is for the history
+        # pane. Subtract a 1-row safety margin so the bottom line is
+        # never clipped.
+        _CHROME_ROWS = 8
+
+        def _history_pane_height() -> int:
+            return max(3, _ttysize().lines - _CHROME_ROWS - 1)
+
         def history_text():
-            """FormattedTextControl callable. Joins the per-item ANSI
-            strings and wraps via prompt_toolkit's ANSI() adapter so
-            escape codes get converted to formatted_text segments."""
-            return ANSI("".join(self._history_items))
+            """Show the last `pane_height` rendered lines of history,
+            offset upward by `_scroll_offset` lines for PageUp scroll.
+
+            ANSI escapes don't contain newlines so naive `splitlines()`
+            slicing preserves color spans across the chosen window —
+            prompt_toolkit's ANSI() adapter happily re-parses whatever
+            slice we hand it."""
+            full = "".join(self._history_items)
+            lines = full.split("\n")
+            pane_h = _history_pane_height()
+            # Clamp scroll_offset so it can't push past the top.
+            max_offset = max(0, len(lines) - pane_h)
+            if self._scroll_offset > max_offset:
+                self._scroll_offset = max_offset
+            end = len(lines) - self._scroll_offset
+            start = max(0, end - pane_h)
+            return ANSI("\n".join(lines[start:end]))
 
         def top_rule():
             width = max(20, _ttysize()[0] - 1)
@@ -305,13 +332,33 @@ class ChatUI:
         def _on_ctrl_c(event):
             event.app.exit()
 
+        # ─────────── history scrolling ───────────
+        @kb.add("pageup")
+        def _pgup(event):
+            self._scroll_offset += _history_pane_height() - 2
+
+        @kb.add("pagedown")
+        def _pgdn(event):
+            self._scroll_offset = max(
+                0, self._scroll_offset - (_history_pane_height() - 2),
+            )
+
+        @kb.add("end")
+        def _end(event):
+            self._scroll_offset = 0
+
         # ─────────── layout ───────────
         layout = Layout(
             HSplit([
                 Window(FormattedTextControl(banner_segments),
                        height=4, dont_extend_height=True),
+                # No dont_extend_height: the history window now claims
+                # all the space the banner/rules/input/status don't
+                # need, and history_text() slices the rendered ANSI to
+                # fit. The filler Window below is gone for the same
+                # reason — history IS the filler now.
                 Window(FormattedTextControl(history_text, focusable=False),
-                       wrap_lines=False, dont_extend_height=True),
+                       wrap_lines=False),
                 Window(FormattedTextControl(top_rule), height=1),
                 Window(
                     BufferControl(
@@ -324,7 +371,6 @@ class ChatUI:
                 ),
                 Window(FormattedTextControl(bottom_rule), height=1),
                 Window(FormattedTextControl(status_text), height=1),
-                Window(),
             ]),
             focused_element=input_buf,
         )
