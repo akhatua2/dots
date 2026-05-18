@@ -162,9 +162,13 @@ class ChatUI:
         # Index of the in-flight assistant response (so streaming can
         # replace it on every token). None when nothing is generating.
         self._streaming_idx: int | None = None
-        self._latest_tps: float | None = None
-        self._latest_decode_tokens: int = 0
-        self._latest_decode_s: float = 0.0
+        # Cumulative across the entire chat session — tokens decoded
+        # and seconds spent decoding. Average TPS is just the ratio.
+        # We report the running averages in the status row so the
+        # user has a session-level number, not just the most recent
+        # turn's spike or dip.
+        self._total_decode_tokens: int = 0
+        self._total_decode_s: float = 0.0
         # Pool state shown in the status row when the hub reports
         # `not_ready`. None = serving normally; otherwise one of the
         # values in _POOL_STATE_TEXT.
@@ -251,27 +255,37 @@ class ChatUI:
         bottom_rule = top_rule
 
         def status_text():
-            parts: list[tuple[str, str]] = [
-                ("class:status.dim", INDENT),
-            ]
+            # Pool-not-ready message stays left-aligned — it's the
+            # important live status the user wants to watch.
             if self._pool_state is not None:
                 frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
                 msg = _POOL_STATE_TEXT.get(self._pool_state, "Loading")
-                parts.append(("class:status.spinner", f"{frame} "))
-                parts.append(("class:status.notice", f"{msg}  ·  "))
-                parts.append(("class:status.dim", "ctrl-c to cancel"))
-                return parts
-            if self._latest_tps is not None:
-                parts.append((
+                return [
+                    ("class:status.dim", INDENT),
+                    ("class:status.spinner", f"{frame} "),
+                    ("class:status.notice", f"{msg}  ·  "),
+                    ("class:status.dim", "ctrl-c to cancel"),
+                ]
+
+            # Normal mode: tps + ctrl-c hint right-aligned (terminal
+            # right edge minus one column). Pad on the left so the
+            # content lands flush against the right rule, like Claude
+            # Code's status bar.
+            rhs: list[tuple[str, str]] = []
+            if self._total_decode_tokens > 0 and self._total_decode_s > 0:
+                avg_tps = self._total_decode_tokens / self._total_decode_s
+                rhs.append((
                     "class:status.dim",
-                    f"{self._latest_tps:.1f} tok/s · "
-                    f"{self._latest_decode_tokens} tokens in "
-                    f"{self._latest_decode_s:.1f}s  ·  ",
+                    f"{avg_tps:.1f} tok/s avg · "
+                    f"{self._total_decode_tokens} tokens in "
+                    f"{self._total_decode_s:.1f}s  ·  ",
                 ))
             if generating["flag"]:
-                parts.append(("class:status.dim", "generating · "))
-            parts.append(("class:status.dim", "ctrl-c to interrupt"))
-            return parts
+                rhs.append(("class:status.dim", "generating · "))
+            rhs.append(("class:status.dim", "ctrl-c to interrupt"))
+            visible = sum(len(t) for _, t in rhs)
+            pad = max(len(INDENT), _ttysize()[0] - visible - 1)
+            return [("class:status.dim", " " * pad)] + rhs
 
         # ─────────── key bindings ───────────
         kb = KeyBindings()
@@ -432,16 +446,15 @@ class ChatUI:
         while True:
             try:
                 _, resp = await worker.send_prompt(
-                    user_msg, max_tokens=256,
+                    user_msg, max_tokens=2048,
                     on_token=on_token,
                 )
                 self._pool_state = None
                 decode_tokens = int(resp.get("decode_tokens", 0))
                 decode_s = float(resp.get("decode_ms", 0)) / 1000.0
                 if decode_tokens > 0 and decode_s > 0:
-                    self._latest_tps = decode_tokens / decode_s
-                    self._latest_decode_tokens = decode_tokens
-                    self._latest_decode_s = decode_s
+                    self._total_decode_tokens += decode_tokens
+                    self._total_decode_s += decode_s
                 break
             except PoolNotReadyError as nr:
                 self._pool_state = nr.state
