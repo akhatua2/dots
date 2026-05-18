@@ -113,16 +113,21 @@ def _spawn_companion_worker(
     """
     if read_live_worker_pid() is not None:
         return None
-    cmd = [sys.executable, "-m", "dots.cli", "worker", hub_addr]
+    cmd = [sys.executable, "-m", "dots.cli", "worker", hub_addr, "--verbose"]
     if max_ram_gb is not None:
         cmd += ["--max-ram", str(max_ram_gb)]
+    # Route output to a rolling log file so crashes are diagnosable.
+    # `dots chat` previously sent these to /dev/null, which made silent
+    # worker exits look like a hung pre-flight in the chat UI.
+    log_path = dots_home() / "worker.log"
+    log_fh = open(log_path, "ab", buffering=0)
     proc = subprocess.Popen(
         cmd,
         # Detach so a parent Ctrl-C doesn't immediately yank it; we'll
         # terminate it explicitly when the chat exits.
         start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
     )
     return proc
 
