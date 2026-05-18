@@ -192,28 +192,41 @@ class Hub:
 
     async def _prime_geometry_from_config(self) -> None:
         """Read config.json off disk (downloading metadata if needed) so the
-        scheduler can plan placements before workers load. Skips silently
-        on test fakes / offline / unknown architectures."""
+        scheduler can plan placements before workers load. Logs clearly
+        when the model can't be resolved — silent failure here is the
+        single most confusing bug a hub operator can hit (workers join
+        but nothing ever loads, with no explanation)."""
         try:
             from mlx_lm.utils import _download, load_config
             model_path = await asyncio.to_thread(_download, self.model_id)
             cfg = await asyncio.to_thread(load_config, model_path)
-            n_layers = int(cfg.get("num_hidden_layers")
-                           or cfg.get("text_config", {}).get("num_hidden_layers")
-                           or 0)
-            hidden = int(cfg.get("hidden_size")
-                         or cfg.get("text_config", {}).get("hidden_size")
-                         or 0)
-            vocab = int(cfg.get("vocab_size")
-                        or cfg.get("text_config", {}).get("vocab_size")
-                        or 0)
-            if n_layers and hidden and vocab:
-                self.n_layers = n_layers
-                self._geometry = ModelGeometry(
-                    n_layers=n_layers, hidden_size=hidden, vocab_size=vocab,
-                )
         except Exception as e:
-            log.debug("could not prime geometry from config: %s", e)
+            ui.error(
+                f"could not load model config for '{self.model_id}': {e}. "
+                f"check the model id — common typos include 30B (use 32B) "
+                f"or omitted '-4bit' / '-Instruct' suffixes."
+            )
+            return
+        n_layers = int(cfg.get("num_hidden_layers")
+                       or cfg.get("text_config", {}).get("num_hidden_layers")
+                       or 0)
+        hidden = int(cfg.get("hidden_size")
+                     or cfg.get("text_config", {}).get("hidden_size")
+                     or 0)
+        vocab = int(cfg.get("vocab_size")
+                    or cfg.get("text_config", {}).get("vocab_size")
+                    or 0)
+        if not (n_layers and hidden and vocab):
+            ui.error(
+                f"model '{self.model_id}' has an unexpected config shape "
+                f"(missing num_hidden_layers / hidden_size / vocab_size). "
+                f"this hub can't plan placements for it."
+            )
+            return
+        self.n_layers = n_layers
+        self._geometry = ModelGeometry(
+            n_layers=n_layers, hidden_size=hidden, vocab_size=vocab,
+        )
 
     def _assign_units_to_workers(self) -> list[tuple[str, int, int, bool]]:
         """RAM-aware placement.
@@ -235,6 +248,9 @@ class Hub:
         members all leave.
         """
         if not self.n_layers or self._geometry is None:
+            # Geometry priming failed (bad model id, no network, …) —
+            # the operator already saw an error from _prime_geometry,
+            # so don't spam every pool change with the same notice.
             return []
         compute_workers = sorted(
             (p for p in self.participants.values() if p.compute),
@@ -314,10 +330,11 @@ class Hub:
             max_segments=len(workers_snapshot),
         )
         if placement is None or not placement.segments:
+            pool_ram = sum(free_ram(p) for p in compute_workers)
+            short_by = max(0.0, model_ram_gb - pool_ram)
             ui.notice(
-                f"pool free RAM ({sum(free_ram(p) for p in compute_workers):.1f} GB) "
-                f"can't fit model (~{model_ram_gb:.1f} GB) even partitioned — "
-                f"waiting for more workers"
+                f"need ~{short_by:.0f} GB more pool RAM to load this model "
+                f"(have {pool_ram:.1f} GB, model needs ~{model_ram_gb:.1f} GB)"
             )
             self._current_placement = []
             return []
