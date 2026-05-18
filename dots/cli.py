@@ -96,6 +96,30 @@ def _configure_logging(verbose: bool) -> None:
 # ─────────────────────────── auto-spawned worker ────────────────────────────
 
 
+def _companion_worker_argv(
+    hub_addr: str,
+    *,
+    max_ram_gb: float | None = None,
+) -> list[str]:
+    """Build the argv suffix for the auto-spawned companion `dots worker`.
+
+    `--verbose` is a *top-level* flag and must come BEFORE the
+    subcommand — argparse rejects it after `worker`. Without `--verbose`
+    the worker logs only WARNING-level events, which makes
+    ~/.dots/worker.log useless for diagnosing silent stalls during
+    model load. Promote it to INFO.
+
+    Extracted so a unit test can pin that the assembled argv actually
+    parses through the same argparse parser the worker process uses
+    (regression: a previous version put `--verbose` after `worker`,
+    which made every companion spawn die immediately).
+    """
+    argv = ["--verbose", "worker", hub_addr]
+    if max_ram_gb is not None:
+        argv += ["--max-ram", str(max_ram_gb)]
+    return argv
+
+
 def _spawn_companion_worker(
     hub_addr: str,
     *,
@@ -113,9 +137,9 @@ def _spawn_companion_worker(
     """
     if read_live_worker_pid() is not None:
         return None
-    cmd = [sys.executable, "-m", "dots.cli", "worker", hub_addr, "--verbose"]
-    if max_ram_gb is not None:
-        cmd += ["--max-ram", str(max_ram_gb)]
+    cmd = [sys.executable, "-m", "dots.cli", *_companion_worker_argv(
+        hub_addr, max_ram_gb=max_ram_gb,
+    )]
     # Route output to a rolling log file so crashes are diagnosable.
     # `dots chat` previously sent these to /dev/null, which made silent
     # worker exits look like a hung pre-flight in the chat UI.
