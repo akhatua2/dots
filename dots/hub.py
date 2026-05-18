@@ -147,6 +147,10 @@ class Hub:
         # client during a delegate_turn. Populated in `run_turn` and
         # consulted in `_on_delegate_token`.
         self._token_routers: dict[str, "asyncio.Future | object"] = {}
+        # Per-conv counter for tokens emitted so far. Used by the
+        # run_turn watchdog to log progress on long turns + by
+        # _on_delegate_token to detect the first-token arrival.
+        self._turn_token_counts: dict[str, int] = {}
         # Locked-in unit assignment from `_assign_units_to_workers`. Used
         # both for `load_units` broadcasts and for building the chain
         # spec at delegation time so the two views can't drift.
@@ -621,6 +625,11 @@ class Hub:
             return self._not_ready_status_response()
 
         conv = participant.conv
+        prompt_preview = (msg["text"] or "")[:60].replace("\n", " ")
+        if len(msg["text"] or "") > 60:
+            prompt_preview += "…"
+        ui.notice(f"prompt from {participant.short_id} ({participant.display_owner}): "
+                  f"{prompt_preview!r}")
         conv.history.append({"role": "user", "content": msg["text"]})
 
         async def emit(text: str) -> None:
@@ -639,10 +648,12 @@ class Hub:
                 querier_account=participant.account_id,
             )
         except ConnectionError as e:
+            ui.error(f"turn {conv.id[:8]} aborted: worker dropped mid-turn ({e})")
             if conv.history and conv.history[-1].get("role") == "user":
                 conv.history.pop()
             return {"kind": "error", "error": f"worker dropped mid-turn: {e}"}
         except Exception as e:
+            ui.error(f"turn {conv.id[:8]} failed: {e}")
             log.exception("turn failed for %s", worker_id)
             if conv.history and conv.history[-1].get("role") == "user":
                 conv.history.pop()
@@ -836,6 +847,24 @@ class Hub:
         # routing key is the chat client's conv.id.
         if on_token is not None:
             self._token_routers[conv.id] = on_token
+
+        # Diagnostic: print the chain we're about to drive so an
+        # observer can tell which workers are involved. Multi-worker
+        # turns failing mid-flight is otherwise invisible — the hub
+        # just hangs on `delegate_turn`.
+        head_segment = f"{worker.short_id}({worker.display_owner})[0:{my_layer_end}]"
+        chain_desc_parts = [head_segment]
+        for hop in chain_payload:
+            hid = hop["worker_id"][:8]
+            hp = self.participants.get(hop["worker_id"])
+            alias = hp.display_owner if hp else "?"
+            chain_desc_parts.append(
+                f"{hid}({alias})[{hop['layer_start']}:{hop['layer_end']}]"
+            )
+        chain_desc = " → ".join(chain_desc_parts)
+        ui.notice(f"turn {conv.id[:8]} → {chain_desc}")
+        # Track tokens-so-far per conv so the watchdog can report progress.
+        self._turn_token_counts[conv.id] = 0
         try:
             t0 = time.perf_counter()
             call_payload = dict(
@@ -847,8 +876,40 @@ class Hub:
             if chain_payload:
                 call_payload["my_layer_end"] = my_layer_end
                 call_payload["chain"] = chain_payload
-            resp = await worker.conn.call("delegate_turn", **call_payload)
+
+            async def _delegate():
+                return await worker.conn.call("delegate_turn", **call_payload)
+
+            delegate_task = asyncio.create_task(_delegate())
+
+            # Watchdog: every 5s the call hasn't returned, log progress.
+            # If a peer in the chain is hung, this surfaces it instead of
+            # leaving the operator staring at a silent prompt.
+            async def _watchdog():
+                while not delegate_task.done():
+                    await asyncio.sleep(5.0)
+                    if delegate_task.done():
+                        return
+                    elapsed = time.perf_counter() - t0
+                    tokens_so_far = self._turn_token_counts.get(conv.id, 0)
+                    ui.notice(
+                        f"turn {conv.id[:8]} still in flight · "
+                        f"{elapsed:.0f}s · tokens={tokens_so_far}"
+                    )
+            wd = asyncio.create_task(_watchdog())
+            try:
+                resp = await delegate_task
+            finally:
+                wd.cancel()
+                try: await wd
+                except (asyncio.CancelledError, Exception): pass
+
             wall_ms = (time.perf_counter() - t0) * 1000
+            tokens_total = self._turn_token_counts.get(conv.id, 0)
+            ui.notice(
+                f"turn {conv.id[:8]} done in {wall_ms:.0f}ms · "
+                f"tokens={tokens_total}"
+            )
             # delegate_token notifications dispatch as fire-and-forget
             # tasks; the response (delegate_done) may resolve before the
             # last token task has run. Yield so trailing tasks complete
@@ -856,6 +917,7 @@ class Hub:
             await asyncio.sleep(0)
         finally:
             self._token_routers.pop(conv.id, None)
+            self._turn_token_counts.pop(conv.id, None)
 
         if resp.get("kind") != "delegate_done":
             raise RuntimeError(resp.get("error", "delegate_turn failed"))
@@ -1205,6 +1267,14 @@ class Hub:
         text = msg.get("text", "")
         if not conv_id:
             return None
+        # Increment per-conv token counter so the run_turn watchdog can
+        # report progress (e.g. "still in flight · 30s · tokens=12").
+        if conv_id in self._turn_token_counts:
+            self._turn_token_counts[conv_id] += 1
+            # Log the first token's wall-clock so we can see whether
+            # prefill is the slow part or decode is.
+            if self._turn_token_counts[conv_id] == 1:
+                ui.notice(f"turn {conv_id[:8]} first token received")
         cb = self._token_routers.get(conv_id)
         if cb is not None:
             try:
