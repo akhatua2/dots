@@ -121,6 +121,7 @@ async def test_monitor_emits_callbacks_periodically(monkeypatch):
     monkeypatch.setattr(
         load_progress, "estimated_repo_total_size", lambda _m: 100,
     )
+    monkeypatch.setattr(load_progress, "xet_chunk_cache_size", lambda: 0)
     calls = []
     sizes = iter([10, 25, 50, 80])
 
@@ -155,6 +156,7 @@ async def test_monitor_emits_final_tick_on_cancel(monkeypatch):
     monkeypatch.setattr(
         load_progress, "estimated_repo_total_size", lambda _m: 100,
     )
+    monkeypatch.setattr(load_progress, "xet_chunk_cache_size", lambda: 0)
     sizes = iter([10, 20])
 
     def _size(_):
@@ -184,12 +186,137 @@ async def test_monitor_emits_final_tick_on_cancel(monkeypatch):
     )
 
 
+async def test_monitor_counts_xet_chunk_delta(monkeypatch):
+    """Xet-backed downloads stage chunks in `~/.cache/huggingface/xet/`
+    long before any file lands in `hub/blobs/`. The monitor must count
+    the in-flight Xet bytes (delta from the pre-download baseline) so
+    the bar doesn't appear frozen while Xet is busy. This was the
+    actual user-facing bug: dots saw 22 MB on the bar while hf_xet
+    had already transferred 2+ GB into the chunk-cache."""
+    monkeypatch.setattr(
+        load_progress, "estimated_repo_total_size", lambda _m: 10_000,
+    )
+    # hub/blobs/ stays at 0 — Xet hasn't reconstructed any files yet.
+    monkeypatch.setattr(load_progress, "hf_cache_size_for", lambda _m: 0)
+    # Xet cache starts at 50 MB worth of unrelated chunks from earlier
+    # downloads; during this download it grows.
+    xet_sizes = iter([
+        50_000,           # baseline (taken before first tick)
+        50_000 + 2_000,   # +2k of new chunks
+        50_000 + 5_500,   # +5.5k
+        50_000 + 8_000,   # +8k
+    ])
+    monkeypatch.setattr(
+        load_progress, "xet_chunk_cache_size",
+        lambda: next(xet_sizes, 50_000 + 8_000),
+    )
+
+    seen = []
+
+    async def cb(now, total):
+        seen.append(now)
+
+    task = asyncio.create_task(
+        load_progress.monitor_download_progress("ns/m", cb, interval_seconds=0.01)
+    )
+    await asyncio.sleep(0.06)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # bar should reflect the in-flight Xet delta, not stay at 0.
+    assert max(seen) >= 5_500, (
+        f"monitor missed Xet chunk-cache bytes; saw {seen}"
+    )
+    # baseline subtracted out — never includes the pre-existing 50 MB
+    # of unrelated chunks.
+    assert max(seen) < 50_000, (
+        f"monitor counted pre-baseline Xet chunks; saw {seen}"
+    )
+
+
+async def test_monitor_progress_is_monotonic(monkeypatch):
+    """When Xet completes a file and evicts its chunks, the Xet cache
+    can shrink mid-download. The bar must not go backwards — UX has
+    to be monotonic. We clamp via a high-water mark."""
+    monkeypatch.setattr(
+        load_progress, "estimated_repo_total_size", lambda _m: 1_000_000,
+    )
+    # hub/blobs/ jumps up when reconstruction completes.
+    hub_sizes = iter([0, 0, 100_000, 100_000])
+    monkeypatch.setattr(
+        load_progress, "hf_cache_size_for",
+        lambda _m: next(hub_sizes, 100_000),
+    )
+    # Xet cache grows then shrinks (eviction after reconstruction).
+    xet_sizes = iter([0, 80_000, 90_000, 10_000])
+    monkeypatch.setattr(
+        load_progress, "xet_chunk_cache_size",
+        lambda: next(xet_sizes, 10_000),
+    )
+
+    seen = []
+
+    async def cb(now, total):
+        seen.append(now)
+
+    task = asyncio.create_task(
+        load_progress.monitor_download_progress("ns/m", cb, interval_seconds=0.01)
+    )
+    await asyncio.sleep(0.06)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # Each successive value should be >= the prior one.
+    for prev, nxt in zip(seen, seen[1:]):
+        assert nxt >= prev, (
+            f"progress went backwards: {seen}"
+        )
+
+
+async def test_monitor_clamps_to_total(monkeypatch):
+    """The combined hub + Xet delta can briefly exceed the API-reported
+    total because the API only sums safetensors but the on-disk cache
+    also has config / tokenizer files. Clamp at 100% so the bar
+    doesn't display 103%."""
+    monkeypatch.setattr(
+        load_progress, "estimated_repo_total_size", lambda _m: 1_000,
+    )
+    monkeypatch.setattr(load_progress, "hf_cache_size_for", lambda _m: 1_500)
+    monkeypatch.setattr(load_progress, "xet_chunk_cache_size", lambda: 0)
+
+    seen = []
+
+    async def cb(now, total):
+        seen.append(now)
+
+    task = asyncio.create_task(
+        load_progress.monitor_download_progress("ns/m", cb, interval_seconds=0.01)
+    )
+    await asyncio.sleep(0.03)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert all(v <= 1_000 for v in seen), (
+        f"bytes_now exceeded bytes_total; saw {seen}"
+    )
+
+
 async def test_monitor_survives_callback_errors(monkeypatch):
     """A misbehaving callback shouldn't kill the monitor — the next
     tick still runs."""
     monkeypatch.setattr(
         load_progress, "estimated_repo_total_size", lambda _m: 100,
     )
+    monkeypatch.setattr(load_progress, "xet_chunk_cache_size", lambda: 0)
     monkeypatch.setattr(load_progress, "hf_cache_size_for", lambda _m: 50)
     seen = []
 
