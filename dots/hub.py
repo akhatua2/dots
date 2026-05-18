@@ -157,10 +157,15 @@ class Hub:
     # ───────────────────────────── lifecycle ─────────────────────────────
 
     async def start(self) -> None:
-        # In the delegation architecture the hub never loads a model.
-        # Workers load the full model themselves and announce via
-        # `worker_ready`. The hub just orchestrates and writes the ledger.
-        ui.notice(f"hub starting · default model = {self.model_id}")
+        # The hub doesn't load model weights, but it does read the
+        # model's config.json upfront so it can plan placements before
+        # any worker has even started loading. This is the cheap part
+        # of "model awareness" — kilobytes off disk.
+        await self._prime_geometry_from_config()
+        ui.notice(
+            f"hub starting · model = {self.model_id}"
+            + (f" · {self.n_layers} layers" if self.n_layers else "")
+        )
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
@@ -186,6 +191,68 @@ class Hub:
                 except (asyncio.CancelledError, Exception):
                     pass
             raise
+
+    async def _prime_geometry_from_config(self) -> None:
+        """Read config.json off disk (downloading metadata if needed) so the
+        scheduler can plan placements before workers load. Skips silently
+        on test fakes / offline / unknown architectures."""
+        try:
+            from mlx_lm.utils import _download, load_config
+            model_path = await asyncio.to_thread(_download, self.model_id)
+            cfg = await asyncio.to_thread(load_config, model_path)
+            n_layers = int(cfg.get("num_hidden_layers")
+                           or cfg.get("text_config", {}).get("num_hidden_layers")
+                           or 0)
+            hidden = int(cfg.get("hidden_size")
+                         or cfg.get("text_config", {}).get("hidden_size")
+                         or 0)
+            vocab = int(cfg.get("vocab_size")
+                        or cfg.get("text_config", {}).get("vocab_size")
+                        or 0)
+            if n_layers and hidden and vocab:
+                self.n_layers = n_layers
+                self._geometry = ModelGeometry(
+                    n_layers=n_layers, hidden_size=hidden, vocab_size=vocab,
+                )
+        except Exception as e:
+            log.debug("could not prime geometry from config: %s", e)
+
+    def _assign_units_to_workers(self) -> list[tuple[str, int, int, bool]]:
+        """Pick which workers host what.
+
+        v1 strategy: every compute worker that joins is told to load the
+        full model + head. The partial-loader machinery proves out
+        without changing placement behavior (each worker still has all
+        layers in RAM). Scheduler-driven partitioning — where a 70B
+        actually splits across multiple Macs' RAM — is the next PR; that
+        change touches placement re-planning on pool drops, mid-life
+        re-loads, and chain-routing defaults.
+        """
+        if not self.n_layers:
+            return []
+        return [
+            (p.id, 0, self.n_layers, True)
+            for p in self.participants.values() if p.compute
+        ]
+
+    async def _broadcast_load_units(self, assignments) -> None:
+        """Tell each worker which layer range to load + whether it's
+        the head (also owns embed/norm/lm_head/sample)."""
+        for worker_id, layer_start, layer_end, needs_head in assignments:
+            p = self.participants.get(worker_id)
+            if p is None or p.ready or not p.compute:
+                continue
+            try:
+                await p.conn.notify(
+                    "load_units",
+                    model_id=self.model_id,
+                    layer_start=int(layer_start),
+                    layer_end=int(layer_end),
+                    needs_head=bool(needs_head),
+                )
+                p.layer_range = (int(layer_start), int(layer_end))
+            except Exception:
+                log.debug("load_units notify failed for %s", worker_id, exc_info=True)
 
     # ─────────────────────────── connection lifecycle ────────────────────
 
@@ -303,13 +370,15 @@ class Hub:
     # ─────────────────────────── re-plan on change ──────────────────────
 
     async def _on_pool_changed(self) -> None:
-        """In the delegation architecture, the hub no longer plans layer
-        ranges or broadcasts LOAD_SHARD. Compute workers load the full
-        model autonomously and notify `worker_ready` when they're done.
+        """Topology change handler.
 
-        On topology change, we just clear pool_ready and let the next
-        worker_ready notification re-set it.
+        Workers don't auto-load anymore. After every join/leave we
+        recompute the placement and tell any *unready* workers what
+        layer slice they should load. Already-loaded workers stay put —
+        re-placing them would force a multi-GB reload, and the chain
+        protocol routes around mis-sized assignments anyway.
         """
+        assignments: list[tuple[str, int, int, bool]] = []
         async with self._pool_lock:
             self._topology_gen += 1
             workers = [p for p in self.participants.values() if p.compute]
@@ -317,11 +386,12 @@ class Hub:
             if not workers:
                 ui.notice("no compute workers — waiting")
                 return
-            # If any compute worker is already loaded, immediately mark
-            # pool ready so chat clients connecting in the middle of a
-            # load don't have to wait for the next worker_ready event.
+            assignments = self._assign_units_to_workers()
             if any(p.ready for p in workers):
                 self._pool_ready.set()
+
+        if assignments:
+            await self._broadcast_load_units(assignments)
 
     # ────────────────────────────── one turn ────────────────────────────
 
