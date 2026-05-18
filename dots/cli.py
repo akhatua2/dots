@@ -14,6 +14,12 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+# Load a project-local .env file BEFORE any module that reads from the
+# environment is imported. This is how users typically configure
+# HF_TOKEN, HF_HUB_ENABLE_HF_TRANSFER, DOTS_TFLOPS, etc.
+from .util import load_dotenv_into_env as _load_dotenv
+_load_dotenv()
+
 import argparse
 import asyncio
 import getpass

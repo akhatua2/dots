@@ -96,6 +96,30 @@ def dots_home() -> pathlib.Path:
     return pathlib.Path(override) if override else pathlib.Path.home() / ".dots"
 
 
+def load_dotenv_into_env() -> str | None:
+    """Load a `.env` file into `os.environ` using python-dotenv.
+
+    Looks in cwd, DOTS_HOME, and the project root (computed relative to
+    this file). Existing env vars win — explicit `export FOO=bar`
+    overrides the file. Returns the path of the file used, or None
+    if no .env was found (or python-dotenv isn't installed).
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return None
+    candidates = [
+        pathlib.Path.cwd() / ".env",
+        dots_home() / ".env",
+        pathlib.Path(__file__).resolve().parent.parent / ".env",
+    ]
+    for path in candidates:
+        if path.is_file():
+            load_dotenv(dotenv_path=path, override=False)
+            return str(path)
+    return None
+
+
 def load_or_create_identity() -> str:
     """Return this machine's stable worker UUID. Generated on first call and
     persisted to {dots_home}/identity so it survives reboots and reconnects.
