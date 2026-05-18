@@ -191,14 +191,25 @@ class Hub:
             raise
 
     async def _prime_geometry_from_config(self) -> None:
-        """Read config.json off disk (downloading metadata if needed) so the
-        scheduler can plan placements before workers load. Logs clearly
-        when the model can't be resolved — silent failure here is the
-        single most confusing bug a hub operator can hit (workers join
-        but nothing ever loads, with no explanation)."""
+        """Read config.json off disk (downloading just the JSON metadata
+        if needed) so the scheduler can plan placements before workers
+        load. The hub never downloads the safetensors weights — that's
+        the workers' job. Logs clearly when the model can't be resolved.
+        """
         try:
             from mlx_lm.utils import _download, load_config
-            model_path = await asyncio.to_thread(_download, self.model_id)
+
+            def _config_only(repo: str):
+                # Pull the config files (a few KB), NOT *.safetensors.
+                # Without restricting allow_patterns, _download grabs
+                # the full ~18 GB of weights — wrong for the hub since
+                # workers handle weight loading themselves.
+                return _download(repo, allow_patterns=[
+                    "config.json", "generation_config.json",
+                    "tokenizer_config.json",
+                ])
+
+            model_path = await asyncio.to_thread(_config_only, self.model_id)
             cfg = await asyncio.to_thread(load_config, model_path)
         except Exception as e:
             ui.error(
