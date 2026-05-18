@@ -84,16 +84,28 @@ def _configure_logging(verbose: bool) -> None:
 # ─────────────────────────── auto-spawned worker ────────────────────────────
 
 
-def _spawn_companion_worker(hub_addr: str) -> Optional[subprocess.Popen]:
+def _spawn_companion_worker(
+    hub_addr: str,
+    *,
+    max_ram_gb: float | None = None,
+) -> Optional[subprocess.Popen]:
     """Start a `dots worker` subprocess in the background so the user
     contributes compute while their `dots chat` session is open. Returns
     the Popen handle so the caller can terminate it on exit. Returns
     None if a worker is already running on this machine (so we don't
-    duplicate the contribution)."""
+    duplicate the contribution).
+
+    Flags relevant to worker contribution (currently `--max-ram`) are
+    plumbed through so `dots chat ... --max-ram 5` runs a capped
+    companion in the same way `dots worker ... --max-ram 5` would.
+    """
     if read_live_worker_pid() is not None:
         return None
+    cmd = [sys.executable, "-m", "dots.cli", "worker", hub_addr]
+    if max_ram_gb is not None:
+        cmd += ["--max-ram", str(max_ram_gb)]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "dots.cli", "worker", hub_addr],
+        cmd,
         # Detach so a parent Ctrl-C doesn't immediately yank it; we'll
         # terminate it explicitly when the chat exits.
         start_new_session=True,
@@ -325,6 +337,11 @@ def main() -> None:
              "by default, if no worker is running locally, chat starts "
              "one so you contribute compute while you chat.",
     )
+    p_chat.add_argument(
+        "--max-ram", type=float, default=None, metavar="GB",
+        help="cap the RAM the auto-spawned companion worker pools. "
+             "Mirrors `dots worker --max-ram`. Ignored when --no-worker.",
+    )
 
     p_worker = sub.add_parser(
         "worker",
@@ -428,7 +445,9 @@ def main() -> None:
         # this session contributes compute while the user chats.
         companion: Optional[subprocess.Popen] = None
         if not args.no_worker:
-            companion = _spawn_companion_worker(f"{host}:{port}")
+            companion = _spawn_companion_worker(
+                f"{host}:{port}", max_ram_gb=args.max_ram,
+            )
             if companion is not None:
                 # Give the companion a brief head start so the hub has at
                 # least one worker by the time the chat client connects.
