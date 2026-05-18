@@ -20,15 +20,11 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from .util import load_dotenv_into_env as _load_dotenv
 _load_dotenv()
 
-# Opt every dots run into the fast Rust-based HF downloader when the
-# package is available. Brings multi-shard 30B-class downloads from
-# "Python single-stream, ~10 MB/s" to "parallel, often 100+ MB/s".
-# Honors an explicit `HF_HUB_ENABLE_HF_TRANSFER=0` if the user disables it.
-try:
-    import hf_transfer  # noqa: F401
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-except ImportError:
-    pass
+# `hf_xet` is a hard dependency (declared in pyproject.toml). It's the
+# successor to `hf_transfer` — same idea (Rust-backed parallel download)
+# but using HuggingFace's content-addressable Xet storage. Opt every
+# dots run in; users can disable via HF_XET_HIGH_PERFORMANCE=0.
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 import argparse
 import asyncio
