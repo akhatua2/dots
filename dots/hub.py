@@ -1194,7 +1194,13 @@ class Hub:
 
     async def _probe_pairs_for(self, worker_id: str) -> None:
         """For each existing ready compute worker, ask both sides to
-        ping each other and record the median RTT into pool_view."""
+        ping each other and record the median RTT into pool_view.
+
+        Probes are fired concurrently (both directions per pair) but
+        the mesh log is emitted only after they all complete — printing
+        once per probe spammed N*(N-1) almost-identical tables per
+        worker join.
+        """
         async with self._pool_lock:
             me = self.participants.get(worker_id)
             if me is None or not me.compute or not me.ready:
@@ -1204,13 +1210,19 @@ class Hub:
                 if (p.id != worker_id and p.compute and p.ready
                     and p.peer_listen_port is not None)
             ]
+        if not others:
+            return
+        tasks = []
         for other in others:
-            asyncio.create_task(self._probe_one(me.id, other.id,
-                                                 other.peer_host,
-                                                 other.peer_listen_port))
-            asyncio.create_task(self._probe_one(other.id, me.id,
-                                                 me.peer_host,
-                                                 me.peer_listen_port))
+            tasks.append(self._probe_one(me.id, other.id,
+                                          other.peer_host,
+                                          other.peer_listen_port))
+            tasks.append(self._probe_one(other.id, me.id,
+                                          me.peer_host,
+                                          me.peer_listen_port))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Single mesh print once every probe in this batch settled.
+        self._log_latency_mesh()
 
     async def _probe_one(
         self,
@@ -1243,7 +1255,6 @@ class Hub:
                 float(resp.get("rtt_p99_ms", 0.0)),
                 int(resp.get("samples", 1)),
             )
-            self._log_latency_mesh()
         except Exception:
             log.debug("could not record probe result", exc_info=True)
 
