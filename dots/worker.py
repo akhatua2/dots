@@ -22,8 +22,6 @@ import logging
 import sys
 from typing import Callable
 
-from mlx_lm import load as mlx_load   # noqa: F401 — kept for test monkeypatch path
-
 from . import ui
 from .inference import FullModelHost
 from .partial_loader import load_partial
@@ -65,15 +63,15 @@ class Worker:
         self.one_shot = one_shot
         self.max_tokens = max_tokens
         self.headless = headless
-        # Max RAM (gigabytes) this worker will commit to model weights.
-        # None means no cap — the hub may assign us anywhere from 1 layer
-        # to the whole model. The cap is the user's promise to the pool;
-        # the hub uses it as a constraint in the layer planner.
+        # User-set cap on how much RAM this worker offers the pool.
+        # None ⇒ no cap (report actual free RAM). Setting this is the
+        # "I'll only pool N GB of my machine" knob — it caps the
+        # ram_gb_free value we send to the hub, so placement decisions
+        # never assign more than the user agreed to.
         self.max_load_gb = max_load_gb
-        # Whether this Worker hosts a model shard and participates in
-        # the compute pool. Setting False makes it a pure chat client:
-        # the hub assigns it a conversation but skips layer planning,
-        # so LOAD_SHARD / COMPUTE never arrive.
+        # Whether this Worker contributes compute to the pool. False
+        # makes it a pure chat client: the hub won't send `load_units`
+        # and the worker won't load a model.
         self.compute = compute
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
@@ -157,22 +155,24 @@ class Worker:
         self.conn = PeerConnection(
             reader, writer, f"{self.hub_host}:{self.hub_port}", self._handle,
         )
-        # Build the worker's resource declaration for the new scheduler.
-        # Older hubs ignore the `resources` field; newer ones prefer it
-        # over the legacy `free_ram_gb`. Both fields ship in HELLO so the
-        # transition is graceful.
+        # Build the worker's resource declaration. The user-set cap, if
+        # any, is applied here so the hub never sees more RAM than the
+        # user agreed to pool. `effective_tflops_estimate` is per-chip
+        # (override via DOTS_TFLOPS).
+        reported_ram = free_ram_gb()
+        if self.max_load_gb is not None:
+            reported_ram = min(reported_ram, float(self.max_load_gb))
         decl = ResourceDecl(
             worker_id=self.identity,
             account_id=self.account_id,
-            ram_gb_free=free_ram_gb(),
+            ram_gb_free=reported_ram,
             compute_tflops_per_sec=effective_tflops_estimate(),
             backends=supported_backends(),
-            cluster_id="",  # populated later when overlay-network info is wired
+            cluster_id="",
         )
         hello_payload: dict = {
             "worker_id": self.identity,
             "account_id": self.account_id,
-            "free_ram_gb": decl.ram_gb_free,        # legacy: kept for old hubs
             "compute": bool(self.compute),
             "resources": resource_decl_to_hello_field(decl),
         }
@@ -180,8 +180,6 @@ class Worker:
             hello_payload["peer_listen_port"] = self._peer_listen_port
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
-        if self.max_load_gb is not None:
-            hello_payload["max_load_gb"] = float(self.max_load_gb)
         ack = await self.conn.call("hello", **hello_payload)
         if ack.get("kind") != "hello_ack":
             raise RuntimeError(f"unexpected HELLO response: {ack}")
