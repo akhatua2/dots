@@ -475,39 +475,7 @@ class Hub:
                     )
                 return None
             if kind == "status":
-                # Used by chat clients to pre-flight: don't show the
-                # input bar until ready. Returns {ready, state, ?progress}.
-                # state ∈ {"loading", "waiting"} when not ready.
-                # progress (0-1) only present when state="loading";
-                # min across in-placement workers (slowest worker gates).
-                if self._pool_ready.is_set():
-                    return {"kind": "status", "ready": True}
-                state = "loading" if self._current_placement else "waiting"
-                resp = {"kind": "status", "ready": False, "state": state}
-                if state == "loading" and self._current_placement:
-                    # Show the SLOWEST currently-reporting worker. Workers
-                    # we haven't heard from yet are skipped — otherwise a
-                    # just-joined worker (no data) would drag the bar to
-                    # 0% even when another worker is most of the way
-                    # through. Showing the slowest reporter is honest
-                    # ("this is the worker the pool is waiting on") and
-                    # the numbers stay at per-worker scale (e.g. "55 MB
-                    # / 18.4 GB") rather than confusingly summed pool-wide.
-                    reporters = [
-                        (n, t) for n, t in (
-                            self._load_progress.get(seg[0]) or (None, None)
-                            for seg in self._current_placement
-                        )
-                        if n is not None and t and t > 0
-                    ]
-                    if reporters:
-                        n_slow, t_slow = min(
-                            reporters, key=lambda nt: nt[0] / nt[1]
-                        )
-                        resp["progress"] = n_slow / t_slow
-                        resp["bytes_now"] = n_slow
-                        resp["bytes_total"] = t_slow
-                return resp
+                return self._status_response_for(wid)
             return {"kind": "error",
                     "error": f"unexpected worker-initiated kind: {kind}"}
 
@@ -722,6 +690,68 @@ class Hub:
         participant.conv.history.clear()
         participant.conv.token_count = 0
         return {"kind": "ok"}
+
+    def _status_response_for(self, asker_wid: str | None) -> dict:
+        """Build the status response a chat client sees during pre-flight.
+
+        Returns `{ready: True}` when the pool can serve. Otherwise
+        `{ready: False, state: "loading"|"waiting", ?progress, ?bytes_now,
+        ?bytes_total}`.
+
+        Per-machine routing: chat and its auto-spawned companion worker
+        share `account_id` (both load `~/.dots/account`), so the asker's
+        progress is routed to the worker on the same account. This stops
+        a far-away peer's slow download from dragging every user's bar.
+        If the asker's local worker has finished but the pool isn't
+        ready (remote workers still loading), we drop the bar so it
+        doesn't freeze at 100% — the friendly "Loading the model"
+        spinner stays. Chat-only clients with no matching local worker
+        fall back to the MOST-progressed reporter so the bar moves
+        visibly instead of being held hostage by the slowest peer.
+        """
+        if self._pool_ready.is_set():
+            return {"kind": "status", "ready": True}
+        state = "loading" if self._current_placement else "waiting"
+        resp: dict = {"kind": "status", "ready": False, "state": state}
+        if state != "loading" or not self._current_placement:
+            return resp
+
+        chat_acc = None
+        asker = self.participants.get(asker_wid) if asker_wid else None
+        if asker is not None:
+            chat_acc = asker.account_id
+
+        local_pair = None
+        if chat_acc is not None:
+            for seg in self._current_placement:
+                wseg = self.participants.get(seg[0])
+                if wseg is None or wseg.account_id != chat_acc:
+                    continue
+                pair = self._load_progress.get(seg[0])
+                if pair and pair[1] > 0:
+                    local_pair = pair
+                    break
+
+        if local_pair is not None:
+            n, t = local_pair
+            if n < t:
+                resp["progress"] = n / t
+                resp["bytes_now"] = n
+                resp["bytes_total"] = t
+                return resp
+            # Local download is done — switch the user-facing message
+            # from "Loading the model" to "Waiting for other machines"
+            # so a fast machine doesn't appear stuck at 100% while
+            # the pool waits on a slower peer.
+            resp["state"] = "loading_peers"
+            return resp
+
+        # Chat-only client (no companion worker on this account) isn't
+        # downloading anything locally — showing a bar of *someone
+        # else's* progress would be misleading. Just say we're waiting
+        # for the pool's other machines; no bar.
+        resp["state"] = "loading_peers"
+        return resp
 
     def _not_ready_status_response(self) -> dict:
         """Tell the chat client which of the two non-ready states the
