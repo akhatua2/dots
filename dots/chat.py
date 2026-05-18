@@ -290,19 +290,44 @@ class ChatUI:
                 generating["flag"] = True
                 self._app.invalidate()
                 try:
-                    _, resp = await worker.send_prompt(
-                        user_msg, max_tokens=256,
-                        on_token=lambda t: append_history(wrapper.feed(t)),
-                    )
-                    tail = wrapper.flush()
-                    if tail:
-                        append_history(tail)
-                    decode_tokens = int(resp.get("decode_tokens", 0))
-                    decode_s = float(resp.get("decode_ms", 0)) / 1000.0
-                    if decode_tokens > 0 and decode_s > 0:
-                        self._latest_tps = decode_tokens / decode_s
+                    from .worker import PoolNotReadyError
+
+                    # If the pool isn't ready yet, show a single friendly
+                    # status line under the prompt and auto-retry. The
+                    # status line updates if the pool transitions
+                    # (waiting → loading → serving). Ctrl-C cancels.
+                    state_text = {
+                        "loading": "Loading the model…",
+                        "waiting": "Waiting for more machines…",
+                    }
+                    notice_shown = False
+                    while True:
+                        try:
+                            _, resp = await worker.send_prompt(
+                                user_msg, max_tokens=256,
+                                on_token=lambda t: append_history(wrapper.feed(t)),
+                            )
+                            tail = wrapper.flush()
+                            if tail:
+                                append_history(tail)
+                            decode_tokens = int(resp.get("decode_tokens", 0))
+                            decode_s = float(resp.get("decode_ms", 0)) / 1000.0
+                            if decode_tokens > 0 and decode_s > 0:
+                                self._latest_tps = decode_tokens / decode_s
+                            break
+                        except PoolNotReadyError as nr:
+                            if not notice_shown:
+                                append_history(
+                                    f"{INDENT}"
+                                    f"{state_text.get(nr.state, 'Loading…')}\n"
+                                )
+                                notice_shown = True
+                            await asyncio.sleep(2.0)
                 except RuntimeError as e:
-                    append_history(f"{INDENT}error: {e}\n")
+                    append_history(f"{INDENT}{e}\n")
+                except asyncio.CancelledError:
+                    append_history(f"{INDENT}(cancelled while waiting)\n")
+                    raise
                 finally:
                     generating["flag"] = False
                     text = history_buf.text.rstrip("\n") + "\n\n"
