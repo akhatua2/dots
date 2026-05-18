@@ -42,6 +42,16 @@ from .util import (
 log = logging.getLogger("dots.worker")
 
 
+class PoolNotReadyError(RuntimeError):
+    """Raised by `Worker.send_prompt` when the hub reports the pool is
+    not yet ready to serve. Carries a `state` ∈ {"loading", "waiting"}
+    so the UI can pick a friendly message and decide to retry."""
+
+    def __init__(self, state: str):
+        super().__init__(state)
+        self.state = state
+
+
 class Worker:
     """Compute participant in a dots pool. UI-free by design."""
 
@@ -446,6 +456,8 @@ class Worker:
             resp = await self.conn.call("prompt", **payload)
         finally:
             self._token_callback = prev
+        if resp.get("kind") == "not_ready":
+            raise PoolNotReadyError(resp.get("state", "waiting"))
         if resp.get("kind") != "turn_done":
             raise RuntimeError(resp.get("error", "turn failed"))
         return "".join(captured), resp
