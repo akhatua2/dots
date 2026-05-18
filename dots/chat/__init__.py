@@ -60,6 +60,7 @@ _PROMPT_STYLE = Style.from_dict({
 from .spinner import (
     POOL_STATE_TEXT as _POOL_STATE_TEXT,
     SPINNER_FRAMES as _SPINNER_FRAMES,
+    fmt_bytes as _fmt_bytes,
     frame_at as _frame_at,
     render_bar as _render_bar,
 )
@@ -176,7 +177,14 @@ class ChatUI:
                 # When the hub knows download progress, show a real bar.
                 progress = status.get("progress")
                 if state == "loading" and isinstance(progress, (int, float)):
-                    line = f"  {spinner}  {msg}  {_render_bar(float(progress))}"
+                    bytes_now = status.get("bytes_now") or 0
+                    bytes_total = status.get("bytes_total") or 0
+                    size_suffix = (
+                        f"  ·  {_fmt_bytes(bytes_now)} / {_fmt_bytes(bytes_total)}"
+                        if bytes_total > 0 else ""
+                    )
+                    line = (f"  {spinner}  {msg}  "
+                            f"{_render_bar(float(progress))}{size_suffix}")
                 else:
                     line = f"  {spinner}  {msg}"
                 # Pad to clear leftover characters from a longer previous

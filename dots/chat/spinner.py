@@ -36,6 +36,18 @@ def render_bar(progress: float, width: int = BAR_WIDTH) -> str:
     return FILLED * filled + EMPTY * (width - filled) + f"  {progress * 100:.0f}%"
 
 
+def fmt_bytes(n: int) -> str:
+    """Human-readable byte count: `0 B`, `912 KB`, `1.8 GB`."""
+    n_f = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n_f < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(n_f)} B"
+            return f"{n_f:.1f} {unit}"
+        n_f /= 1024
+    return f"{n_f:.1f} GB"
+
+
 def frame_at(idx: int) -> str:
     """Pick a spinner frame for tick `idx`, wrapping at the end."""
     return SPINNER_FRAMES[idx % len(SPINNER_FRAMES)]
