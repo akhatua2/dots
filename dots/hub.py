@@ -56,25 +56,23 @@ class Conversation:
 
 @dataclass
 class Participant:
-    """A connected worker. Each one is also a chatter with their own conv."""
+    """A connected worker (or chat-only client) and its hub-side state."""
     id: str                                    # worker's stable UUID
     addr: str
-    free_ram_gb: float
     conn: PeerConnection
     compute: bool = True                       # contributes layers to the pool
-    max_load_gb: float | None = None           # None == no cap (vestigial)
     layer_range: tuple[int, int] | None = None
     ready: bool = False
     # The human-owner account this worker contributes to. CU and the
-    # future ledger get attributed against this, not against the
-    # per-process `id` above. Multiple Participants can share an account.
+    # ledger get attributed against this, not against the per-process
+    # `id` above. Multiple Participants can share an account.
     account_id: str | None = None
     account_alias: str | None = None
     # Where this worker accepts incoming peer connections (other workers
-    # talk to it on this port for probes + the future multi-worker
-    # pipeline). The host part comes from the TCP socket peername; the
-    # port comes from HELLO's `peer_listen_port`. None means the worker
-    # didn't open a peer server (chat-only clients).
+    # talk to it on this port for probes + the multi-worker chain). The
+    # host part comes from the TCP socket peername; the port comes from
+    # HELLO's `peer_listen_port`. None means the worker didn't open a
+    # peer server (chat-only clients).
     peer_listen_port: int | None = None
     conv: Conversation = field(default_factory=lambda: Conversation(id=str(uuid.uuid4())))
 
@@ -99,10 +97,6 @@ class Participant:
                      else self.account_id)
             return short[:8]
         return "anon"
-
-
-class TopologyChanged(Exception):
-    """Raised inside a turn when the pool changed under our feet."""
 
 
 class Hub:
@@ -257,9 +251,7 @@ class Hub:
 
         def free_ram(p: "Participant") -> float:
             decl = self.pool_view.resources.get(p.id)
-            if decl is not None:
-                return decl.ram_gb_free
-            return p.free_ram_gb
+            return decl.ram_gb_free if decl is not None else 0.0
 
         # Default: every worker that can fit the model holds a full
         # copy. This gives each querier self-utilization — their own
@@ -278,9 +270,9 @@ class Hub:
             self._current_placement = out
             return out
 
-        # Below this point: at least one worker can't fit alone, so we
-        # need a partition. Re-check the cache — if it's a locked
-        # partition placement and all members are present, reuse it.
+        # Below this point: no single worker fits, so we need a
+        # partition. Re-check the cache — if it's a locked partition
+        # placement and all members are present, reuse it.
         if (self._current_placement
                 and len(self._current_placement) >= 2
                 and self._current_placement[0][2] < self.n_layers):
@@ -288,25 +280,40 @@ class Hub:
             if cached_ids.issubset({p.id for p in compute_workers}):
                 return list(self._current_placement)
 
-        # No single worker fits → partition. Largest worker becomes
-        # head (bears the head_overhead in addition to its layer share).
-        ranked = sorted(compute_workers, key=free_ram, reverse=True)
-        head = ranked[0]
-        chain = ranked[1:]
-        # Allocate per-worker layer budgets:
-        #   head:  (free_ram - head_overhead - margin) / layer_ram
-        #   chain: (free_ram - margin) / layer_ram
-        budgets: list[tuple["Participant", int]] = []
-        head_layer_budget = max(
-            0,
-            int((free_ram(head) - head_overhead_gb - margin_gb) / layer_ram_gb),
+        # Partition via the scheduler. The unit graph is one WorkUnit
+        # per decoder layer; layer 0 carries the head overhead so the
+        # scheduler will only place it on a worker that can hold
+        # embed + lm_head + working memory in addition to its layer share.
+        # That's how we constrain "head must fit at segment 0" without
+        # the scheduler needing to know about head modules.
+        per_layer_flops = float(
+            2 * 16 * (self._geometry.hidden_size ** 2)
         )
-        budgets.append((head, head_layer_budget))
-        for p in chain:
-            cap = max(0, int((free_ram(p) - margin_gb) / layer_ram_gb))
-            budgets.append((p, cap))
-        total_capacity = sum(c for _, c in budgets)
-        if total_capacity < self.n_layers:
+        units = []
+        for i in range(self.n_layers):
+            unit_ram = layer_ram_gb + (head_overhead_gb if i == 0 else 0.0)
+            units.append(WorkUnit(
+                unit_id=f"block_{i}",
+                ram_required_gb=unit_ram + (margin_gb if i == 0 else 0),
+                flops_per_token=per_layer_flops,
+            ))
+
+        workers_snapshot, latency = self.pool_view.snapshot()
+        ready_ids = {p.id for p in compute_workers}
+        workers_snapshot = [
+            w for w in workers_snapshot if w.worker_id in ready_ids
+        ]
+        if not workers_snapshot:
+            self._current_placement = []
+            return []
+
+        placement = schedule(
+            units, workers_snapshot, latency,
+            querier_account=None,
+            mode="cheap",
+            max_segments=len(workers_snapshot),
+        )
+        if placement is None or not placement.segments:
             ui.notice(
                 f"pool free RAM ({sum(free_ram(p) for p in compute_workers):.1f} GB) "
                 f"can't fit model (~{model_ram_gb:.1f} GB) even partitioned — "
@@ -314,47 +321,17 @@ class Hub:
             )
             self._current_placement = []
             return []
-        # Distribute n_layers across workers proportional to their
-        # budget, clipped at each worker's cap.
-        weights = [c for _, c in budgets]
-        total_w = sum(weights) or 1
-        sizes = [max(0, min(c, round(self.n_layers * w / total_w)))
-                 for (_, c), w in zip(budgets, weights)]
-        # Reconcile rounding drift to land on exactly n_layers, never
-        # exceeding any worker's cap.
-        diff = self.n_layers - sum(sizes)
-        i = 0
-        while diff != 0 and i < 10_000:
-            i += 1
-            if diff > 0:
-                spares = [
-                    (budgets[k][1] - sizes[k], k) for k in range(len(sizes))
-                    if sizes[k] < budgets[k][1]
-                ]
-                if not spares:
-                    break
-                _, idx = max(spares)
-                sizes[idx] += 1
-                diff -= 1
-            else:
-                shrinkable = [(sizes[k], k) for k in range(len(sizes)) if sizes[k] > 1]
-                if not shrinkable:
-                    break
-                _, idx = max(shrinkable)
-                sizes[idx] -= 1
-                diff += 1
-        if sum(sizes) != self.n_layers:
-            ui.notice("pool can't satisfy partition under per-worker caps")
-            self._current_placement = []
-            return []
 
         out: list[tuple[str, int, int, bool]] = []
         cursor = 0
-        for i, ((p, _), count) in enumerate(zip(budgets, sizes)):
-            if count <= 0:
-                continue
-            out.append((p.id, cursor, cursor + count, i == 0))
+        for i, (worker_id, unit_ids) in enumerate(placement.segments):
+            count = len(unit_ids)
+            out.append((worker_id, cursor, cursor + count, i == 0))
             cursor += count
+        log.info(
+            "partition placement: %s",
+            " → ".join(f"{wid[:8]}[{s}:{e}]" for wid, s, e, _ in out),
+        )
         self._current_placement = out
         return out
 
@@ -447,11 +424,6 @@ class Hub:
             await conn.close()
             return
         wid_holder["id"] = worker_id
-        free_ram = float(hello_msg.get("free_ram_gb", 0.0))
-        max_load_raw = hello_msg.get("max_load_gb")
-        max_load_gb = float(max_load_raw) if max_load_raw is not None else None
-        # Default to compute=True if the client didn't say (so pre-PR-5
-        # workers keep behaving the same way).
         compute = bool(hello_msg.get("compute", True))
         account_id = hello_msg.get("account_id")
         account_id = account_id if isinstance(account_id, str) and account_id else None
@@ -459,13 +431,12 @@ class Hub:
         account_alias = (account_alias if isinstance(account_alias, str)
                          and account_alias else None)
 
-        # Extract the new-style resource declaration. Falls back to the
-        # legacy free_ram_gb if the worker is an older build.
         resource_decl = resource_decl_from_hello(hello_msg, worker_id=worker_id)
+        free_ram = resource_decl.ram_gb_free if resource_decl is not None else 0.0
 
         # If a worker with this identity is already in the pool (process
-        # restart whose old connection hasn't been read-detected yet), close
-        # the stale one and replace it.
+        # restart whose old connection hasn't been read-detected yet),
+        # close the stale one and replace it.
         async with self._pool_lock:
             stale = self.participants.get(worker_id)
             if stale is not None and stale.conn is not conn:
@@ -479,18 +450,17 @@ class Hub:
                          if isinstance(peer_port_raw, int) and peer_port_raw > 0
                          else None)
             participant = Participant(
-                id=worker_id, addr=addr_str, free_ram_gb=free_ram,
-                compute=compute, max_load_gb=max_load_gb, conn=conn,
+                id=worker_id, addr=addr_str,
+                compute=compute, conn=conn,
                 account_id=account_id, account_alias=account_alias,
                 peer_listen_port=peer_port,
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
                 self.pool_view.add_or_update(worker_id, resource_decl)
-        cap_str = f", cap={max_load_gb:.1f}GB" if max_load_gb is not None else ""
         role = "worker" if compute else "client"
         ui.notice(f"{role}·{participant.short_id} ({participant.display_owner}) "
-                  f"joined ({addr_str}, free_ram={free_ram:.1f}GB{cap_str})")
+                  f"joined ({addr_str}, free_ram={free_ram:.1f}GB)")
         await self._on_pool_changed()
         try:
             await conn.notify("welcome", conv_id=participant.conv.id)
@@ -573,10 +543,6 @@ class Hub:
                 is_alive=alive,
                 querier_account=participant.account_id,
             )
-        except TopologyChanged:
-            if conv.history and conv.history[-1].get("role") == "user":
-                conv.history.pop()
-            return {"kind": "error", "error": "topology changed during turn"}
         except ConnectionError as e:
             if conv.history and conv.history[-1].get("role") == "user":
                 conv.history.pop()
