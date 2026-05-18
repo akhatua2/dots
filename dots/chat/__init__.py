@@ -280,8 +280,6 @@ class ChatUI:
                     f"{self._total_decode_tokens} tokens in "
                     f"{self._total_decode_s:.1f}s  ·  ",
                 ))
-            if generating["flag"]:
-                rhs.append(("class:status.dim", "generating · "))
             rhs.append(("class:status.dim", "ctrl-c to interrupt"))
             visible = sum(len(t) for _, t in rhs)
             pad = max(len(INDENT), _ttysize()[0] - visible - 1)
