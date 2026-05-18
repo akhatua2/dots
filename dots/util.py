@@ -20,6 +20,75 @@ def free_ram_gb() -> float:
     return (pages_free + pages_inactive) * 16384 / (1024**3)
 
 
+def cpu_brand_string() -> str:
+    """Return the machine's CPU brand string (e.g. 'Apple M2 Pro').
+
+    Empty string on non-macOS or if sysctl is unavailable.
+    """
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            stderr=subprocess.DEVNULL,
+        )
+        return out.decode().strip()
+    except Exception:
+        return ""
+
+
+# Rough effective TFLOPs for 4-bit MLX decode workloads (memory-bandwidth
+# limited, not peak compute). Values calibrated against public mlx-lm
+# benchmark reports. Treat as ±20% accurate; refine when we have real
+# workload telemetry that the scheduler can learn from.
+_CHIP_THROUGHPUT_TFLOPS: tuple[tuple[str, float], ...] = (
+    # Order matters: more specific strings come first.
+    ("m2 ultra", 3.5),
+    ("m3 max",   2.5),
+    ("m1 max",   1.5),
+    ("m2 max",   2.0),
+    ("m3 pro",   1.8),
+    ("m1 pro",   0.8),
+    ("m2 pro",   1.2),
+    ("m3",       1.2),
+    ("m2",       0.5),
+    ("m1",       0.4),
+)
+
+
+def effective_tflops_estimate(brand: str | None = None) -> float:
+    """Best-effort effective TFLOPs estimate for 4-bit LLM inference.
+
+    Workers report this in HELLO so the hub's scheduler can predict TPS
+    for placements. Override via $DOTS_TFLOPS for explicit configuration.
+    """
+    override = os.environ.get("DOTS_TFLOPS")
+    if override is not None:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    brand = brand if brand is not None else cpu_brand_string()
+    low = brand.lower()
+    for needle, tflops in _CHIP_THROUGHPUT_TFLOPS:
+        if needle in low:
+            return tflops
+    return 1.0  # generic fallback
+
+
+_BACKEND_OVERRIDE_ENV = "DOTS_BACKENDS"
+
+
+def supported_backends() -> frozenset[str]:
+    """Backends this worker can run on. Reported in HELLO.
+
+    v1: always {"mlx"} on Apple Silicon; respected $DOTS_BACKENDS env var
+    for testing other backends (comma-separated).
+    """
+    override = os.environ.get(_BACKEND_OVERRIDE_ENV)
+    if override:
+        return frozenset(s.strip() for s in override.split(",") if s.strip())
+    return frozenset({"mlx"})
+
+
 def dots_home() -> pathlib.Path:
     """Where we keep per-user state (identity, future config). Overridable
     via $DOTS_HOME for tests and multi-worker-per-machine setups."""
