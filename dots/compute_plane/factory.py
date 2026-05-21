@@ -1,32 +1,35 @@
 """Plane factory: pick the right plane for the workload.
 
 Resolution order:
-  1. `force_local` → LocalComputePlane.
-  2. No workers supplied → LocalComputePlane.
+  1. `force_local` -> LocalComputePlane.
+  2. No workers supplied -> LocalComputePlane.
   3. Geometry + latency given AND a feasible distributed placement
-     exists → DistributedComputePlane.
-  4. Otherwise → LocalComputePlane (graceful fallback).
+     exists -> DistributedComputePlane.
+  4. Otherwise fail clearly.
 
-The "fall back to local" branch is the self-utilization win: when the
-pool can't help, don't pay the network tax.
+Local and distributed execution are explicit choices; the factory does
+not hide distributed planning failures by silently loading locally.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Sequence
 
-from .base import ComputePlane
+from .base import ComputePlane, VirtualResources
 from .distributed import DistributedComputePlane
 from .local import LocalComputePlane
-from ..scheduler import LatencyMatrix, ResourceDecl
-from ..work_units import ModelGeometry
+from ..backends.base import BackendRuntime
+from ..placement.scheduler import LatencyMatrix, ResourceDecl
+from ..placement.work_units import ModelGeometry
 
 log = logging.getLogger("dots.compute_plane.factory")
 
 
 def create_plane(
     *,
-    model_id: str,
+    local_runtime: BackendRuntime | None = None,
+    local_resources: VirtualResources | None = None,
     geometry: ModelGeometry | None = None,
     workers: Sequence[ResourceDecl] = (),
     latency: LatencyMatrix | None = None,
@@ -37,9 +40,9 @@ def create_plane(
     force_local: bool = False,
 ) -> ComputePlane:
     if force_local or not workers:
-        return LocalComputePlane(model_id)
+        return _local_plane(local_runtime, local_resources)
     if geometry is None or latency is None:
-        return LocalComputePlane(model_id)
+        return _local_plane(local_runtime, local_resources)
     try:
         plane = DistributedComputePlane(
             geometry=geometry,
@@ -52,6 +55,17 @@ def create_plane(
         )
         log.info("plane: distributed (%d workers)", len(workers))
         return plane
-    except RuntimeError:
-        log.info("plane: no feasible distributed placement, falling back to local")
-        return LocalComputePlane(model_id)
+    except RuntimeError as e:
+        raise RuntimeError(f"distributed plane unavailable: {e}") from e
+
+
+def _local_plane(
+    runtime: BackendRuntime | None,
+    resources: VirtualResources | None,
+) -> ComputePlane:
+    if runtime is None or resources is None:
+        raise RuntimeError(
+            "local compute plane requires an already-loaded BackendRuntime "
+            "and explicit VirtualResources"
+        )
+    return LocalComputePlane(runtime, resources)

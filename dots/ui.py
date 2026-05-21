@@ -4,10 +4,10 @@
 stats, and errors always print — they're the bits the user actually wants
 in a normal session. Everything debuggy goes through info().
 """
+
 from __future__ import annotations
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.text import Text
 
 console = Console()
@@ -24,8 +24,12 @@ def is_verbose() -> bool:
     return _verbose
 
 
-def banner(model: str, hub_addr: str, layer_range: tuple[int, int] | None = None,
-           version: str = "0.0.1") -> None:
+def banner(
+    model: str,
+    hub_addr: str,
+    layer_range: tuple[int, int] | None = None,
+    version: str = "0.0.1",
+) -> None:
     """Compact startup banner. `···` at col 0, key=value rows indented to
     align under 'dots'."""
     if layer_range is not None:
@@ -51,8 +55,12 @@ def banner(model: str, hub_addr: str, layer_range: tuple[int, int] | None = None
     console.print(out)
 
 
-def banner_text(model: str, hub_addr: str, layer_range: tuple[int, int] | None,
-                version: str = "0.0.1") -> str:
+def banner_text(
+    model: str,
+    hub_addr: str,
+    layer_range: tuple[int, int] | None,
+    version: str = "0.0.1",
+) -> str:
     """Plain-text banner (no ANSI). Used as a fallback when styling is
     inconvenient. The interactive UI uses `banner_segments` instead."""
     if layer_range is not None:
@@ -89,9 +97,12 @@ def _style_art_line(line: str) -> list[tuple[str, str]]:
     return out
 
 
-def banner_segments(model: str, hub_addr: str,
-                    layer_range: tuple[int, int] | None,
-                    version: str = "0.0.1") -> list[tuple[str, str]]:
+def banner_segments(
+    model: str,
+    hub_addr: str,
+    layer_range: tuple[int, int] | None,
+    version: str = "0.0.1",
+) -> list[tuple[str, str]]:
     """Banner as `(style, text)` tuples for FormattedTextControl. Four-row
     constellation art on the left, vertically centered against the four
     text rows (dots/model/hub/shard) on the right."""
@@ -128,8 +139,9 @@ def error(msg: str) -> None:
     console.print(f"[bold red]error[/bold red] {msg}")
 
 
-def stats(prefill_tokens: int, prefill_ms: float,
-          decode_tokens: int, decode_s: float) -> None:
+def stats(
+    prefill_tokens: int, prefill_ms: float, decode_tokens: int, decode_s: float
+) -> None:
     """Kept for callers that still want a one-line per-response stats summary
     (currently only the one-shot --prompt path)."""
     parts = []

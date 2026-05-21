@@ -111,6 +111,9 @@ order.
   hub → worker API surface; scope-split between hub-only ops and
   peer-allowed ops; session-token-authenticated peer connections;
   LAN-only bind defaults.
+- [`multi-backend-layer-abi.md`](./multi-backend-layer-abi.md) —
+  Backend capability, setup, sandbox, and hidden-state ABI plan for
+  future mixed MLX/llama.cpp/vLLM worker pools.
 
 ### Performance + topology
 
@@ -122,9 +125,6 @@ order.
 These came up in design conversations but don't have plan docs yet. Write
 them when you're ready to schedule:
 
-- **Multi-backend pool** — protocol-first design where each worker
-  declares its inference stack (MLX, llama.cpp, vLLM, …). Hub stays
-  framework-agnostic. Hidden-state-on-the-wire is the contract.
 - **Spot-check audits** — hub re-runs ~1% of worker computations on a
   different worker (or itself) to detect cheating. Almost free once the
   hub already has shadow state from the hybrid-pipeline work.

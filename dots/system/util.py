@@ -1,0 +1,378 @@
+"""Shared utilities."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import pathlib
+import platform
+import re
+import subprocess
+import uuid
+
+
+def free_ram_gb() -> float:
+    """Available RAM in gigabytes.
+
+    Uses psutil when installed. The macOS vm_stat path is kept for the
+    common no-extra-dependency case. Workers can cap this value before
+    advertising it to the hub.
+    """
+    system = platform.system()
+    if system == "Linux":
+        return _linux_available_ram_gb()
+    if system != "Darwin":
+        raise RuntimeError("RAM discovery is not implemented for this platform")
+    out = subprocess.check_output(["vm_stat"]).decode()
+    pages_free = pages_inactive = 0
+    page_size = _vm_stat_page_size(out)
+    for line in out.splitlines():
+        if line.startswith("Pages free:"):
+            pages_free = int(line.split()[-1].rstrip("."))
+        elif line.startswith("Pages inactive:"):
+            pages_inactive = int(line.split()[-1].rstrip("."))
+    return (pages_free + pages_inactive) * page_size / (1024**3)
+
+
+def _vm_stat_page_size(vm_stat_output: str) -> int:
+    match = re.search(r"page size of (\d+) bytes", vm_stat_output)
+    if match is None:
+        raise RuntimeError("could not discover macOS vm_stat page size")
+    return int(match.group(1))
+
+
+def _linux_available_ram_gb() -> float:
+    meminfo = pathlib.Path("/proc/meminfo")
+    if meminfo.exists():
+        for line in meminfo.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return float(parts[1]) * 1024 / (1024**3)
+
+    out = subprocess.check_output(["free", "-b"]).decode()
+    for line in out.splitlines():
+        if line.startswith("Mem:"):
+            parts = re.split(r"\s+", line.strip())
+            if len(parts) >= 7:
+                return float(parts[6]) / (1024**3)
+    raise RuntimeError("could not discover Linux available RAM")
+
+
+def best_peer_listen_host() -> str:
+    """Pick the IP a worker should advertise as its peer-server address.
+
+    The hub used to record a worker's `peer_host` as "whatever IP they
+    connected to the hub from" — which works fine for single-machine
+    setups (everyone's at `127.0.0.1`) but breaks the moment a remote
+    worker is in the pool. A local worker connects to the hub via
+    loopback, the hub records `127.0.0.1`, then later tells a remote
+    worker "reach the local one at 127.0.0.1" — which from the remote
+    POV points back at itself, not at the local worker.
+
+    Workers solve this by telling the hub their *own* routable IP in
+    HELLO. We rank candidates:
+
+      • Tailscale CGNAT (100.64.0.0/10) — first choice since dots is
+        designed around tailnet routing.
+      • RFC1918 private LAN (10/8, 172.16/12, 192.168/16) — second
+        choice for plain-LAN deployments.
+      • Loopback — only if absolutely nothing else is available
+        (pure single-machine setup, where it's also correct).
+
+    Returns `127.0.0.1` if no other usable address can be found.
+    """
+    import ipaddress
+    import socket
+
+    tailscale_net = ipaddress.ip_network("100.64.0.0/10")
+
+    def _score(ip: str) -> int:
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return -100
+        if a.is_loopback:
+            return -10
+        if a in tailscale_net:
+            return 100
+        if a.is_private:
+            return 50
+        if a.is_global:
+            return 30
+        return 0
+
+    candidates: set[str] = set()
+    try:
+        for fam, _, _, _, sa in socket.getaddrinfo(
+            socket.gethostname(),
+            None,
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        ):
+            candidates.add(sa[0])
+    except OSError:
+        pass
+    # Belt-and-suspenders: enumerate addrs assigned to active interfaces.
+    # `socket.gethostname()` resolution can miss the Tailscale IP on macOS
+    # when MagicDNS isn't pointing back at the host's own name.
+    try:
+        out = subprocess.check_output(
+            ["ifconfig"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and " netmask" in line:
+                candidates.add(line.split()[1])
+    except Exception:
+        pass
+
+    candidates.discard("")
+    if not candidates:
+        return "127.0.0.1"
+    return max(candidates, key=_score)
+
+
+def effective_tflops_estimate(_brand: str | None = None) -> float:
+    """Configured effective TFLOPs estimate for this worker.
+
+    Workers report this in HELLO so the hub's scheduler can predict TPS
+    for placements. Until workers collect real local telemetry, this must
+    come from $DOTS_TFLOPS.
+    """
+    override = os.environ.get("DOTS_TFLOPS")
+    if override is None:
+        return 0.0
+    return float(override)
+
+
+def dots_home() -> pathlib.Path:
+    """Where we keep per-user state (identity, future config). Overridable
+    via $DOTS_HOME for tests and multi-worker-per-machine setups."""
+    override = os.environ.get("DOTS_HOME")
+    return pathlib.Path(override) if override else pathlib.Path.home() / ".dots"
+
+
+def load_dotenv_into_env() -> str | None:
+    """Load a `.env` file into `os.environ` using python-dotenv.
+
+    Looks in cwd, DOTS_HOME, and the project root (computed relative to
+    this file). Existing env vars win — explicit `export FOO=bar`
+    overrides the file. Returns the path of the file used, or None
+    if no .env was found (or python-dotenv isn't installed).
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return None
+    candidates = [
+        pathlib.Path.cwd() / ".env",
+        dots_home() / ".env",
+        pathlib.Path(__file__).resolve().parent.parent / ".env",
+    ]
+    for path in candidates:
+        if path.is_file():
+            load_dotenv(dotenv_path=path, override=False)
+            return str(path)
+    return None
+
+
+def load_or_create_identity() -> str:
+    """Return this machine's stable worker UUID. Generated on first call and
+    persisted to {dots_home}/identity so it survives reboots and reconnects.
+    Once issued, the hub uses it to recognize a returning worker — opens the
+    door to per-worker preferences, auth, and contribution stats later."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    f = home / "identity"
+    if f.exists():
+        existing = f.read_text().strip()
+        if existing:
+            return existing
+    new_id = str(uuid.uuid4())
+    f.write_text(new_id + "\n")
+    return new_id
+
+
+def load_or_create_account() -> str:
+    """Return the human-owner's account ID. Auto-generates a random one if
+    no account file exists; users can run `dots account create` for an
+    interactive setup that supports password-derived recovery."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    f = home / "account"
+    if f.exists():
+        existing = f.read_text().strip()
+        if existing:
+            return existing
+    new_id = "acc-" + uuid.uuid4().hex
+    f.write_text(new_id + "\n")
+    return new_id
+
+
+def save_account_id(account_id: str) -> None:
+    """Write account_id to {dots_home}/account. Used by `dots account create`."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "account").write_text(account_id.strip() + "\n")
+
+
+def derive_account_id(name: str, email: str, password: str) -> str:
+    """Deterministically derive an account_id from (name, email, password).
+
+    The same three inputs always produce the same account_id. That's the
+    recovery property: if you lose your `~/.dots/account` file, re-running
+    `dots account create` with the same inputs reproduces the same id and
+    your credit ledger history is preserved.
+
+    Uses PBKDF2-HMAC-SHA256 with 100k iterations to slow brute-force
+    attacks against weak passwords. Salt is a fixed project constant
+    (not secret — it only namespaces this derivation against unrelated
+    KDF uses elsewhere).
+    """
+    salt = b"dots-account-v1"
+    name_n = name.lower().strip()
+    email_n = email.lower().strip()
+    material = f"{name_n}|{email_n}|{password}".encode("utf-8")
+    h = hashlib.pbkdf2_hmac("sha256", material, salt, iterations=100_000)
+    return "acc-" + h.hex()[:32]
+
+
+def account_id_short(account_id: str) -> str:
+    """Short, log-friendly form. Strips the 'acc-' prefix if present."""
+    s = account_id[4:] if account_id.startswith("acc-") else account_id
+    return s[:8] if s else "?"
+
+
+def _read_account_field(name: str) -> str | None:
+    f = dots_home() / name
+    if not f.exists():
+        return None
+    val = f.read_text().strip()
+    return val or None
+
+
+def _write_account_field(name: str, value: str) -> None:
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / name).write_text(value.strip() + "\n")
+
+
+def load_account_alias() -> str | None:
+    """Cosmetic short handle for this account (e.g. 'arpan'). Sent on HELLO
+    so other pool members see a name instead of a UUID."""
+    return _read_account_field("account-alias")
+
+
+def save_account_alias(alias: str) -> None:
+    _write_account_field("account-alias", alias)
+
+
+def load_account_name() -> str | None:
+    """Full human-readable name. Stays local; not sent on HELLO unless the
+    user opts in (future). Useful for self-display."""
+    return _read_account_field("account-name")
+
+
+def save_account_name(name: str) -> None:
+    _write_account_field("account-name", name)
+
+
+def load_account_email() -> str | None:
+    """Contact email. Stays local; not sent on HELLO. Useful for the user
+    to remember which email they tied this account to."""
+    return _read_account_field("account-email")
+
+
+def save_account_email(email: str) -> None:
+    _write_account_field("account-email", email)
+
+
+def save_last_hub(addr: str) -> None:
+    """Persist the most recently successful hub address so the user can
+    run `dots chat` or `dots worker` without args next time."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "last_hub").write_text(addr.strip() + "\n")
+
+
+def load_last_hub() -> str | None:
+    f = dots_home() / "last_hub"
+    if not f.exists():
+        return None
+    addr = f.read_text().strip()
+    return addr or None
+
+
+def worker_pid_file() -> pathlib.Path:
+    return dots_home() / "worker.pid"
+
+
+def write_worker_pid(pid: int) -> None:
+    """Record a long-running `dots worker`'s PID so `dots chat` can detect
+    it and skip spawning a duplicate."""
+    home = dots_home()
+    home.mkdir(parents=True, exist_ok=True)
+    worker_pid_file().write_text(f"{pid}\n")
+
+
+def clear_worker_pid(only_if: int | None = None) -> None:
+    """Remove the worker PID file. If only_if is given, only delete when
+    the file points at exactly that pid (so we don't trample a successor
+    worker that started between our write and our cleanup)."""
+    f = worker_pid_file()
+    if not f.exists():
+        return
+    if only_if is not None:
+        try:
+            current = int(f.read_text().strip())
+        except (ValueError, OSError):
+            return
+        if current != only_if:
+            return
+    try:
+        f.unlink()
+    except OSError:
+        pass
+
+
+def read_live_worker_pid() -> int | None:
+    """Returns the PID of a *real* `dots worker` running on this machine,
+    or None if no PID is recorded, the recorded process is dead, or the
+    PID got recycled to an unrelated program. We confirm by reading the
+    process's command line; if it doesn't look like a dots worker, we
+    treat the file as stale and clear it."""
+    f = worker_pid_file()
+    if not f.exists():
+        return None
+    try:
+        pid = int(f.read_text().strip())
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)  # signal 0 = liveness probe, no actual signal
+    except OSError:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    # Verify it's actually a dots worker by inspecting the command line.
+    # `ps -p PID -o command=` returns the cmdline minus the PID/header.
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if "dots" not in out or "worker" not in out:
+            # Recycled to an unrelated program — drop the stale file.
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            return None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return pid

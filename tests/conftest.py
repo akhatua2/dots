@@ -6,6 +6,7 @@ without loading an actual transformer. Tests that genuinely need a real
 model can opt out by parameterizing or by calling the real functions
 directly — none of the current tests do.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,23 +17,33 @@ from typing import AsyncIterator
 import pytest
 import pytest_asyncio
 
-from dots.hub import Hub
-from dots.peer import PeerConnection
-from dots.pool import resource_decl_to_hello_field
-from dots.scheduler import ResourceDecl
-from dots.util import effective_tflops_estimate, free_ram_gb, supported_backends
-from dots.worker import Worker
+from dots.distributed.hub import Hub
+from dots.distributed.peer import PeerConnection
+from dots.distributed.pool import resource_decl_to_hello_field
+from dots.backends.base import ModelMetadata
+from dots.system.util import effective_tflops_estimate, free_ram_gb
+from dots.distributed.worker import Worker
+from tests.helpers.resources import resource_decl
 
 from .fakes import (
-    fake_load, fake_make_prompt_cache, fake_create_attention_mask,
+    FakeTensor,
+    fake_argmax_token,
+    fake_array,
+    fake_load,
+    fake_make_prompt_cache,
+    fake_create_attention_mask,
 )
+from tests.helpers.models import exact_geometry
 
 TEST_MODEL = "fake/test-model"
 
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        try:
+            s.bind(("127.0.0.1", 0))
+        except PermissionError as e:
+            pytest.skip(f"localhost bind unavailable in this test environment: {e}")
         return s.getsockname()[1]
 
 
@@ -43,23 +54,77 @@ def mock_model(monkeypatch):
     # config-priming step is also stubbed (no HF download in tests).
     def fake_partial(model_id, *, layer_start=0, layer_end=None, needs_head=True):
         from .fakes import DEFAULT_LAYERS
+
         m, t = fake_load(model_id)
         return m, t, DEFAULT_LAYERS
 
-    monkeypatch.setattr("dots.worker.load_partial", fake_partial)
-    monkeypatch.setattr("dots.inference.make_prompt_cache", fake_make_prompt_cache)
-    monkeypatch.setattr("dots.inference.create_attention_mask", fake_create_attention_mask)
+    monkeypatch.setattr("dots.backends.mlx.runtime.load_partial", fake_partial)
+    monkeypatch.setattr(
+        "dots.backends.registry.available_backend_names",
+        lambda: frozenset({"mlx"}),
+    )
+    monkeypatch.setattr(
+        "dots.backends.registry.is_backend_available",
+        lambda name: name == "mlx",
+    )
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.MlxBackendRuntime.metadata_for",
+        _fake_metadata_for,
+    )
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.safetensors_disk_size_gb",
+        lambda _model_id: 0.001,
+    )
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.make_prompt_cache", fake_make_prompt_cache
+    )
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.create_attention_mask", fake_create_attention_mask
+    )
+    monkeypatch.setattr("dots.backends.mlx.runtime.array", fake_array)
+    monkeypatch.setattr("dots.backends.mlx.runtime.argmax_token", fake_argmax_token)
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.MlxBackendRuntime.encode_hidden",
+        lambda _self, hidden: hidden.to_wire(),
+    )
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime.MlxBackendRuntime.decode_hidden",
+        lambda _self, payload: FakeTensor.from_wire(payload),
+    )
 
     # Stub the hub's eager geometry primer so the hub fixture doesn't
     # try to download a real model on test setup.
     async def fake_prime(self):
-        from dots.work_units import ModelGeometry
         from .fakes import DEFAULT_LAYERS, HIDDEN_DIM, VOCAB_SIZE
+
+        self._selected_backend = "mlx"
         self.n_layers = DEFAULT_LAYERS
-        self._geometry = ModelGeometry(
-            n_layers=DEFAULT_LAYERS, hidden_size=HIDDEN_DIM, vocab_size=VOCAB_SIZE,
+        self._geometry = exact_geometry(
+            n_layers=DEFAULT_LAYERS,
+            hidden_size=HIDDEN_DIM,
+            vocab_size=VOCAB_SIZE,
         )
-    monkeypatch.setattr("dots.hub.Hub._prime_geometry_from_config", fake_prime)
+
+    monkeypatch.setattr(
+        "dots.distributed.hub.Hub._prime_geometry_from_config", fake_prime
+    )
+
+
+async def _fake_metadata_for(self, model_id: str) -> ModelMetadata:
+    from .fakes import DEFAULT_LAYERS, HIDDEN_DIM, VOCAB_SIZE
+
+    return ModelMetadata(
+        source_id=model_id,
+        runtime_id=model_id,
+        geometry=exact_geometry(
+            n_layers=DEFAULT_LAYERS,
+            hidden_size=HIDDEN_DIM,
+            vocab_size=VOCAB_SIZE,
+            layer_ram_gb=0.001,
+            embed_ram_gb=0.001,
+            lm_head_ram_gb=0.001,
+        ),
+    )
 
 
 @pytest_asyncio.fixture
@@ -70,8 +135,12 @@ async def hub(tmp_path) -> AsyncIterator[Hub]:
     Ledger path is redirected to a per-test tmp dir so test turns can
     record real CU without polluting the developer's ~/.dots/."""
     port = _free_port()
-    h = Hub(port=port, model_id=TEST_MODEL, host="127.0.0.1",
-            ledger_path=tmp_path / "credits.json")
+    h = Hub(
+        port=port,
+        model_id=TEST_MODEL,
+        host="127.0.0.1",
+        ledger_path=tmp_path / "credits.json",
+    )
     task = asyncio.create_task(h.start())
     try:
         await asyncio.wait_for(h.started.wait(), timeout=5.0)
@@ -109,7 +178,8 @@ async def connect_worker(hub: Hub) -> Worker:
     # reconnect-takeover or accidentally pollute the developer's real
     # account file).
     w = Worker(
-        "127.0.0.1", hub.port,
+        "127.0.0.1",
+        hub.port,
         identity=str(uuid.uuid4()),
         account_id="acc-" + uuid.uuid4().hex,
         account_alias="",
@@ -119,19 +189,22 @@ async def connect_worker(hub: Hub) -> Worker:
     reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
     w.conn = PeerConnection(reader, writer, f"127.0.0.1:{hub.port}", w._handle)
     # Build a real ResourceDecl so the hub's new pool_view ingests properly.
-    decl = ResourceDecl(
-        worker_id=w.identity,
+    decl = resource_decl(
+        w.identity,
         account_id=w.account_id,
-        ram_gb_free=free_ram_gb(),
-        compute_tflops_per_sec=effective_tflops_estimate(),
-        backends=supported_backends(),
+        ram_gb=free_ram_gb(),
+        tflops=effective_tflops_estimate(),
+        backends=frozenset({"mlx"}),
         cluster_id="",
     )
     ack = await w.conn.call(
-        "hello", worker_id=w.identity, account_id=w.account_id,
+        "hello",
+        worker_id=w.identity,
+        account_id=w.account_id,
         free_ram_gb=decl.ram_gb_free,
         resources=resource_decl_to_hello_field(decl),
         peer_listen_port=w._peer_listen_port,
+        peer_listen_host="127.0.0.1",
     )
     assert ack.get("kind") == "hello_ack"
     w.model_id = ack["model_id"]

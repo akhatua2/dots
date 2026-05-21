@@ -1,4 +1,5 @@
 """ComputePlane abstract base + shared value types."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -13,6 +14,7 @@ class VirtualResources:
     its own routing/state. Used by application code for things like
     deciding max_tokens or whether a context fits.
     """
+
     ram_gb_available: float
     compute_tflops_per_sec: float
     backends: frozenset[str]

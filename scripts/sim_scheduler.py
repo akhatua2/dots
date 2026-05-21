@@ -2,7 +2,7 @@
 Pareto frontiers.
 
 Run:
-    .venv/bin/pip install -e ".[sim]"
+    uv pip install -e ".[sim]"
     .venv/bin/python scripts/sim_scheduler.py
 
 Outputs PNGs to scripts/sim_results/. Every plot shows:
@@ -12,6 +12,7 @@ Outputs PNGs to scripts/sim_results/. Every plot shows:
 
 This is the empirical confirmation that the scheduler hits the frontier.
 """
+
 from __future__ import annotations
 
 import sys
@@ -22,11 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError:
-    print('matplotlib not installed. Run: .venv/bin/pip install -e ".[sim]"',
-          file=sys.stderr)
+    print('matplotlib not installed. Run: uv pip install -e ".[sim]"', file=sys.stderr)
     sys.exit(1)
 
 from dots.scheduler import (  # noqa: E402  (sys.path needs the manipulation first)
@@ -35,7 +36,7 @@ from dots.scheduler import (  # noqa: E402  (sys.path needs the manipulation fir
     non_dominated_placements,
     schedule,
 )
-from dots.sim import (  # noqa: E402
+from tests.helpers.sim import (  # noqa: E402
     LLAMA_70B,
     QWEN_05B,
     QWEN_7B,
@@ -63,20 +64,35 @@ def plot_scenario(
     dom_x = [p.cu_paid for p in candidates if id(p) not in frontier_ids]
     dom_y = [p.tps for p in candidates if id(p) not in frontier_ids]
     if dom_x:
-        ax.scatter(dom_x, dom_y, c="lightgray", s=22, alpha=0.55,
-                   label=f"dominated ({len(dom_x)})")
+        ax.scatter(
+            dom_x,
+            dom_y,
+            c="lightgray",
+            s=22,
+            alpha=0.55,
+            label=f"dominated ({len(dom_x)})",
+        )
 
     frontier_sorted = sorted(frontier, key=lambda p: p.cu_paid)
     ax.plot(
         [p.cu_paid for p in frontier_sorted],
         [p.tps for p in frontier_sorted],
-        "b-o", markersize=8, linewidth=2,
+        "b-o",
+        markersize=8,
+        linewidth=2,
         label=f"Pareto frontier ({len(frontier)})",
     )
 
     if chosen is not None:
-        ax.scatter([chosen.cu_paid], [chosen.tps],
-                   c="red", s=260, marker="*", zorder=10, label="schedule() pick")
+        ax.scatter(
+            [chosen.cu_paid],
+            [chosen.tps],
+            c="red",
+            s=260,
+            marker="*",
+            zorder=10,
+            label="schedule() pick",
+        )
 
     ax.set_xlabel("CU paid per token (FLOPs to non-self workers)")
     ax.set_ylabel("Tokens / second (estimated)")
@@ -99,38 +115,47 @@ def run(
     max_segments: int = 4,
 ) -> None:
     print(f"\n[{label}]")
-    print(f"  pool: {len(workers)} workers across "
-          f"{len(set(w.cluster_id for w in workers))} cluster(s)")
+    print(
+        f"  pool: {len(workers)} workers across "
+        f"{len(set(w.cluster_id for w in workers))} cluster(s)"
+    )
     total_ram = sum(u.ram_required_gb for u in units)
     print(f"  model: {len(units)} units, total RAM {total_ram:.2f} GB")
 
-    candidates = list(enumerate_placements(
-        units, workers, latency,
-        querier_account=querier_account,
-        max_segments=max_segments,
-    ))
+    candidates = list(
+        enumerate_placements(
+            units,
+            workers,
+            latency,
+            querier_account=querier_account,
+            max_segments=max_segments,
+        )
+    )
     if not candidates:
         print("  no feasible placements; skipping")
         return
 
     frontier = non_dominated_placements(candidates)
     chosen = schedule(
-        units, workers, latency,
+        units,
+        workers,
+        latency,
         querier_account=querier_account,
         mode=mode,
         max_segments=max_segments,
     )
 
-    print(f"  candidates: {len(candidates)}  |  frontier: {len(frontier)}"
-          f"  |  mode: {mode}")
+    print(
+        f"  candidates: {len(candidates)}  |  frontier: {len(frontier)}"
+        f"  |  mode: {mode}"
+    )
     if chosen is not None:
         print(f"  chosen: {chosen}")
         # Sanity: the chosen placement must be on the frontier.
         assert chosen in frontier, "scheduler picked a dominated point — bug"
 
     plot_scenario(
-        title=f"{label}\n{len(workers)} workers · mode={mode} · "
-              f"{len(units)} units",
+        title=f"{label}\n{len(workers)} workers · mode={mode} · {len(units)} units",
         candidates=candidates,
         frontier=frontier,
         chosen=chosen,
@@ -145,7 +170,9 @@ def main() -> None:
     run(
         "1_simple_local_fits",
         make_unit_graph(QWEN_05B, layers_per_block=4),
-        workers, lat, querier_account="acc-alice",
+        workers,
+        lat,
+        querier_account="acc-alice",
         mode="cheap",
     )
 
@@ -153,7 +180,9 @@ def main() -> None:
     run(
         "2_simple_7B_carol",
         make_unit_graph(QWEN_7B, layers_per_block=4),
-        workers, lat, querier_account="acc-carol",
+        workers,
+        lat,
+        querier_account="acc-carol",
         mode="cheap",
     )
 
@@ -162,7 +191,9 @@ def main() -> None:
     run(
         "3_multicluster_7B_arpan_cheap",
         make_unit_graph(QWEN_7B, layers_per_block=4),
-        workers, lat, querier_account="acc-arpan",
+        workers,
+        lat,
+        querier_account="acc-arpan",
         mode="cheap",
     )
 
@@ -170,7 +201,9 @@ def main() -> None:
     run(
         "4_multicluster_7B_arpan_fast",
         make_unit_graph(QWEN_7B, layers_per_block=4),
-        workers, lat, querier_account="acc-arpan",
+        workers,
+        lat,
+        querier_account="acc-arpan",
         mode="fast",
     )
 
@@ -178,7 +211,9 @@ def main() -> None:
     run(
         "5_multicluster_7B_arpan_balanced",
         make_unit_graph(QWEN_7B, layers_per_block=4),
-        workers, lat, querier_account="acc-arpan",
+        workers,
+        lat,
+        querier_account="acc-arpan",
         mode="balanced",
     )
 
@@ -188,7 +223,8 @@ def main() -> None:
         make_unit_graph(LLAMA_70B, layers_per_block=16),  # 5 blocks
         *make_simple_pool(),
         querier_account="acc-carol",
-        mode="balanced", max_segments=3,
+        mode="balanced",
+        max_segments=3,
     )
 
     # ── Scenario 7: random 12-worker pool, 70B model, requires multi-worker placement.
@@ -196,8 +232,11 @@ def main() -> None:
     run(
         "7_random12_70B",
         make_unit_graph(LLAMA_70B, layers_per_block=16),
-        workers, lat, querier_account=workers[0].account_id,
-        mode="balanced", max_segments=5,
+        workers,
+        lat,
+        querier_account=workers[0].account_id,
+        mode="balanced",
+        max_segments=5,
     )
 
     print(f"\n✓ Done. Plots in: {OUT_DIR}")

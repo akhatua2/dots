@@ -4,20 +4,34 @@ By default we run in quiet mode — only the banner, the streaming
 response, the per-turn stats line, and errors hit your terminal.
 Pass `--verbose` (or `-v`) to surface internal logs and progress bars.
 """
+
 from __future__ import annotations
+
+# ruff: noqa: E402
+#
+# CLI startup sets process-wide environment before importing modules that read
+# it during import. Keep those imports in order; this file intentionally opts
+# out of module-import-at-top linting.
 
 # These environment variables must be set before any module that reads
 # them (huggingface_hub, transformers) is imported. We default to quiet
 # and the verbose path below restores progress bars if requested.
 import os
+
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+DEFAULT_HUB_PORT = 5555
+DEFAULT_HTTP_PORT = 8080
+DEFAULT_HUB_HOST = "0.0.0.0"
+DEFAULT_HUB_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
 # Load a project-local .env file BEFORE any module that reads from the
 # environment is imported. This is how users typically configure
 # HF_TOKEN, HF_HUB_ENABLE_HF_TRANSFER, DOTS_TFLOPS, etc.
-from .util import load_dotenv_into_env as _load_dotenv
+from .system.util import load_dotenv_into_env as _load_dotenv
+
 _load_dotenv()
 
 # `hf_xet` is a hard dependency (declared in pyproject.toml). It's the
@@ -37,7 +51,7 @@ import time
 import uuid
 from typing import Optional
 
-from .util import (
+from .system.util import (
     clear_worker_pid,
     derive_account_id,
     dots_home,
@@ -85,8 +99,13 @@ def _configure_logging(verbose: bool) -> None:
         datefmt="%H:%M:%S",
     )
     if not verbose:
-        for noisy in ("httpx", "urllib3", "huggingface_hub",
-                      "transformers", "filelock"):
+        for noisy in (
+            "httpx",
+            "urllib3",
+            "huggingface_hub",
+            "transformers",
+            "filelock",
+        ):
             logging.getLogger(noisy).setLevel(logging.WARNING)
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     else:
@@ -137,9 +156,15 @@ def _spawn_companion_worker(
     """
     if read_live_worker_pid() is not None:
         return None
-    cmd = [sys.executable, "-m", "dots.cli", *_companion_worker_argv(
-        hub_addr, max_ram_gb=max_ram_gb,
-    )]
+    cmd = [
+        sys.executable,
+        "-m",
+        "dots.cli",
+        *_companion_worker_argv(
+            hub_addr,
+            max_ram_gb=max_ram_gb,
+        ),
+    ]
     # Route output to a rolling log file so crashes are diagnosable.
     # `dots chat` previously sent these to /dev/null, which made silent
     # worker exits look like a hung pre-flight in the chat UI.
@@ -234,8 +259,7 @@ def _do_account_create() -> None:
     sys.stdout.write("\nSetting up your dots account.\n\n")
     name = _prompt("Your name", default=load_account_name())
     email = _prompt("Your email", default=load_account_email())
-    alias = _prompt("Short alias for logs (optional)",
-                    default=load_account_alias())
+    alias = _prompt("Short alias for logs (optional)", default=load_account_alias())
 
     sys.stdout.write(
         "\nOptional: set a password to make this account recoverable.\n"
@@ -249,8 +273,7 @@ def _do_account_create() -> None:
     if pw1:
         if not name or not email:
             sys.stdout.write(
-                "Password-derived accounts need name and email "
-                "to be set. Cancelled.\n"
+                "Password-derived accounts need name and email to be set. Cancelled.\n"
             )
             return
         pw2 = getpass.getpass("Confirm password: ")
@@ -317,11 +340,14 @@ def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
         if not accounts:
             sys.stdout.write("(ledger is empty)\n")
             return
-        rows = sorted(accounts.items(),
-                      key=lambda kv: kv[1].get("balance_cu", 0), reverse=True)
-        sys.stdout.write(f"{'account':<40} {'alias':<15} "
-                         f"{'earned (CU)':>12} {'spent (CU)':>12} "
-                         f"{'balance (CU)':>13}\n")
+        rows = sorted(
+            accounts.items(), key=lambda kv: kv[1].get("balance_cu", 0), reverse=True
+        )
+        sys.stdout.write(
+            f"{'account':<40} {'alias':<15} "
+            f"{'earned (CU)':>12} {'spent (CU)':>12} "
+            f"{'balance (CU)':>13}\n"
+        )
         for aid, a in rows:
             marker = " ← you" if aid == my_account else ""
             alias = a.get("alias") or "—"
@@ -349,24 +375,30 @@ def _do_credits(hub_arg: str | None, *, show_all: bool) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="dots")
-    p.add_argument("--verbose", "-v", action="store_true",
-                   help="show internal logs (model loading, HTTP, "
-                        "progress bars, etc.)")
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="show internal logs (model loading, HTTP, progress bars, etc.)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_hub = sub.add_parser("hub", help="run the dots hub (orchestrator + chat pool)")
-    p_hub.add_argument("--port", type=int, default=5555)
-    p_hub.add_argument("--host", default="0.0.0.0")
+    p_hub.add_argument("--port", type=int, default=DEFAULT_HUB_PORT)
+    p_hub.add_argument("--host", default=DEFAULT_HUB_HOST)
     p_hub.add_argument(
         "--model",
-        default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-        help="mlx-lm model id (auto-downloaded on first run)",
+        default=DEFAULT_HUB_MODEL,
+        help="model id (the hub selects a compatible worker backend)",
     )
     p_hub.add_argument(
-        "--http-port", type=int, default=8080, metavar="PORT",
+        "--http-port",
+        type=int,
+        default=DEFAULT_HTTP_PORT,
+        metavar="PORT",
         help="port for the OpenAI-compatible HTTP API "
-             "(POST /v1/chat/completions, GET /v1/models, GET /v1/credits). "
-             "defaults to 8080. pass --http-port 0 to disable.",
+        "(POST /v1/chat/completions, GET /v1/models, GET /v1/credits). "
+        "defaults to 8080. pass --http-port 0 to disable.",
     )
 
     p_chat = sub.add_parser(
@@ -374,27 +406,41 @@ def main() -> None:
         help="open the interactive chat. donates compute as a side effect.",
     )
     p_chat.add_argument(
-        "hub", nargs="?", default=None,
+        "hub",
+        nargs="?",
+        default=None,
         help="hub address as host:port; defaults to ~/.dots/last_hub",
     )
     p_chat.add_argument(
-        "--prompt", default=None,
+        "--prompt",
+        default=None,
         help="non-interactive: send one prompt and exit",
     )
     p_chat.add_argument(
-        "--max-tokens", type=int, default=128,
+        "--max-tokens",
+        type=int,
+        default=128,
         help="max response tokens for --prompt mode",
     )
     p_chat.add_argument(
-        "--no-worker", action="store_true",
-        help="don't auto-spawn a companion `dots worker` subprocess. "
-             "by default, if no worker is running locally, chat starts "
-             "one so you contribute compute while you chat.",
+        "--model",
+        default=None,
+        help="model id to request from the hub; defaults to the hub's default model",
     )
     p_chat.add_argument(
-        "--max-ram", type=float, default=None, metavar="GB",
+        "--no-worker",
+        action="store_true",
+        help="don't auto-spawn a companion `dots worker` subprocess. "
+        "by default, if no worker is running locally, chat starts "
+        "one so you contribute compute while you chat.",
+    )
+    p_chat.add_argument(
+        "--max-ram",
+        type=float,
+        default=None,
+        metavar="GB",
         help="cap the RAM the auto-spawned companion worker pools. "
-             "Mirrors `dots worker --max-ram`. Ignored when --no-worker.",
+        "Mirrors `dots worker --max-ram`. Ignored when --no-worker.",
     )
 
     p_worker = sub.add_parser(
@@ -402,14 +448,34 @@ def main() -> None:
         help="donate compute to a hub. no chat REPL.",
     )
     p_worker.add_argument(
-        "hub", nargs="?", default=None,
+        "hub",
+        nargs="?",
+        default=None,
         help="hub address as host:port; defaults to ~/.dots/last_hub",
     )
     p_worker.add_argument(
-        "--max-ram", type=float, default=None, metavar="GB",
+        "--max-ram",
+        type=float,
+        default=None,
+        metavar="GB",
         help="maximum gigabytes of model weights this worker will hold. "
-             "the hub treats it as a layer-count cap when planning. "
-             "defaults to no cap.",
+        "the hub treats it as a layer-count cap when planning. "
+        "defaults to no cap.",
+    )
+
+    p_serve = sub.add_parser(
+        "serve",
+        help="ask a hub to prepare a model for future requests.",
+    )
+    p_serve.add_argument(
+        "model",
+        help="model id to serve, e.g. mlx-community/Qwen3-9B-4bit",
+    )
+    p_serve.add_argument(
+        "hub",
+        nargs="?",
+        default=None,
+        help="hub address as host:port; defaults to ~/.dots/last_hub",
     )
 
     p_credits = sub.add_parser(
@@ -417,11 +483,14 @@ def main() -> None:
         help="show your CU balance from a hub's /v1/credits endpoint.",
     )
     p_credits.add_argument(
-        "hub", nargs="?", default=None,
+        "hub",
+        nargs="?",
+        default=None,
         help="hub HTTP api as host:port (defaults to last hub on port 8080)",
     )
     p_credits.add_argument(
-        "--all", action="store_true",
+        "--all",
+        action="store_true",
         help="show every account, not just yours",
     )
 
@@ -435,30 +504,38 @@ def main() -> None:
         help="interactive setup: name, email, optional password for recovery",
     )
     p_account_sub.add_parser(
-        "show", help="print this device's account_id, alias, name, email",
+        "show",
+        help="print this device's account_id, alias, name, email",
     )
     p_account_alias = p_account_sub.add_parser(
-        "set-alias", help="cosmetic short handle for log lines",
+        "set-alias",
+        help="cosmetic short handle for log lines",
     )
     p_account_alias.add_argument("alias")
     p_account_name = p_account_sub.add_parser(
-        "set-name", help="full human-readable name (local only, not sent on HELLO)",
+        "set-name",
+        help="full human-readable name (local only, not sent on HELLO)",
     )
     p_account_name.add_argument("name")
     p_account_email = p_account_sub.add_parser(
-        "set-email", help="contact email (local only, not sent on HELLO)",
+        "set-email",
+        help="contact email (local only, not sent on HELLO)",
     )
     p_account_email.add_argument("email")
 
     args = p.parse_args()
     _configure_logging(args.verbose)
     from . import ui
+
     ui.set_verbose(args.verbose)
 
     if args.cmd == "hub":
-        from .hub import Hub
+        from .distributed.hub import Hub
+
         hub = Hub(
-            port=args.port, model_id=args.model, host=args.host,
+            port=args.port,
+            model_id=args.model,
+            host=args.host,
             http_port=args.http_port,
         )
         try:
@@ -492,7 +569,35 @@ def main() -> None:
             return
 
     host, port = _resolve_hub_addr(args.hub)
-    from .worker import Worker
+    from .distributed.worker import Worker
+
+    if args.cmd == "serve":
+        client = Worker(
+            host,
+            port,
+            headless=True,
+            compute=False,
+            identity=str(uuid.uuid4()),
+            requested_model_id=args.model,
+        )
+
+        async def _serve_once() -> None:
+            await client.connect()
+            try:
+                resp = await client.serve_model(args.model)
+                if resp.get("kind") != "serve_model_ack":
+                    raise RuntimeError(resp.get("error", "serve_model failed"))
+                sys.stdout.write(
+                    f"{resp['model_id']}: {resp.get('state', 'unknown')}\n"
+                )
+            finally:
+                await client._disconnect()
+
+        try:
+            asyncio.run(_serve_once())
+        except KeyboardInterrupt:
+            pass
+        return
 
     if args.cmd == "chat":
         # Decide whether to auto-spawn a companion worker subprocess so
@@ -500,7 +605,8 @@ def main() -> None:
         companion: Optional[subprocess.Popen] = None
         if not args.no_worker:
             companion = _spawn_companion_worker(
-                f"{host}:{port}", max_ram_gb=args.max_ram,
+                f"{host}:{port}",
+                max_ram_gb=args.max_ram,
             )
             if companion is not None:
                 # Give the companion a brief head start so the hub has at
@@ -513,10 +619,14 @@ def main() -> None:
         # `dots worker` process; if we reused it here the hub would think
         # they're the same registration and kick the worker out.
         worker = Worker(
-            host, port,
-            one_shot=args.prompt, max_tokens=args.max_tokens,
-            headless=False, compute=False,
+            host,
+            port,
+            one_shot=args.prompt,
+            max_tokens=args.max_tokens,
+            headless=False,
+            compute=False,
             identity=str(uuid.uuid4()),
+            requested_model_id=args.model,
         )
         try:
             asyncio.run(worker.start())
@@ -535,8 +645,9 @@ def main() -> None:
         # terminates us with SIGTERM on exit) would leave the PID file
         # behind. Re-route SIGTERM to a KeyboardInterrupt so the cleanup
         # in the `finally` clause below actually runs.
-        signal.signal(signal.SIGTERM,
-                      lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+        signal.signal(
+            signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
         try:
             asyncio.run(worker.start())
         except KeyboardInterrupt:

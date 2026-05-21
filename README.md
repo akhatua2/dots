@@ -233,6 +233,15 @@ cd ~/Desktop/dots
 .venv/bin/dots chat HUB_ADDRESS:5555
 ```
 
+To request a specific served model for that chat:
+
+```bash
+.venv/bin/dots chat HUB_ADDRESS:5555 --model mlx-community/Qwen3-9B-4bit
+```
+
+If the pool has not loaded that model yet, chat asks the hub to prepare it
+automatically and waits until the placement is ready.
+
 You'll see a Claude-Code-style chat box. Type a prompt, press Enter, and watch
 the answer stream back. Below the message you'll see how fast it ran:
 
@@ -316,6 +325,19 @@ To run a different model, start the hub with `--model`:
 ```bash
 .venv/bin/dots hub --model mlx-community/Qwen2.5-7B-Instruct-4bit
 ```
+
+One hub can also prewarm additional models while it is running:
+
+```bash
+.venv/bin/dots serve mlx-community/Qwen3-9B-4bit HUB_ADDRESS:5555
+```
+
+This is optional; `dots chat --model ...` and OpenAI API requests with
+`model` start the same preparation automatically. If another user asks for a
+model already served by the pool, the hub reuses that deployment. A new worker
+may load an extra full copy only when it fits without moving existing
+assignments; sharded placements are not reshuffled on join unless the current
+placement is broken.
 
 Any [mlx-community model](https://huggingface.co/mlx-community) works. The
 hub downloads it on first run (large models take a while the first time).

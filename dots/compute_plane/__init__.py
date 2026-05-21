@@ -7,17 +7,18 @@ Public API:
   ComputePlane          abstract base
   LocalComputePlane     single machine, no network (self-utilization)
   DistributedComputePlane  multi-worker via scheduler + sharding strategy
-  create_plane()        factory; falls back to local when distributed
-                        isn't feasible
+  create_plane()        factory; fails clearly when requested placement
+                        cannot be built
   VirtualResources      composed totals the plane offers
   GenerationStats       per-turn telemetry
 
 Architectural position:
-  application  →  compute_plane  →  sharding  →  scheduler  →  workers
+  application -> compute_plane -> placement -> distributed/backend
 
-The plane is the seam: application code never touches workers or
-strategies directly.
+The plane is routing policy. It must not load models, convert checkpoints,
+or know backend-specific tensor formats.
 """
+
 from __future__ import annotations
 
 from .base import ComputePlane, GenerationStats, VirtualResources

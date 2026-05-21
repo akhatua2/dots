@@ -8,6 +8,7 @@ Status: placement planning is functional. Per-unit remote dispatch
 (`generate`) is scaffolded — the worker-side `compute_unit` handler
 ships in the hybrid-pipeline PR.
 """
+
 from __future__ import annotations
 
 import logging
@@ -15,22 +16,26 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from .base import ComputePlane, GenerationStats, VirtualResources
-from ..scheduler import LatencyMatrix, Placement, ResourceDecl
-from ..sharding import pick_strategy
-from ..work_units import ModelGeometry
+from ..placement.scheduler import LatencyMatrix, Placement, ResourceDecl
+from ..placement.sharding import pick_strategy
+from ..placement.work_units import ModelGeometry
 
 log = logging.getLogger("dots.compute_plane.distributed")
+HIGH_BANDWIDTH_RTT_MS = 1.0
 
 
 @dataclass
 class _RoutingTable:
     """unit_id → worker_id for the lifetime of one placement."""
+
     unit_to_worker: dict[str, str] = field(default_factory=dict)
     workers_by_id: dict[str, ResourceDecl] = field(default_factory=dict)
 
     @classmethod
     def from_placement(
-        cls, placement: Placement, workers: Sequence[ResourceDecl],
+        cls,
+        placement: Placement,
+        workers: Sequence[ResourceDecl],
     ) -> "_RoutingTable":
         wbid = {w.worker_id: w for w in workers}
         u2w: dict[str, str] = {}
@@ -70,8 +75,10 @@ class DistributedComputePlane(ComputePlane):
             raise ValueError("DistributedComputePlane needs at least one worker")
 
         has_high_bw = any(
-            latency.get(a.worker_id, b.worker_id) < 1.0
-            for a in workers for b in workers if a is not b
+            latency.get(a.worker_id, b.worker_id) < HIGH_BANDWIDTH_RTT_MS
+            for a in workers
+            for b in workers
+            if a is not b
         )
         self.strategy = pick_strategy(
             is_moe=is_moe,
@@ -84,24 +91,28 @@ class DistributedComputePlane(ComputePlane):
         self.workers = list(workers)
         self.latency = latency
         self._units = self.strategy.build_unit_graph(
-            geometry, layers_per_block=layers_per_block,
+            geometry,
+            layers_per_block=layers_per_block,
         )
         placement = self.strategy.plan(
-            self._units, self.workers, self.latency,
-            querier_account=querier_account, mode=mode,
+            self._units,
+            self.workers,
+            self.latency,
+            querier_account=querier_account,
+            mode=mode,
         )
         if placement is None:
-            raise RuntimeError(
-                "no feasible placement: pool too small for this model"
-            )
+            raise RuntimeError("no feasible placement: pool too small for this model")
         self.placement: Placement = placement
         self._routing = _RoutingTable.from_placement(self.placement, self.workers)
 
     @property
     def virtual_resources(self) -> VirtualResources:
-        backends_intersection: frozenset[str] = frozenset.intersection(
-            *(w.backends for w in self.workers)
-        ) if self.workers else frozenset()
+        backends_intersection: frozenset[str] = (
+            frozenset.intersection(*(w.backends for w in self.workers))
+            if self.workers
+            else frozenset()
+        )
         return VirtualResources(
             ram_gb_available=sum(w.ram_gb_free for w in self.workers),
             compute_tflops_per_sec=sum(w.compute_tflops_per_sec for w in self.workers),
@@ -130,9 +141,7 @@ class DistributedComputePlane(ComputePlane):
         )
 
     def placement_summary(self) -> str:
-        return " → ".join(
-            f"{w}[{len(u)}u]" for w, u in self.placement.segments
-        )
+        return " → ".join(f"{w}[{len(u)}u]" for w, u in self.placement.segments)
 
     def owner_of_unit(self, unit_id: str) -> ResourceDecl | None:
         return self._routing.owner_of(unit_id)

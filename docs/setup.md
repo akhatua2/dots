@@ -233,6 +233,12 @@ cd ~/Desktop/dots
 .venv/bin/dots chat HUB_ADDRESS:5555
 ```
 
+To chat with a non-default model that the pool can serve:
+
+```bash
+.venv/bin/dots chat HUB_ADDRESS:5555 --model mlx-community/Qwen3-9B-4bit
+```
+
 Type a prompt, press `Enter`, watch the answer stream back. Each turn
 shows speed in tokens/second.
 
@@ -257,6 +263,12 @@ To summarize what's running:
 | Hub | `.venv/bin/dots hub` | `Ctrl + C` |
 | Friend Mac(s) | `.venv/bin/dots worker HUB:5555` | `Ctrl + C` |
 | Anyone chatting | `.venv/bin/dots chat HUB:5555` | `Ctrl + C` |
+
+To prepare another model before anyone chats with it:
+
+```bash
+.venv/bin/dots serve mlx-community/Qwen3-9B-4bit HUB:5555
+```
 
 To restart everything tomorrow: open Terminal on each Mac and re-run
 the same commands. Nothing needs to be reinstalled.
