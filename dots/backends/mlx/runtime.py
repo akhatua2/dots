@@ -25,6 +25,7 @@ from ..base import (
     PreparationRequirement,
     PreparedModel,
     ProgressCallback,
+    StreamDetokenizer,
 )
 from ...placement.model_metadata import (
     assignment_ram_gb,
@@ -491,6 +492,12 @@ class MlxBackendRuntime(BackendRuntime):
     def geometry(self) -> ModelGeometry | None:
         return self._geometry
 
+    def new_detokenizer(self) -> StreamDetokenizer:
+        # `tokenizer.detokenizer` is a property that returns a *fresh*
+        # StreamingDetokenizer each access, so this is concurrency-safe:
+        # one independent detokenizer per generation stream.
+        return _MlxStreamDetokenizer(self._require_host().tokenizer.detokenizer)
+
     async def unload(self) -> None:
         """Drop the loaded model + all KV caches and return the Metal
         buffer pool to the OS so the worker's RAM frees up."""
@@ -511,6 +518,24 @@ class MlxBackendRuntime(BackendRuntime):
         # this the freed weights stay in the buffer pool and the OS never
         # sees the RAM come back.
         mx.clear_cache()
+
+
+class _MlxStreamDetokenizer(StreamDetokenizer):
+    """Wraps mlx_lm's StreamingDetokenizer. It buffers incomplete
+    multi-byte UTF-8 sequences and only surfaces complete characters via
+    `last_segment`, so emoji/CJK that span token boundaries no longer
+    decode to replacement characters (``�``)."""
+
+    def __init__(self, detok):
+        self._d = detok
+
+    def add_token(self, token: int) -> str:
+        self._d.add_token(token)
+        return self._d.last_segment
+
+    def finalize(self) -> str:
+        self._d.finalize()
+        return self._d.last_segment
 
 
 __all__ = [

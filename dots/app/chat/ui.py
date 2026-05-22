@@ -59,6 +59,43 @@ _PROMPT_STYLE = Style.from_dict(
 )
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _split_think(text: str) -> tuple[str, str]:
+    """Split a response into (thinking, answer).
+
+    Reasoning models (e.g. Qwen3) emit a chain-of-thought terminated by
+    `</think>`; the opening `<think>` is usually injected by the chat
+    template into the prompt, so it's often absent from the output. We
+    only treat text as thinking once we've seen a close tag (or an
+    explicit open tag) — otherwise it's the answer, so non-thinking
+    models render normally."""
+    close = text.find(_THINK_CLOSE)
+    if close != -1:
+        think, answer = text[:close], text[close + len(_THINK_CLOSE) :]
+    elif _THINK_OPEN in text:
+        think, answer = text, ""
+    else:
+        return "", text
+    return think.replace(_THINK_OPEN, "").strip(), answer.strip()
+
+
+def _as_markdown(text: str) -> str:
+    """Markdown source for one response: the thinking trace as a
+    blockquote (`>` notes) above the answer."""
+    think, answer = _split_think(text)
+    blocks: list[str] = []
+    if think:
+        blocks.append(
+            "\n".join(f"> {ln}" if ln else ">" for ln in think.splitlines())
+        )
+    if answer:
+        blocks.append(answer)
+    return "\n\n".join(blocks) if blocks else "…"
+
+
 class ChatUI:
     """Interactive chat surface for a Worker that's already connected
     to a hub. Output is stdout-native; only the prompt bar is live."""
@@ -221,8 +258,9 @@ class ChatUI:
         def render(text: str):
             """Per-frame renderable. Table.grid puts a dim `⎿ ` marker
             in a narrow left column, then markdown in the wide right
-            column — matches Claude Code's response gutter."""
-            md = Markdown(text or "…", code_theme="monokai")
+            column — matches Claude Code's response gutter. A model's
+            reasoning trace renders as a blockquote above the answer."""
+            md = Markdown(_as_markdown(text), code_theme="monokai")
             t = Table.grid(padding=(0, 0), pad_edge=False)
             t.add_column(no_wrap=True, width=5)
             t.add_column(overflow="fold")

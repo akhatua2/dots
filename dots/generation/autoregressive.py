@@ -43,11 +43,15 @@ class AutoregressiveGeneration(GenerationStrategy):
             repetition_penalty=request.repetition_penalty,
         )
         stop_ids = runtime.stop_ids()
+        # Streaming detokenizer: emits only complete UTF-8 segments, so a
+        # multi-byte char (emoji/CJK) split across tokens isn't streamed
+        # as broken bytes (``�``).
+        detok = runtime.new_detokenizer()
         decode_start = time.perf_counter()
 
         while len(response_tokens) < request.max_tokens and token not in stop_ids:
-            text = runtime.decode_token(token)
-            if request.on_token is not None:
+            text = detok.add_token(token)
+            if request.on_token is not None and text:
                 await request.on_token(text)
             response_tokens.append(token)
             logits_row = await runtime.decode_one(
@@ -62,6 +66,9 @@ class AutoregressiveGeneration(GenerationStrategy):
                 repetition_penalty=request.repetition_penalty,
             )
 
+        tail = detok.finalize()
+        if request.on_token is not None and tail:
+            await request.on_token(tail)
         elapsed_ms = (time.perf_counter() - decode_start) * 1000
         return GenerationResult(
             text=runtime.decode_tokens(response_tokens),

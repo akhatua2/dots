@@ -176,3 +176,34 @@ class BackendRuntime(ABC):
         allocate device/host memory override it (the hub calls this when
         it evicts an idle model deployment to make room for another)."""
         return None
+
+    def new_detokenizer(self) -> "StreamDetokenizer":
+        """A fresh streaming detokenizer for one generation. Default
+        decodes each token alone (correct for single-byte text but
+        splits multi-byte UTF-8 across token boundaries); backends with a
+        real streaming detokenizer override this."""
+        return _PerTokenDetokenizer(self)
+
+
+class StreamDetokenizer:
+    """Turns a token stream into text incrementally, emitting only
+    complete UTF-8 segments. One instance per generation."""
+
+    def add_token(self, token: int) -> str:
+        """Feed one token; return any newly *completed* text (may be
+        empty while a multi-byte character is still being assembled)."""
+        raise NotImplementedError
+
+    def finalize(self) -> str:
+        """Flush any buffered tail once generation ends."""
+        return ""
+
+
+class _PerTokenDetokenizer(StreamDetokenizer):
+    """Fallback that decodes each token in isolation via the runtime."""
+
+    def __init__(self, runtime: "BackendRuntime"):
+        self._runtime = runtime
+
+    def add_token(self, token: int) -> str:
+        return self._runtime.decode_token(token)

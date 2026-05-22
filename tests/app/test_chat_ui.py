@@ -29,6 +29,7 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
+from dots.app.chat.ui import _as_markdown, _split_think
 from dots.chat import ChatUI
 from dots.worker import PoolNotReadyError
 
@@ -119,6 +120,30 @@ def _ui_with_capturing_console(worker) -> tuple[ChatUI, io.StringIO]:
 
 
 # ─────────────────────── echo + slash commands ────────────────────────
+
+
+async def test_split_think_separates_reasoning_from_answer():
+    think, answer = _split_think("weighing the options</think>The answer is 42.")
+    assert think == "weighing the options"
+    assert answer == "The answer is 42."
+
+
+async def test_split_think_no_markers_is_all_answer():
+    assert _split_think("just a normal reply") == ("", "just a normal reply")
+
+
+async def test_split_think_open_without_close_is_all_thinking():
+    # Mid-stream, before the closing tag arrives.
+    think, answer = _split_think("<think>still reasoning")
+    assert think == "still reasoning"
+    assert answer == ""
+
+
+async def test_as_markdown_renders_thinking_as_blockquote():
+    md = _as_markdown("reasoning here</think>The visible answer")
+    assert "> reasoning here" in md, f"thinking should be quoted:\n{md}"
+    assert "The visible answer" in md
+    assert "> The visible answer" not in md, "answer must not be quoted"
 
 
 async def test_echo_user_prompt_emits_a_single_line_with_marker():

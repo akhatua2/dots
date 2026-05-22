@@ -161,6 +161,34 @@ class FakeModel:
         self.args = FakeArgs()
 
 
+class _FakeStreamingDetokenizer:
+    """Mimics mlx_lm's StreamingDetokenizer interface (text/offset/
+    add_token/finalize/reset + the `last_segment` property) so the real
+    `_MlxStreamDetokenizer` wrapper exercises its actual code path in
+    tests. Each token decodes to one char, so there's no multi-byte
+    buffering to model here."""
+
+    def __init__(self, tokenizer: "FakeTokenizer"):
+        self._tok = tokenizer
+        self.reset()
+
+    def reset(self) -> None:
+        self.text = ""
+        self.offset = 0
+
+    def add_token(self, token: int) -> None:
+        self.text += self._tok.decode([token])
+
+    def finalize(self) -> None:
+        return None
+
+    @property
+    def last_segment(self) -> str:
+        seg = self.text[self.offset :]
+        self.offset = len(self.text)
+        return seg
+
+
 class FakeTokenizer:
     """Toy tokenizer: each character becomes one token, with role-marker
     sentinel tokens between turns. Enough to make `apply_chat_template`
@@ -173,6 +201,11 @@ class FakeTokenizer:
 
     def __init__(self):
         self.eos_token_id = EOS_TOKEN
+
+    @property
+    def detokenizer(self) -> "_FakeStreamingDetokenizer":
+        # Fresh instance per access, matching mlx_lm's TokenizerWrapper.
+        return _FakeStreamingDetokenizer(self)
 
     def apply_chat_template(self, history, add_generation_prompt: bool = True):
         ids: list[int] = []
