@@ -491,6 +491,27 @@ class MlxBackendRuntime(BackendRuntime):
     def geometry(self) -> ModelGeometry | None:
         return self._geometry
 
+    async def unload(self) -> None:
+        """Drop the loaded model + all KV caches and return the Metal
+        buffer pool to the OS so the worker's RAM frees up."""
+        import gc
+
+        import mlx.core as mx
+
+        host = self.host
+        self.host = None
+        self._geometry = None
+        if host is not None:
+            host._caches.clear()
+            host._token_counts.clear()
+            host.model = None
+            host.tokenizer = None
+        gc.collect()
+        # Release cached Metal buffers held by MLX's allocator; without
+        # this the freed weights stay in the buffer pool and the OS never
+        # sees the RAM come back.
+        mx.clear_cache()
+
 
 __all__ = [
     "FullModelHost",

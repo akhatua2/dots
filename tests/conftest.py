@@ -215,8 +215,13 @@ async def connect_worker(hub: Hub) -> Worker:
         peer_listen_host="127.0.0.1",
     )
     assert ack.get("kind") == "hello_ack"
-    w.model_id = ack["model_id"]
-    w.n_layers = ack["n_layers"]
+    # The hub is model-agnostic and no longer advertises a model in the
+    # ack — the querier names it on each request. Tests drive a single
+    # model, so pin this worker to TEST_MODEL (and set requested_model_id
+    # so send_prompt includes the now-required model_id).
+    w.model_id = TEST_MODEL
+    w.requested_model_id = TEST_MODEL
+    w.n_layers = hub._deployment_for(TEST_MODEL).n_layers
     # In the new lifecycle the hub broadcasts `load_units` after the
     # worker joins; the worker handler kicks off load_partial. So we
     # just wait for both WELCOME and the resulting _host_ready.

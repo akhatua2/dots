@@ -87,6 +87,9 @@ class ModelDeployment:
     load_progress: dict[str, tuple[int, int]] = field(default_factory=dict)
     worker_states: dict[str, ModelWorkerState] = field(default_factory=dict)
     pool_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    # Wall-clock of the last turn served for this model; drives LRU order
+    # when the hub evicts idle deployments to reclaim RAM.
+    last_used_at: float = 0.0
 
 
 @dataclass
@@ -105,6 +108,10 @@ class Participant:
     # `id` above. Multiple Participants can share an account.
     account_id: str | None = None
     account_alias: str | None = None
+    # For chat clients: the model this client intends to query. Marks
+    # that model as "in use" so the hub won't evict it to free RAM for
+    # another. None for compute-only workers (they don't query).
+    requested_model_id: str | None = None
     # Where this worker accepts incoming peer connections (other workers
     # talk to it on this port for probes + the multi-worker chain).
     # `peer_listen_port` comes from HELLO; None means chat-only.
@@ -152,7 +159,7 @@ class Hub:
     def __init__(
         self,
         port: int,
-        model_id: str,
+        model_id: str | None = None,
         host: str = "0.0.0.0",
         http_port: int | None = None,
         ledger_path=None,
@@ -161,9 +168,16 @@ class Hub:
         self.port = port
         self.http_port = http_port
         self.deployments: dict[str, ModelDeployment] = {}
-        self.default_model_id = model_id
+        # The hub is model-agnostic: it serves no model of its own and
+        # never picks one for a client. The querier (chat) names the
+        # model on every request; the hub spins up a deployment per id on
+        # demand. `model_id` here is an optional seed used only by tests
+        # that want a pre-existing deployment. `self.model_id` is the
+        # transient "active deployment" pointer the scheduler switches per
+        # turn via `_activate_model` — not a served-model setting.
         self.model_id = model_id
-        self._deployment_for(model_id)
+        if model_id is not None:
+            self._deployment_for(model_id)
 
         # The hub does not load a model in the delegation architecture.
         # `n_layers` and `active_params` come in from workers via the
@@ -296,13 +310,10 @@ class Hub:
     # ───────────────────────────── lifecycle ─────────────────────────────
 
     async def start(self) -> None:
-        # The hub serves any number of models (one deployment per id);
-        # this is just the fallback used when a client/worker connects
-        # without naming one. The hub itself loads nothing.
-        ui.notice(
-            f"hub starting · default model = {self.default_model_id} "
-            f"(clients may request others)"
-        )
+        # The hub is model-agnostic: it loads nothing and serves no model
+        # of its own. Queriers name the model on each request and the hub
+        # spins up a deployment per id across the pool on demand.
+        ui.notice("hub starting · model-agnostic (queriers choose the model)")
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         ui.notice(f"hub listening on {addrs} — waiting for workers to join")
@@ -689,11 +700,10 @@ class Hub:
             if kind == "hello":
                 if not hello_fut.done():
                     hello_fut.set_result(msg)
-                return {
-                    "kind": "hello_ack",
-                    "n_layers": self.n_layers,
-                    "model_id": self.model_id,
-                }
+                # The hub advertises no model: the querier names it on
+                # each request. (Older clients read these back to default
+                # their model — that inheritance is intentionally gone.)
+                return {"kind": "hello_ack"}
             wid = wid_holder["id"]
             if kind == "prompt" and wid is not None:
                 return await self._on_prompt(wid, msg)
@@ -706,7 +716,7 @@ class Hub:
             if kind == "delegate_token" and wid is not None:
                 return await self._on_delegate_token(wid, msg)
             if kind == "load_progress" and wid is not None:
-                model_id = msg.get("model_id") or self.model_id
+                model_id = msg.get("model_id")
                 if not isinstance(model_id, str) or not model_id:
                     return None
                 deployment = self._deployment_for(model_id)
@@ -724,7 +734,7 @@ class Hub:
             if kind == "status":
                 model_id = msg.get("model_id")
                 if not isinstance(model_id, str) or not model_id:
-                    model_id = self.default_model_id
+                    return {"kind": "error", "error": "model_id is required"}
                 await self.ensure_model_started(model_id)
                 return self._status_response_for(wid, model_id=model_id)
             return {
@@ -789,6 +799,8 @@ class Hub:
                 )
                 await conn.close()
                 return
+            req_model = hello_msg.get("requested_model_id")
+            req_model = req_model if isinstance(req_model, str) and req_model else None
             participant = Participant(
                 id=worker_id,
                 addr=addr_str,
@@ -796,6 +808,7 @@ class Hub:
                 conn=conn,
                 account_id=account_id,
                 account_alias=account_alias,
+                requested_model_id=req_model,
                 peer_listen_port=peer_port,
                 peer_listen_host=peer_host,
             )
@@ -888,12 +901,69 @@ class Hub:
                 return deployment
             assignments = self._assign_units_to_workers()
 
+        # Couldn't place — likely idle deployments are pinning RAM. Unload
+        # the ones no client is querying and try once more before giving
+        # up (this is what lets you switch models and reclaim the old
+        # one's RAM without killing the worker).
+        if not assignments and await self._evict_idle_deployments(keep=model_id):
+            async with self._pool_lock:
+                self._activate_model(model_id)
+                assignments = self._assign_units_to_workers()
+
         if assignments:
             await self._broadcast_load_units(assignments)
 
         async with self._pool_lock:
             self._refresh_pool_ready(model_id=model_id)
         return deployment
+
+    def _protected_model_ids(self) -> set[str]:
+        """Models a connected chat client is currently interested in.
+        These are never evicted to free RAM for another model."""
+        return {
+            p.requested_model_id
+            for p in self.participants.values()
+            if not p.compute and isinstance(p.requested_model_id, str)
+        }
+
+    async def _evict_idle_deployments(self, keep: str) -> bool:
+        """Unload every deployment that no connected client is querying,
+        to reclaim its RAM for `keep`. LRU order (least-recently-used
+        first). Returns True if anything was evicted."""
+        protected = self._protected_model_ids()
+        protected.add(keep)
+        candidates = [
+            d
+            for d in self.deployments.values()
+            if d.model_id not in protected and d.current_placement
+        ]
+        candidates.sort(key=lambda d: d.last_used_at)
+        for deployment in candidates:
+            await self._evict_deployment(deployment)
+        return bool(candidates)
+
+    async def _evict_deployment(self, deployment: ModelDeployment) -> None:
+        """Tell every worker holding this model to unload it, then drop
+        the deployment so its RAM stops counting against placement."""
+        model_id = deployment.model_id
+        worker_ids = {seg[0] for seg in deployment.current_placement}
+        ui.notice(
+            f"evicting idle model {model_id} to reclaim RAM "
+            f"({len(worker_ids)} worker(s))"
+        )
+        for wid in worker_ids:
+            p = self.participants.get(wid)
+            if p is None:
+                continue
+            try:
+                await p.conn.call("unload_model", model_id=model_id)
+            except Exception:
+                log.debug("unload_model failed for %s", wid, exc_info=True)
+        deployment.current_placement = []
+        deployment.worker_states.clear()
+        deployment.load_progress.clear()
+        deployment.pool_ready.clear()
+        self.deployments.pop(model_id, None)
 
     def _deployment_placement_intact(self, deployment: ModelDeployment) -> bool:
         if not deployment.current_placement:
@@ -1022,11 +1092,15 @@ class Hub:
             participant = self.participants.get(worker_id)
         if participant is None:
             return {"kind": "error", "error": "worker no longer in pool"}
-        model_id = msg.get("model_id") or self.default_model_id
+        model_id = msg.get("model_id")
         if not isinstance(model_id, str) or not model_id:
             return {"kind": "error", "error": "model_id is required"}
+        # Record this client's active interest + mark the model used, so
+        # eviction protects it and treats it as most-recently-used.
+        participant.requested_model_id = model_id
         await self.ensure_model_started(model_id)
         deployment = self._deployment_for(model_id)
+        deployment.last_used_at = time.time()
         if not deployment.pool_ready.is_set():
             return self._not_ready_status_response(model_id=model_id)
 
@@ -1282,7 +1356,9 @@ class Hub:
         forwards the worker's `delegate_token` notifications to the chat
         client (via the `on_token` callback registered for this conv).
         """
-        selected_model = model_id or self.default_model_id
+        if not isinstance(model_id, str) or not model_id:
+            raise RuntimeError("model_id is required")
+        selected_model = model_id
         await self.ensure_model_started(selected_model)
         if is_alive is not None and not is_alive():
             raise RuntimeError("requester disconnected")
@@ -1643,7 +1719,7 @@ class Hub:
         p = self.participants.get(worker_id)
         if p is None:
             return None
-        model_id = msg.get("model_id") or self.default_model_id
+        model_id = msg.get("model_id")
         if not isinstance(model_id, str) or not model_id:
             return None
         deployment = self._deployment_for(model_id)

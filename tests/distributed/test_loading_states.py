@@ -25,6 +25,7 @@ from dots.peer import PeerConnection
 from dots.pool import resource_decl_to_hello_field
 from dots.work_units import ModelGeometry
 from dots.worker import PoolNotReadyError, Worker
+from tests.conftest import TEST_MODEL
 from tests.helpers.resources import resource_decl
 
 
@@ -304,6 +305,9 @@ async def test_chat_client_gets_waiting_when_no_compute_workers(hub: Hub):
         account_id="acc-" + cid[:8],
         account_alias="",
         compute=False,
+        # The hub now requires the querier to name a model on each
+        # request (it advertises none of its own).
+        requested_model_id=TEST_MODEL,
     )
     chat.conn = PeerConnection(
         reader,

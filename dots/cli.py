@@ -25,7 +25,10 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 DEFAULT_HUB_PORT = 5555
 DEFAULT_HTTP_PORT = 8080
 DEFAULT_HUB_HOST = "0.0.0.0"
-DEFAULT_HUB_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+# Default model the chat (the querier) requests when the user doesn't
+# pass --model. The hub is model-agnostic — it never picks a model — so
+# this default lives on the client side.
+DEFAULT_CHAT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 # Load a project-local .env file BEFORE any module that reads from the
 # environment is imported. This is how users typically configure
@@ -387,11 +390,6 @@ def main() -> None:
     p_hub.add_argument("--port", type=int, default=DEFAULT_HUB_PORT)
     p_hub.add_argument("--host", default=DEFAULT_HUB_HOST)
     p_hub.add_argument(
-        "--model",
-        default=DEFAULT_HUB_MODEL,
-        help="model id (the hub selects a compatible worker backend)",
-    )
-    p_hub.add_argument(
         "--http-port",
         type=int,
         default=DEFAULT_HTTP_PORT,
@@ -424,8 +422,9 @@ def main() -> None:
     )
     p_chat.add_argument(
         "--model",
-        default=None,
-        help="model id to request from the hub; defaults to the hub's default model",
+        default=DEFAULT_CHAT_MODEL,
+        help="model id to query; the hub spins up (or reuses) a deployment "
+        f"for it across the pool. defaults to {DEFAULT_CHAT_MODEL}.",
     )
     p_chat.add_argument(
         "--no-worker",
@@ -534,7 +533,6 @@ def main() -> None:
 
         hub = Hub(
             port=args.port,
-            model_id=args.model,
             host=args.host,
             http_port=args.http_port,
         )

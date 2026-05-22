@@ -126,7 +126,10 @@ class HttpApi:
         max_tokens = int(body.get("max_tokens", 256))
         temperature = float(body.get("temperature", 0.7))
         stream = bool(body.get("stream", False))
-        model_id = body.get("model") or self.hub.default_model_id
+        # The hub is model-agnostic — the request must name the model
+        # (standard OpenAI `model` field); the hub serves a deployment
+        # for it on demand.
+        model_id = body.get("model")
         if not isinstance(model_id, str) or not model_id:
             return _error(400, "model must be a non-empty string")
 

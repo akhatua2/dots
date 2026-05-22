@@ -169,3 +169,10 @@ class BackendRuntime(ABC):
     @property
     @abstractmethod
     def geometry(self) -> ModelGeometry | None: ...
+
+    async def unload(self) -> None:
+        """Release all model weights and caches this runtime holds so the
+        host can reclaim the RAM. Default is a no-op; backends that
+        allocate device/host memory override it (the hub calls this when
+        it evicts an idle model deployment to make room for another)."""
+        return None

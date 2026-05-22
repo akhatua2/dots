@@ -269,14 +269,18 @@ class Worker:
             hello_payload["peer_listen_host"] = best_peer_listen_host()
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
+        # A chat client tells the hub which model it intends to query so
+        # the hub knows that model is "in use" and won't evict it to make
+        # room for another. Compute-only workers leave this unset.
+        if self.requested_model_id:
+            hello_payload["requested_model_id"] = self.requested_model_id
         ack = await self.conn.call("hello", **hello_payload)
         if ack.get("kind") != "hello_ack":
             raise RuntimeError(f"unexpected HELLO response: {ack}")
-        self.model_id = ack.get("model_id")
-        if self.requested_model_id is None:
-            self.requested_model_id = self.model_id
-        self.n_layers = ack.get("n_layers")
-        ui.info(f"hub accepted; model={self.model_id} ({self.n_layers} layers)")
+        # The hub is model-agnostic — the ack carries no model. A chat
+        # client supplies its own `requested_model_id`; a compute worker
+        # leaves it unset and loads whatever the hub later assigns.
+        ui.info(f"hub accepted (model: {self.requested_model_id or 'assigned by hub'})")
         # Persist this hub address so the next `dots chat` / `dots worker`
         # invocation can default to it when the user omits the argument.
         try:
@@ -634,6 +638,8 @@ class Worker:
         kind = msg.get("kind")
         if kind == "load_units":
             return await self._handle_load_units(msg)
+        if kind == "unload_model":
+            return await self._handle_unload_model(msg)
         if kind == "delegate_turn":
             return await self._handle_delegate_turn(msg)
         if kind == "probe_peer":
@@ -758,6 +764,35 @@ class Worker:
         self._host_load_tasks[model_id] = task
         self._host_load_task = task
         return None
+
+    async def _handle_unload_model(self, msg: dict) -> dict | None:
+        """Hub asked us to drop a model we're holding so its RAM frees up
+        (it's evicting an idle deployment to make room for another).
+        Cancels any in-flight load, releases the runtime, and forgets all
+        bookkeeping for the model. Idempotent."""
+        model_id = msg.get("model_id")
+        if not isinstance(model_id, str) or not model_id:
+            return {"kind": "error", "error": "model_id is required"}
+        # Cancel a load still in flight so it can't resurrect the runtime.
+        task = self._host_load_tasks.pop(model_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        runtime = self.backends.pop(model_id, None)
+        if runtime is not None:
+            try:
+                await runtime.unload()
+            except Exception:
+                log.exception("unload failed for %s", model_id)
+        self._host_ready_by_model.pop(model_id, None)
+        self._loaded_assignments.pop(model_id, None)
+        if self.model_id == model_id:
+            self.model_id = None
+        ui.info(f"unloaded {model_id} (hub reclaimed RAM)")
+        return {"kind": "unload_ack", "model_id": model_id}
 
     async def _handle_delegate_turn(self, msg: dict) -> dict:
         """The hub delegates an entire chat turn to us.
