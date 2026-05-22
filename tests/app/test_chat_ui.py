@@ -287,14 +287,15 @@ async def test_stream_turn_session_stats_are_cumulative_across_turns():
     assert avg == pytest.approx(20.0)
 
 
-async def test_stream_turn_passes_max_tokens_2048():
-    """The interactive chat caps at 2048 — make sure the value lands
-    in worker.send_prompt, not the previous 256 default."""
+async def test_stream_turn_caps_max_tokens():
+    """The interactive chat caps a single response as a guardrail against
+    runaway/looping generation — make sure that cap lands in
+    worker.send_prompt rather than an unbounded request."""
     worker = _FakeWorker(stream_chunks=["x"], decode_tokens=1, decode_ms=10)
     ui, _ = _ui_with_capturing_console(worker)
     await ui._stream_turn("anything")
-    assert worker.last_max_tokens == 2048, (
-        f"expected max_tokens=2048; got {worker.last_max_tokens}"
+    assert worker.last_max_tokens == 512, (
+        f"expected max_tokens=512; got {worker.last_max_tokens}"
     )
 
 

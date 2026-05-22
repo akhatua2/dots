@@ -22,6 +22,12 @@ class GenerationRequest:
     temperature: float = 0.7
     on_token: TokenCallback | None = None
     forward_hidden: "ForwardHidden | None" = None
+    # Penalize tokens seen in the last `repetition_context` generated
+    # tokens by dividing their logit (HF-style). 1.0 disables it. Small
+    # quantized models loop hard without this; ~1.3 breaks the loops
+    # without noticeably hurting coherence.
+    repetition_penalty: float = 1.3
+    repetition_context: int = 64
 
 
 @dataclass

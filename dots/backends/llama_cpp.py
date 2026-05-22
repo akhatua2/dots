@@ -100,7 +100,13 @@ class LlamaCppBackendRuntime(BackendRuntime):
     def decode_tokens(self, tokens: list[int]) -> str:
         raise RuntimeError("llama.cpp backend execution is not implemented yet")
 
-    def sample_token(self, logits_row: Any, temperature: float) -> int:
+    def sample_token(
+        self,
+        logits_row: Any,
+        temperature: float,
+        recent_tokens: list[int] | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> int:
         raise RuntimeError("llama.cpp backend execution is not implemented yet")
 
     def encode_hidden(self, hidden: Any) -> dict[str, Any]:

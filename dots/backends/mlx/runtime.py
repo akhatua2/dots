@@ -74,7 +74,32 @@ def categorical_token(logits_row, temperature: float) -> int:
     return int(mx.random.categorical(logits_row / temperature).item())
 
 
-def _sample(logits_row, temperature: float) -> int:
+def _apply_repetition_penalty(logits_row, recent_tokens, penalty: float):
+    """HF-style repetition penalty: shrink the logit of any recently
+    generated token toward zero (divide if positive, multiply if
+    negative), lowering its probability of being picked again. No-op
+    when disabled or there's no history yet."""
+    if penalty == 1.0 or not recent_tokens:
+        return logits_row
+    import mlx.core as mx
+
+    idx = mx.array(list({int(t) for t in recent_tokens}))
+    selected = logits_row[idx]
+    logits_row[idx] = mx.where(
+        selected > 0, selected / penalty, selected * penalty
+    )
+    return logits_row
+
+
+def _sample(
+    logits_row,
+    temperature: float,
+    recent_tokens: list[int] | None = None,
+    repetition_penalty: float = 1.0,
+) -> int:
+    logits_row = _apply_repetition_penalty(
+        logits_row, recent_tokens, repetition_penalty
+    )
     if temperature <= 0:
         return argmax_token(logits_row)
     return categorical_token(logits_row, temperature)
@@ -432,8 +457,14 @@ class MlxBackendRuntime(BackendRuntime):
     def decode_tokens(self, tokens: list[int]) -> str:
         return self._require_host().tokenizer.decode(tokens)
 
-    def sample_token(self, logits_row, temperature: float) -> int:
-        return _sample(logits_row, temperature)
+    def sample_token(
+        self,
+        logits_row,
+        temperature: float,
+        recent_tokens: list[int] | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> int:
+        return _sample(logits_row, temperature, recent_tokens, repetition_penalty)
 
     def encode_hidden(self, hidden) -> dict:
         from .wire import encode_mlx_array

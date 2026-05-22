@@ -83,6 +83,14 @@ def mock_model(monkeypatch):
     )
     monkeypatch.setattr("dots.backends.mlx.runtime.array", fake_array)
     monkeypatch.setattr("dots.backends.mlx.runtime.argmax_token", fake_argmax_token)
+    # The repetition penalty does real mlx tensor math (gather + where);
+    # on FakeTensor logits it would blow up. Sampling is faked anyway, so
+    # neutralize the penalty to a pass-through for these tests. Its real
+    # behavior is covered in tests/backends/test_mlx_sampling.py.
+    monkeypatch.setattr(
+        "dots.backends.mlx.runtime._apply_repetition_penalty",
+        lambda logits_row, recent_tokens, penalty: logits_row,
+    )
     monkeypatch.setattr(
         "dots.backends.mlx.runtime.MlxBackendRuntime.encode_hidden",
         lambda _self, hidden: hidden.to_wire(),

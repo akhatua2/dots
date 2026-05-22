@@ -28,9 +28,21 @@ class AutoregressiveGeneration(GenerationStrategy):
                 },
             )
 
-        token = runtime.sample_token(prefill.logits_row, request.temperature)
-        stop_ids = runtime.stop_ids()
         response_tokens: list[int] = []
+
+        def recent() -> list[int]:
+            """Window of just-generated tokens the sampler penalizes to
+            avoid repetition loops."""
+            ctx = request.repetition_context
+            return response_tokens[-ctx:] if ctx > 0 else response_tokens
+
+        token = runtime.sample_token(
+            prefill.logits_row,
+            request.temperature,
+            recent_tokens=recent(),
+            repetition_penalty=request.repetition_penalty,
+        )
+        stop_ids = runtime.stop_ids()
         decode_start = time.perf_counter()
 
         while len(response_tokens) < request.max_tokens and token not in stop_ids:
@@ -43,7 +55,12 @@ class AutoregressiveGeneration(GenerationStrategy):
                 token,
                 forward_hidden=request.forward_hidden,
             )
-            token = runtime.sample_token(logits_row, request.temperature)
+            token = runtime.sample_token(
+                logits_row,
+                request.temperature,
+                recent_tokens=recent(),
+                repetition_penalty=request.repetition_penalty,
+            )
 
         elapsed_ms = (time.perf_counter() - decode_start) * 1000
         return GenerationResult(

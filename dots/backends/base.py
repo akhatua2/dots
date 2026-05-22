@@ -141,7 +141,13 @@ class BackendRuntime(ABC):
     def decode_tokens(self, tokens: list[int]) -> str: ...
 
     @abstractmethod
-    def sample_token(self, logits_row: Any, temperature: float) -> int: ...
+    def sample_token(
+        self,
+        logits_row: Any,
+        temperature: float,
+        recent_tokens: list[int] | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> int: ...
 
     @abstractmethod
     def encode_hidden(self, hidden: Any) -> dict[str, Any]: ...

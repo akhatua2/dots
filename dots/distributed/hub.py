@@ -296,9 +296,12 @@ class Hub:
     # ───────────────────────────── lifecycle ─────────────────────────────
 
     async def start(self) -> None:
+        # The hub serves any number of models (one deployment per id);
+        # this is just the fallback used when a client/worker connects
+        # without naming one. The hub itself loads nothing.
         ui.notice(
-            f"hub starting · model = {self.model_id}"
-            + (f" · {self.n_layers} layers" if self.n_layers else "")
+            f"hub starting · default model = {self.default_model_id} "
+            f"(clients may request others)"
         )
         server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
@@ -1862,7 +1865,17 @@ class Hub:
             try:
                 await cb(text)
             except Exception:
-                log.debug("on_token callback failed", exc_info=True)
+                # The chat client went away mid-turn. Drop the router so
+                # we stop forwarding: otherwise every remaining token of
+                # the turn retries the dead socket, and asyncio logs a
+                # "socket.send() raised exception" warning per token,
+                # flooding the hub until the turn (or the operator) ends.
+                self._token_routers.pop(conv_id, None)
+                log.debug(
+                    "token forward failed; client gone, dropping router for %s",
+                    conv_id[:8],
+                    exc_info=True,
+                )
         return None
 
     # ─────────────────────────── scheduler integration ──────────────────

@@ -149,7 +149,13 @@ class ChatUI:
                 f"</style>"
             )
 
-        session: PromptSession = PromptSession(style=_PROMPT_STYLE)
+        # `erase_when_done` clears prompt_toolkit's own rendered input
+        # line on accept; otherwise it stays in scrollback and we'd see
+        # the typed text twice — once from PT, once from the explicit
+        # `_echo_user_prompt` below.
+        session: PromptSession = PromptSession(
+            style=_PROMPT_STYLE, erase_when_done=True
+        )
 
         while True:
             try:
@@ -174,7 +180,17 @@ class ChatUI:
                 if await self._handle_slash_command(stripped):
                     continue
 
-            await self._stream_turn(stripped)
+            try:
+                await self._stream_turn(stripped)
+            except ConnectionError as e:
+                # Hub went away mid-turn (or between turns). Nothing left
+                # to talk to — print a clean notice and leave the loop
+                # rather than letting the error escape as an unhandled
+                # task exception ("Task exception was never retrieved").
+                self._console.print(
+                    Text(f"{INDENT}connection to hub lost ({e}) — exiting.", style="red"),
+                )
+                break
 
     # ─────────────────────────── echo helpers ────────────────────────
 
@@ -227,9 +243,13 @@ class ChatUI:
                         accumulated["value"] += t
                         live.update(render(accumulated["value"]))
 
+                    # Guardrail: bound a single interactive response. A
+                    # degenerate model (small/quantized) can loop forever;
+                    # the repetition penalty in sampling is the real fix,
+                    # this just caps the blast radius if it slips through.
                     _, resp = await worker.send_prompt(
                         prompt_text,
-                        max_tokens=2048,
+                        max_tokens=512,
                         on_token=on_token,
                     )
                 decode_tokens = int(resp.get("decode_tokens", 0))
