@@ -47,7 +47,19 @@ sudo sed -i \
 sudo systemctl daemon-reload
 sudo systemctl enable --now dots-hub
 
-echo "==> done. The hub's join ticket (share this with workers/clients):"
-sleep 4
-sudo journalctl -u dots-hub -n 40 --no-pager | grep -A1 "share this ticket" || \
-  echo "(check 'sudo journalctl -u dots-hub -f' once it finishes starting)"
+echo "==> waiting for the hub to come up and publish its ticket…"
+TICKET_FILE="$HOME/.dots/hub_ticket.txt"
+for _ in $(seq 1 40); do
+  [ -s "$TICKET_FILE" ] && break
+  sleep 1
+done
+if [ -s "$TICKET_FILE" ]; then
+  echo "==> hub is up. Join ticket (share with workers/clients):"
+  echo
+  cat "$TICKET_FILE"
+  echo
+  echo "Workers join with:  dots worker <TICKET>"
+  echo "Chat with:          dots chat <TICKET>"
+else
+  echo "==> ticket not found yet; check: sudo journalctl -u dots-hub -f"
+fi

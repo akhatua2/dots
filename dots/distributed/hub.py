@@ -322,6 +322,15 @@ class Hub:
         node_id = await self._endpoint.node_id()
         ui.notice(f"hub node {node_id[:16]}… listening (iroh) — share this ticket to join:")
         ui.notice(f"  {self._ticket}")
+        # Also write the ticket to a file so operators/automation can read it
+        # back unwrapped (terminal/journald line-wrapping mangles the printed
+        # one). This is the canonical place to fetch the join ticket.
+        try:
+            ticket_path = dots_home() / "hub_ticket.txt"
+            ticket_path.write_text(self._ticket + "\n")
+            ui.notice(f"  (also written to {ticket_path})")
+        except Exception:
+            log.debug("could not write hub ticket file", exc_info=True)
         self.started.set()
 
         # OpenAI-compatible HTTP API alongside the iroh listener. On by
