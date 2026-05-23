@@ -15,8 +15,9 @@ import pytest
 
 # mlx is Apple-only; skip this whole module where it isn't installed (e.g. the
 # Linux CI test gate). Mac dev machines run it normally.
-mx = pytest.importorskip("mlx.core")
+pytest.importorskip("mlx")
 
+import mlx.core as mx
 from dots.backends.mlx.runtime import _apply_repetition_penalty
 
 
