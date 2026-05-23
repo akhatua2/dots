@@ -43,15 +43,18 @@ jobs:
         env:
           ZONE: us-west1-a
           INSTANCE: dots-hub
+          # SSH as the user that owns the hub install (uv, ~/dots, ~/.dots).
+          # Without this, gcloud derives a username from the service-account
+          # email and targets the wrong home dir.
+          TARGET_USER: arpan
         run: |
           tar --exclude=./.git --exclude=./_external -czf /tmp/dots.tar.gz .
-          gcloud compute scp /tmp/dots.tar.gz "$INSTANCE:~/dots.tar.gz" \
+          gcloud compute scp /tmp/dots.tar.gz "$TARGET_USER@$INSTANCE:~/dots.tar.gz" \
             --zone="$ZONE" --quiet
-          gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet --command '
+          gcloud compute ssh "$TARGET_USER@$INSTANCE" --zone="$ZONE" --quiet --command '
             set -euo pipefail
-            export PATH=$HOME/.local/bin:$PATH
             rm -rf ~/dots && mkdir -p ~/dots && tar xzf ~/dots.tar.gz -C ~/dots
-            cd ~/dots && uv sync
+            cd ~/dots && ~/.local/bin/uv sync
             sudo cp deploy/dots-hub.service /etc/systemd/system/dots-hub.service
             sudo sed -i -e "s|__USER__|$USER|g" -e "s|__APP_DIR__|$HOME/dots|g" -e "s|__HOME__|$HOME|g" /etc/systemd/system/dots-hub.service
             sudo systemctl daemon-reload
