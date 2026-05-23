@@ -15,18 +15,13 @@ end-to-end manually via `dots chat`.
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 
 import pytest
 
 from dots.hub import Hub
-from dots.peer import PeerConnection
-from dots.pool import resource_decl_to_hello_field
 from dots.work_units import ModelGeometry
 from dots.worker import PoolNotReadyError, Worker
 from tests.conftest import TEST_MODEL, connect_client
-from tests.helpers.resources import resource_decl
 
 
 # ───────────────────── hub-side state classification ─────────────────────

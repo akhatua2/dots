@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 
 from dots.distributed.hub import Hub, ModelWorkerState, Participant
-from dots.distributed.peer import PeerConnection
-from dots.distributed.pool import resource_decl_to_hello_field
 from dots.distributed.worker import Worker
 from tests.conftest import connect_client, connect_worker
 from tests.helpers.models import exact_geometry
