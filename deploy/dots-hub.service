@@ -1,0 +1,23 @@
+[Unit]
+Description=dots hub (model-agnostic coordinator, iroh transport)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# uv installs to ~/.local/bin; make sure it (and system bins) are on PATH.
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional shared join token + any other config. The leading '-' means the
+# service still starts if the file is absent. Create it via bootstrap-hub.sh.
+EnvironmentFile=-__APP_DIR__/deploy/hub.env
+# Run the slim, model-agnostic hub. The iroh listener needs no open ports
+# (it dials out to relays); --http-port exposes the optional OpenAI API.
+ExecStart=__HOME__/.local/bin/uv run dots hub --http-port 8080
+Restart=always
+RestartSec=2
+# The hub keeps its stable iroh identity under ~/.dots/iroh — persist it.
+
+[Install]
+WantedBy=multi-user.target

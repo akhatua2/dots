@@ -18,7 +18,7 @@ import pytest
 
 from dots.hub import Hub
 
-from tests.conftest import connect_worker, wait_for_pool_size
+from tests.conftest import connect_worker, wait_for_pool_size, wire_peer_link
 
 
 pytestmark = pytest.mark.asyncio
@@ -36,11 +36,13 @@ async def test_chain_routes_through_peer_worker(hub: Hub):
     # w_chain owns layers 4-7.
     n_layers = hub.n_layers
     split = n_layers // 2
+    # Establish the direct head->chain data-plane link (in-memory stand-in
+    # for the iroh connection the head would hole-punch in production).
+    await wire_peer_link(w_head, w_chain)
     chain_payload = [
         {
             "worker_id": w_chain.identity,
-            "host": "127.0.0.1",
-            "port": int(w_chain._peer_listen_port),
+            "ticket": "placeholder",
             "layer_start": split,
             "layer_end": n_layers,
         }
@@ -85,11 +87,13 @@ async def test_chain_uses_both_workers_caches(hub: Hub):
 
     n_layers = hub.n_layers
     split = n_layers // 2
+    # Establish the direct head->chain data-plane link (in-memory stand-in
+    # for the iroh connection the head would hole-punch in production).
+    await wire_peer_link(w_head, w_chain)
     chain_payload = [
         {
             "worker_id": w_chain.identity,
-            "host": "127.0.0.1",
-            "port": int(w_chain._peer_listen_port),
+            "ticket": "placeholder",
             "layer_start": split,
             "layer_end": n_layers,
         }

@@ -25,7 +25,7 @@ from dots.peer import PeerConnection
 from dots.pool import resource_decl_to_hello_field
 from dots.work_units import ModelGeometry
 from dots.worker import PoolNotReadyError, Worker
-from tests.conftest import TEST_MODEL
+from tests.conftest import TEST_MODEL, connect_client
 from tests.helpers.resources import resource_decl
 
 
@@ -294,44 +294,9 @@ async def test_send_prompt_normal_path_still_works():
 async def test_chat_client_gets_waiting_when_no_compute_workers(hub: Hub):
     """A chat client connects, no compute worker has joined → sending a
     prompt yields PoolNotReadyError(waiting) on the worker side."""
-    # Connect a chat-only client by hand (the standard `connect_worker`
-    # fixture is for compute workers).
-    reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
-    cid = str(uuid.uuid4())
-    chat = Worker(
-        "127.0.0.1",
-        hub.port,
-        identity=cid,
-        account_id="acc-" + cid[:8],
-        account_alias="",
-        compute=False,
-        # The hub now requires the querier to name a model on each
-        # request (it advertises none of its own).
-        requested_model_id=TEST_MODEL,
-    )
-    chat.conn = PeerConnection(
-        reader,
-        writer,
-        f"127.0.0.1:{hub.port}",
-        chat._handle,
-    )
-    await chat.conn.call(
-        "hello",
-        worker_id=cid,
-        account_id=chat.account_id,
-        resources=resource_decl_to_hello_field(
-            resource_decl(
-                cid,
-                account_id=chat.account_id,
-                ram_gb=4.0,
-                tflops=0.0,
-                backends=frozenset(),
-                cluster_id="",
-            )
-        ),
-        compute=False,
-    )
-    await asyncio.wait_for(chat._welcome.wait(), timeout=2.0)
+    # Connect a chat-only client (the standard `connect_worker` fixture is
+    # for compute workers); wired over an in-memory transport.
+    chat = await connect_client(hub, model_id=TEST_MODEL)
     try:
         with pytest.raises(PoolNotReadyError) as exc_info:
             await chat.send_prompt("hi")

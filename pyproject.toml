@@ -38,6 +38,9 @@ sim = [
 ]
 
 [tool.pytest.ini_options]
+# Only collect our own suite — keep pytest out of vendored clones under
+# _external/ (e.g. the iroh/mlx source trees used for exploration).
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

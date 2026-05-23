@@ -9,7 +9,7 @@ from dots.distributed.hub import Hub, ModelWorkerState, Participant
 from dots.distributed.peer import PeerConnection
 from dots.distributed.pool import resource_decl_to_hello_field
 from dots.distributed.worker import Worker
-from tests.conftest import connect_worker
+from tests.conftest import connect_client, connect_worker
 from tests.helpers.models import exact_geometry
 from tests.helpers.resources import resource_decl
 
@@ -32,41 +32,8 @@ async def _wait_for_deployment_ready(
 
 
 async def _connect_chat_client(hub: Hub, *, model_id: str) -> Worker:
-    cid = str(uuid.uuid4())
-    client = Worker(
-        "127.0.0.1",
-        hub.port,
-        identity=cid,
-        account_id="acc-" + cid[:8],
-        account_alias="",
-        compute=False,
-        requested_model_id=model_id,
-    )
-    reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
-    client.conn = PeerConnection(
-        reader,
-        writer,
-        f"127.0.0.1:{hub.port}",
-        client._handle,
-    )
-    await client.conn.call(
-        "hello",
-        worker_id=cid,
-        account_id=client.account_id,
-        compute=False,
-        resources=resource_decl_to_hello_field(
-            resource_decl(
-                cid,
-                account_id=client.account_id,
-                ram_gb=4.0,
-                tflops=0.0,
-                backends=frozenset(),
-                cluster_id="",
-            )
-        ),
-    )
-    await asyncio.wait_for(client._welcome.wait(), timeout=2.0)
-    return client
+    # Chat-only client wired over an in-memory transport (see conftest).
+    return await connect_client(hub, model_id=model_id)
 
 
 async def test_prompt_model_id_creates_separate_deployment(hub: Hub):
@@ -157,16 +124,14 @@ async def test_second_model_placement_subtracts_existing_model_ram():
         addr="127.0.0.1:1",
         conn=_StubConn(),
         compute=True,
-        peer_listen_host="127.0.0.1",
-        peer_listen_port=1,
+        peer_ticket="test-ticket",
     )
     worker_b = Participant(
         id="worker-b",
         addr="127.0.0.1:2",
         conn=_StubConn(),
         compute=True,
-        peer_listen_host="127.0.0.1",
-        peer_listen_port=2,
+        peer_ticket="test-ticket",
     )
     hub.participants[worker_a.id] = worker_a
     hub.participants[worker_b.id] = worker_b
@@ -229,8 +194,7 @@ async def test_evict_idle_deployments_unloads_only_unqueried_models():
         addr="127.0.0.1:1",
         conn=conn,
         compute=True,
-        peer_listen_host="127.0.0.1",
-        peer_listen_port=1,
+        peer_ticket="test-ticket",
     )
     hub.participants["w1"] = worker
 
@@ -269,8 +233,7 @@ async def test_evict_idle_deployments_noop_when_all_protected():
         addr="127.0.0.1:1",
         conn=conn,
         compute=True,
-        peer_listen_host="127.0.0.1",
-        peer_listen_port=1,
+        peer_ticket="test-ticket",
     )
     keep = hub._deployment_for("model-new")
     keep.current_placement = [("w1", 0, 2, True)]

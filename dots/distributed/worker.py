@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Callable
 
@@ -268,6 +269,11 @@ class Worker:
             # data plane. The hub hands it to chain peers; iroh hole-punches
             # or relays, so it works across NATs with no routable IP.
             hello_payload["peer_ticket"] = self._peer_ticket
+        join_token = os.environ.get("DOTS_JOIN_TOKEN")
+        if join_token:
+            # Present the shared join token if the operator set one; the hub
+            # rejects the connection on mismatch.
+            hello_payload["join_token"] = join_token
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
         # A chat client tells the hub which model it intends to query so
@@ -910,28 +916,25 @@ class Worker:
         return forward_through_chain
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
-        """Hub-triggered probe: open a connection to the target peer,
-        time N pings, return the RTT statistics to the hub."""
+        """Hub-triggered probe: open (or reuse) a connection to the target
+        peer, time N pings, return the RTT statistics to the hub."""
         import time as _time
 
         target_id = msg.get("target_id")
         target_ticket = msg.get("target_ticket")
         samples = int(msg.get("samples", 3))
-        if not target_ticket:
+        if not target_id or not target_ticket:
             return {
                 "kind": "probe_result",
                 "target_id": target_id,
-                "error": "missing target ticket",
-            }
-        if self._endpoint is None:
-            return {
-                "kind": "probe_result",
-                "target_id": target_id,
-                "error": "iroh endpoint not started",
+                "error": "missing target id/ticket",
             }
         rtts: list[float] = []
         try:
-            conn = await self._endpoint.connect(target_ticket, _ignore_inbound)
+            # Reuse the cached chain connection to this peer if one exists
+            # (and establish it via iroh otherwise) — probing and chaining
+            # share the one direct link.
+            conn = await self._get_or_open_peer(str(target_id), target_ticket)
             for _ in range(samples):
                 t0 = _time.perf_counter_ns()
                 try:
@@ -945,7 +948,6 @@ class Worker:
                     continue
                 rtt_ms = (_time.perf_counter_ns() - t0) / 1e6
                 rtts.append(rtt_ms)
-            await conn.close()
         except Exception as e:
             return {"kind": "probe_result", "target_id": target_id, "error": str(e)}
         if not rtts:

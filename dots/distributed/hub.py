@@ -179,9 +179,13 @@ class Hub:
         # for callers (tests, embeddings) that want a deterministic ready signal.
         self.started = asyncio.Event()
         # The iroh node the hub listens on, and its stable shareable ticket.
-        # Both set in start(); the ticket is the join token workers/clients use.
+        # Both set in start(); the ticket is how workers/clients reach the hub.
         self._endpoint: IrohEndpoint | None = None
         self._ticket: str | None = None
+        # Optional shared join token. When set (via DOTS_JOIN_TOKEN), every
+        # connecting worker/client must present a matching token in HELLO —
+        # a second factor on top of knowing the ticket. Unset ⇒ ticket only.
+        self._join_token: str | None = os.environ.get("DOTS_JOIN_TOKEN") or None
         self._topology_gen = 0
         # Closed credit-unit economy. Persists per-account totals + a
         # per-turn audit log. Tests pass an explicit path so they don't
@@ -704,6 +708,14 @@ class Hub:
         async def handler(msg: dict) -> dict | None:
             kind = msg.get("kind")
             if kind == "hello":
+                # Optional shared join token (second factor on top of the
+                # ticket). Enforced only when the hub is configured with one.
+                if self._join_token is not None and (
+                    msg.get("join_token") != self._join_token
+                ):
+                    if not hello_fut.done():
+                        hello_fut.set_exception(PermissionError("bad join token"))
+                    return {"kind": "error", "error": "unauthorized: bad join token"}
                 if not hello_fut.done():
                     hello_fut.set_result(msg)
                 # The hub advertises no model: the querier names it on
@@ -759,6 +771,10 @@ class Hub:
             hello_msg = await asyncio.wait_for(hello_fut, timeout=HELLO_TIMEOUT_SEC)
         except asyncio.TimeoutError:
             log.warning("connection from %s: HELLO timeout, dropping", addr_str)
+            await conn.close()
+            return
+        except PermissionError:
+            log.warning("connection from %s: rejected (bad join token)", addr_str)
             await conn.close()
             return
 
