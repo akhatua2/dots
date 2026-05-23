@@ -49,6 +49,21 @@ def _free_port() -> int:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dots_env(tmp_path, monkeypatch):
+    """Isolate per-process global state so the suite is parallelizable
+    (xdist -n auto), with no dependence on run order:
+
+      * $DOTS_HOME → a per-test temp dir, so account / identity / ledger /
+        iroh-key state never leaks between tests.
+      * clear $DOTS_JOIN_TOKEN — a developer's .env (loaded by `dots.cli` on
+        import) would otherwise make every test hub require a token and reject
+        the test workers. Tests that exercise the token set it explicitly.
+    """
+    monkeypatch.setenv("DOTS_HOME", str(tmp_path / "dots_home"))
+    monkeypatch.delenv("DOTS_JOIN_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def mock_model(monkeypatch):
     # Tests use a faked load path: worker.load_partial returns a fake
     # model + tokenizer + layer count without touching mlx_lm. Hub's

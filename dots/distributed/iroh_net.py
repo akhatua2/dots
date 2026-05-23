@@ -184,20 +184,24 @@ class IrohEndpoint:
         cls,
         on_accept: AcceptHandler,
         secret_key: bytes | None = None,
+        discovery: bool = True,
     ) -> "IrohEndpoint":
         """Start an in-memory iroh node speaking the dots ALPN.
 
         `on_accept` runs once per inbound connection, for that connection's
         lifetime. `secret_key` (32 bytes) pins the identity/ticket; omit for an
-        ephemeral identity.
+        ephemeral identity. `discovery` enables n0's DNS discovery (publish our
+        address by NodeId so peers can dial by NodeId alone) — on in production;
+        tests pass `discovery=False` to stay fully offline.
         """
         _set_event_loop()
         options = iroh.NodeOptions(
             protocols={ALPN: _Creator(on_accept)},
-            # Default discovery (n0's DNS service): the node publishes its
-            # address keyed by its NodeId, and peers can dial it by NodeId
-            # alone — no need to exchange the long, address-bearing ticket.
-            node_discovery=iroh.NodeDiscoveryConfig.DEFAULT,
+            node_discovery=(
+                iroh.NodeDiscoveryConfig.DEFAULT
+                if discovery
+                else iroh.NodeDiscoveryConfig.NONE
+            ),
         )
         if secret_key is not None:
             options.secret_key = secret_key
