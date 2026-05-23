@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+# mlx is Apple-only; skip where it isn't installed (e.g. the Linux PR runner).
+pytest.importorskip("mlx")
+
 from dots.backends.base import ModelAssignment, ModelMetadata
 from dots.backends.mlx.runtime import MlxBackendRuntime
 from tests.helpers.models import exact_geometry

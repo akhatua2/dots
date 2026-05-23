@@ -16,6 +16,9 @@ from pathlib import Path
 
 import pytest
 
+# mlx is Apple-only; skip where it isn't installed (e.g. the Linux PR runner).
+pytest.importorskip("mlx")
+
 from dots.backends.mlx import load_progress
 
 
