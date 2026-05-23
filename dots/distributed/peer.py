@@ -1,13 +1,13 @@
-"""Bidirectional RPC channel between two peers over a single TCP connection.
+"""Bidirectional RPC channel between two peers over a single `Transport`.
 
 A peer connection multiplexes outgoing requests and incoming requests on the
-same socket using a `rid` correlation id. Messages carrying `response_to`
+same transport using a `rid` correlation id. Messages carrying `response_to`
 resolve a pending Future; messages without are incoming requests and get
-handed to the local Node's handler.
+handed to the local handler.
 
-Connection ownership convention (avoids both sides opening a connection to
-each other): the peer with the *lower* sorted self-address opens the
-connection; the higher one accepts it. Both sides then use the same socket.
+The channel is transport-agnostic — it does request ids, response futures, and
+dispatch on top of a `Transport` (`send` / `recv` / `close`, see protocol.py).
+Production rides an iroh QUIC bi-stream; tests ride an in-memory queue pair.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
-from .protocol import read_msg, write_msg
+from .protocol import Transport
 
 log = logging.getLogger("dots.peer")
 
@@ -24,17 +24,15 @@ RequestHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class PeerConnection:
-    """One bidirectional RPC channel."""
+    """One bidirectional RPC channel over a `Transport`."""
 
     def __init__(
         self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        transport: Transport,
         peer_id: str,
         handler: RequestHandler,
     ):
-        self.reader = reader
-        self.writer = writer
+        self.transport = transport
         self.peer_id = peer_id
         self.handler = handler
         self._next_rid = 1  # 0 reserved for "unset"
@@ -51,7 +49,7 @@ class PeerConnection:
         self._pending[rid] = fut
         msg = {"kind": kind, "rid": rid, **payload}
         async with self._send_lock:
-            await write_msg(self.writer, msg)
+            await self.transport.send(msg)
         try:
             return await fut
         finally:
@@ -63,12 +61,12 @@ class PeerConnection:
         RTT per token would halve throughput."""
         msg = {"kind": kind, **payload}  # no rid
         async with self._send_lock:
-            await write_msg(self.writer, msg)
+            await self.transport.send(msg)
 
     async def _read_loop(self) -> None:
         try:
             while True:
-                msg = await read_msg(self.reader)
+                msg = await self.transport.recv()
                 if "response_to" in msg:
                     fut = self._pending.get(msg["response_to"])
                     if fut and not fut.done():
@@ -87,7 +85,7 @@ class PeerConnection:
             BrokenPipeError,
         ) as e:
             # Normal disconnect — the peer hung up or the OS killed the
-            # underlying socket. Not an error; the parent context will
+            # underlying transport. Not an error; the parent context will
             # re-plan the pool.
             log.info("connection to %s closed (%s)", self.peer_id, type(e).__name__)
         except Exception:
@@ -119,14 +117,10 @@ class PeerConnection:
         resp["response_to"] = rid
         try:
             async with self._send_lock:
-                await write_msg(self.writer, resp)
+                await self.transport.send(resp)
         except Exception:
             log.exception("failed to send response for rid=%s", rid)
 
     async def close(self) -> None:
         self._read_task.cancel()
-        self.writer.close()
-        try:
-            await self.writer.wait_closed()
-        except Exception:
-            pass
+        await self.transport.close()

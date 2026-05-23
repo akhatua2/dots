@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 from unittest.mock import patch
 
 import pytest
@@ -235,21 +234,13 @@ async def test_print_usage_renders_table_from_credits_api():
         },
     }
 
-    class _FakeResp:
-        def __init__(self, payload):
-            self._payload = json.dumps(payload).encode()
+    # /usage now queries the ledger over the iroh control channel (not HTTP).
+    async def _credits_call(kind, **_payload):
+        assert kind == "credits"
+        return {"kind": "credits", "data": credits_response}
 
-        def read(self):
-            return self._payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-    with patch("urllib.request.urlopen", return_value=_FakeResp(credits_response)):
-        await ui._print_usage()
+    worker.conn.call = _credits_call
+    await ui._print_usage()
 
     out = buf.getvalue()
     assert "me" in out, f"own alias missing:\n{out}"

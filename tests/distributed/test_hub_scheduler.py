@@ -18,7 +18,7 @@ from dots.hub import Hub
 from dots.work_units import ModelGeometry
 from tests.helpers.resources import resource_decl
 
-from tests.conftest import connect_worker, wait_for_pool_size
+from tests.conftest import connect_worker, wait_for_pool_size, wire_peer_link
 
 
 # ─────────────────── unit-style: Hub.plan_placement ───────────────────
@@ -79,11 +79,18 @@ async def test_probes_populate_latency_matrix(hub: Hub):
     """When a second compute worker becomes ready, the hub triggers
     bidirectional RTT probes and the pool_view latency matrix gains a
     measured cell for the pair."""
+    import asyncio
+
     w1 = await connect_worker(hub)
     w2 = await connect_worker(hub)
     await wait_for_pool_size(hub, 2)
-    # Probes happen as background tasks after worker_ready arrives.
-    import asyncio
+    # In production each worker hole-punches a direct iroh link to the other
+    # and the hub auto-probes on join. Tests have no real iroh, so wire the
+    # bidirectional in-memory data-plane links and drive the probe explicitly
+    # (the auto-probe at join fired before these links existed).
+    await wire_peer_link(w1, w2)
+    await wire_peer_link(w2, w1)
+    await hub._probe_pairs_for(w1.identity)
 
     for _ in range(50):
         if hub.pool_view.get_rtt(w1.identity, w2.identity) is not None:

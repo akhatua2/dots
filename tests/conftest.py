@@ -19,10 +19,11 @@ import pytest_asyncio
 
 from dots.distributed.hub import Hub
 from dots.distributed.peer import PeerConnection
+from dots.distributed.protocol import InMemoryTransport
 from dots.distributed.pool import resource_decl_to_hello_field
 from dots.backends.base import ModelMetadata
 from dots.system.util import effective_tflops_estimate, free_ram_gb
-from dots.distributed.worker import Worker
+from dots.distributed.worker import Worker, _ignore_inbound
 from tests.helpers.resources import resource_decl
 
 from .fakes import (
@@ -142,37 +143,35 @@ async def hub(tmp_path) -> AsyncIterator[Hub]:
 
     Ledger path is redirected to a per-test tmp dir so test turns can
     record real CU without polluting the developer's ~/.dots/."""
-    port = _free_port()
     h = Hub(
-        port=port,
+        port=0,
         model_id=TEST_MODEL,
         host="127.0.0.1",
         ledger_path=tmp_path / "credits.json",
     )
-    task = asyncio.create_task(h.start())
-    try:
-        await asyncio.wait_for(h.started.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
-        task.cancel()
-        raise TimeoutError("hub did not start within 5s")
+    # Tests drive the hub directly over in-memory transports (see
+    # connect_worker) rather than standing up the real iroh listener — that
+    # keeps the suite fast and deterministic, with no sockets or NAT. Mark it
+    # "started" for code paths that wait on it.
+    h.started.set()
+    h._test_serve_tasks = []
     try:
         yield h
     finally:
-        # Close any worker connections still attached to the hub — their
-        # _on_connect coroutines block on conn._closed.wait() and would
-        # otherwise keep the hub task alive past cancellation.
+        # Close worker connections so each hub-side _serve_peer coroutine
+        # (which blocks on conn._closed.wait()) returns, then reap the tasks.
         for w in list(h.participants.values()):
             try:
                 await w.conn.close()
             except Exception:
                 pass
-        task.cancel()
-        # Give cancellation one tick to propagate but don't block forever
-        # on the server's wait_closed (it may stall on lingering reader tasks).
-        try:
-            await asyncio.wait_for(task, timeout=0.5)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            pass
+        for t in h._test_serve_tasks:
+            t.cancel()
+        for t in h._test_serve_tasks:
+            try:
+                await asyncio.wait_for(t, timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
 
 
 # Tests need to insert a fresh worker into the hub. Using Worker.start()
@@ -186,16 +185,18 @@ async def connect_worker(hub: Hub) -> Worker:
     # reconnect-takeover or accidentally pollute the developer's real
     # account file).
     w = Worker(
-        "127.0.0.1",
-        hub.port,
+        "test-hub-ticket",
         identity=str(uuid.uuid4()),
         account_id="acc-" + uuid.uuid4().hex,
         account_alias="",
     )
-    # Start the worker's peer-listen server so probes from the hub work.
-    await w._start_peer_server()
-    reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
-    w.conn = PeerConnection(reader, writer, f"127.0.0.1:{hub.port}", w._handle)
+    # Wire worker <-> hub over an in-memory transport pair (no sockets, no
+    # iroh). The hub serves its end for the connection's lifetime, exactly as
+    # the real iroh ALPN listener would.
+    hub_side, worker_side = InMemoryTransport.pair()
+    serve_task = asyncio.create_task(hub._serve_peer(hub_side, w.identity[:16]))
+    hub._test_serve_tasks.append(serve_task)
+    w.conn = PeerConnection(worker_side, "hub", w._handle)
     # Build a real ResourceDecl so the hub's new pool_view ingests properly.
     decl = resource_decl(
         w.identity,
@@ -211,8 +212,9 @@ async def connect_worker(hub: Hub) -> Worker:
         account_id=w.account_id,
         free_ram_gb=decl.ram_gb_free,
         resources=resource_decl_to_hello_field(decl),
-        peer_listen_port=w._peer_listen_port,
-        peer_listen_host="127.0.0.1",
+        # A compute worker must advertise a peer ticket; tests don't form real
+        # worker<->worker connections, so a placeholder is fine.
+        peer_ticket="test-ticket-" + w.identity[:8],
     )
     assert ack.get("kind") == "hello_ack"
     # The hub is model-agnostic and no longer advertises a model in the
@@ -228,6 +230,64 @@ async def connect_worker(hub: Hub) -> Worker:
     await asyncio.wait_for(w._welcome.wait(), timeout=2.0)
     await asyncio.wait_for(w._host_ready.wait(), timeout=5.0)
     return w
+
+
+async def connect_client(hub: Hub, *, model_id: str, identity: str | None = None) -> Worker:
+    """Connect a chat-only client (compute=False) over an in-memory transport.
+
+    The compute-worker equivalent is `connect_worker`; this one contributes no
+    compute, so it advertises no peer ticket and never loads a model.
+    """
+    cid = identity or str(uuid.uuid4())
+    client = Worker(
+        "test-hub-ticket",
+        identity=cid,
+        account_id="acc-" + cid[:8],
+        account_alias="",
+        compute=False,
+        requested_model_id=model_id,
+    )
+    hub_side, worker_side = InMemoryTransport.pair()
+    hub._test_serve_tasks.append(
+        asyncio.create_task(hub._serve_peer(hub_side, cid[:16]))
+    )
+    client.conn = PeerConnection(worker_side, "hub", client._handle)
+    await client.conn.call(
+        "hello",
+        worker_id=cid,
+        account_id=client.account_id,
+        compute=False,
+        resources=resource_decl_to_hello_field(
+            resource_decl(
+                cid,
+                account_id=client.account_id,
+                ram_gb=4.0,
+                tflops=0.0,
+                backends=frozenset(),
+                cluster_id="",
+            )
+        ),
+    )
+    await asyncio.wait_for(client._welcome.wait(), timeout=2.0)
+    return client
+
+
+async def wire_peer_link(head: Worker, peer: Worker) -> None:
+    """Establish a direct worker<->worker data-plane link over an in-memory
+    transport — what iroh would hole-punch for a multi-worker chain.
+
+    Pre-seeds the head's cached outgoing connection to `peer` so the head's
+    `_get_or_open_peer` returns it instead of dialing iroh (which tests don't
+    run); the far end is served by `peer`'s data-plane handler.
+    """
+    head_side, peer_side = InMemoryTransport.pair()
+    head._peer_conns[peer.identity] = PeerConnection(
+        head_side, peer.identity[:16], _ignore_inbound
+    )
+    serve = PeerConnection(peer_side, head.identity[:16], peer._handle_peer_msg)
+    # Keep a reference so the serving channel (and its read loop) isn't GC'd.
+    peer._test_peer_links = getattr(peer, "_test_peer_links", [])
+    peer._test_peer_links.append(serve)
 
 
 async def wait_for_pool_size(hub: Hub, size: int, timeout: float = 2.0) -> None:

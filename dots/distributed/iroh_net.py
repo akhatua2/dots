@@ -1,0 +1,240 @@
+"""iroh transport: the single network layer for dots.
+
+Everything — worker↔hub control and worker↔worker data — rides iroh, a QUIC
+peer-to-peer stack with built-in NAT hole-punching and relay fallback. Peers
+are addressed by a public-key NodeId; a shareable *ticket* string encodes a
+node's address (NodeId + relay + direct addrs) and is the "join token" UX.
+
+This module is the only place that imports `iroh`. It provides:
+
+  * `IrohStreamTransport` — carries protocol.py's length-prefixed msgpack
+    frames over one iroh bidirectional QUIC stream. Plugs into
+    `PeerConnection` exactly like any `Transport`.
+  * `IrohEndpoint` — wraps an iroh node: a stable identity (persisted secret
+    key), a custom-ALPN listener that hands each inbound connection to a
+    caller-supplied coroutine as a `PeerConnection`, and `connect()` to dial a
+    peer by ticket/NodeAddr and get a `PeerConnection` back.
+
+The hub and worker both build an `IrohEndpoint`; the hub additionally has a
+stable ticket so workers can always find it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+from pathlib import Path
+from typing import Awaitable, Callable
+
+import iroh
+
+from .peer import PeerConnection
+from .protocol import LEN_HEADER, MAX_FRAME_BYTES, pack_msg, unpack_msg
+from ..system.util import dots_home
+
+log = logging.getLogger("dots.iroh")
+
+# Application-layer protocol id negotiated on every dots connection. Bumping
+# the suffix is how we'd cut a breaking wire change without colliding with old
+# nodes still speaking the previous version.
+ALPN = b"dots/rpc/0"
+
+SECRET_KEY_BYTES = 32
+
+# Coroutine run for the lifetime of one accepted inbound connection. It
+# receives the connection's transport + a short peer id, builds its own
+# PeerConnection (with its real request handler) on top, and returns only when
+# the peer disconnects (e.g. by awaiting `conn._closed.wait()`). Handing over
+# the transport — rather than a half-built PeerConnection — avoids any window
+# where messages arrive before the owner installs its handler.
+AcceptHandler = Callable[["IrohStreamTransport", str], Awaitable[None]]
+
+
+def _set_event_loop() -> None:
+    """Bind iroh's uniffi async callbacks to the running asyncio loop. Safe to
+    call repeatedly; must be called from inside the loop iroh will use."""
+    iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
+
+
+# ──────────────────────────── identity persistence ──────────────────────────
+
+
+def load_or_create_secret_key(name: str) -> bytes:
+    """Return a stable 32-byte iroh secret key for `name` (e.g. "hub").
+
+    Persisted under ~/.dots/iroh/<name>.key so a node keeps the same NodeId —
+    and therefore the same ticket — across restarts. Generated on first use.
+    """
+    key_dir = Path(dots_home()) / "iroh"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_path = key_dir / f"{name}.key"
+    if key_path.exists():
+        data = key_path.read_bytes()
+        if len(data) == SECRET_KEY_BYTES:
+            return data
+        log.warning("iroh key %s has wrong length; regenerating", key_path)
+    key = secrets.token_bytes(SECRET_KEY_BYTES)
+    key_path.write_bytes(key)
+    key_path.chmod(0o600)
+    return key
+
+
+# ─────────────────────────────── transport ──────────────────────────────────
+
+
+class IrohStreamTransport:
+    """msgpack frames over one iroh bidirectional QUIC stream.
+
+    Owns the bi-stream's send/recv halves and the underlying Connection; closing
+    finishes the send side and tears the connection down. A read error means the
+    QUIC connection is gone, so `recv` surfaces it as `ConnectionResetError` —
+    the disconnect signal `PeerConnection._read_loop` expects.
+    """
+
+    def __init__(self, connection, send_stream, recv_stream):
+        self._conn = connection
+        self._send = send_stream
+        self._recv = recv_stream
+        self._send_lock = asyncio.Lock()
+
+    async def send(self, msg: dict) -> None:
+        payload = pack_msg(msg)
+        frame = LEN_HEADER.pack(len(payload)) + payload
+        # write_all already writes the whole buffer; the lock guards against
+        # interleaving two frames from concurrent senders on one stream.
+        async with self._send_lock:
+            await self._send.write_all(frame)
+
+    async def recv(self) -> dict:
+        try:
+            header = await self._recv.read_exact(LEN_HEADER.size)
+            (n,) = LEN_HEADER.unpack(bytes(header))
+            if n > MAX_FRAME_BYTES:
+                raise ValueError(f"frame too large: {n} bytes")
+            payload = await self._recv.read_exact(n)
+        except ValueError:
+            raise
+        except Exception as e:
+            # Stream/connection closed or errored — a normal hang-up.
+            log.debug("iroh recv ended: %r", e)
+            raise ConnectionResetError(str(e)) from e
+        return unpack_msg(bytes(payload))
+
+    async def close(self) -> None:
+        try:
+            await self._send.finish()
+        except Exception:
+            pass
+        try:
+            self._conn.close(0, b"bye")
+        except Exception:
+            pass
+
+
+# ──────────────────────────────── endpoint ──────────────────────────────────
+
+
+class _Handler(iroh.ProtocolHandler):
+    """ALPN handler: wrap each inbound connection in a PeerConnection and run
+    the caller's accept coroutine for the connection's lifetime."""
+
+    def __init__(self, on_accept: AcceptHandler):
+        self._on_accept = on_accept
+
+    async def accept(self, conn) -> None:
+        try:
+            remote = await conn.remote_node_id()
+            peer_id = str(remote)[:16]
+        except Exception:
+            peer_id = "?"
+        try:
+            bi = await conn.accept_bi()
+            transport = IrohStreamTransport(conn, bi.send(), bi.recv())
+        except Exception:
+            log.exception("failed to accept bi-stream from %s", peer_id)
+            return
+        # The accept coroutine must live for the connection's lifetime, else
+        # iroh tears the connection down when this returns. The caller builds
+        # its own PeerConnection (with its real handler) on the transport and
+        # blocks until the peer disconnects.
+        await self._on_accept(transport, peer_id)
+
+    async def shutdown(self) -> None:
+        pass
+
+
+class _Creator(iroh.ProtocolCreator):
+    def __init__(self, on_accept: AcceptHandler):
+        self._on_accept = on_accept
+
+    def create(self, endpoint) -> iroh.ProtocolHandler:
+        return _Handler(self._on_accept)
+
+
+class IrohEndpoint:
+    """A running iroh node: stable identity + ALPN listener + dial."""
+
+    def __init__(self, node, on_accept: AcceptHandler):
+        self._node = node
+        self._on_accept = on_accept
+
+    @classmethod
+    async def create(
+        cls,
+        on_accept: AcceptHandler,
+        secret_key: bytes | None = None,
+    ) -> "IrohEndpoint":
+        """Start an in-memory iroh node speaking the dots ALPN.
+
+        `on_accept` runs once per inbound connection, for that connection's
+        lifetime. `secret_key` (32 bytes) pins the identity/ticket; omit for an
+        ephemeral identity.
+        """
+        _set_event_loop()
+        options = iroh.NodeOptions(
+            protocols={ALPN: _Creator(on_accept)},
+        )
+        if secret_key is not None:
+            options.secret_key = secret_key
+        node = await iroh.Iroh.memory_with_options(options)
+        return cls(node, on_accept)
+
+    async def node_id(self) -> str:
+        return await self._node.net().node_id()
+
+    async def node_addr(self):
+        return await self._node.net().node_addr()
+
+    async def ticket(self) -> str:
+        """A shareable string encoding this node's address — the join token."""
+        addr = await self._node.net().node_addr()
+        return str(iroh.NodeTicket(addr))
+
+    async def connect(self, ticket_or_addr, handler) -> PeerConnection:
+        """Dial a peer by ticket string (or NodeAddr) and open one bi-stream.
+
+        Returns a live `PeerConnection` using `handler` for inbound messages on
+        this channel.
+        """
+        if isinstance(ticket_or_addr, str):
+            node_addr = iroh.NodeTicket.parse(ticket_or_addr).node_addr()
+        else:
+            node_addr = ticket_or_addr
+        endpoint = self._node.node().endpoint()
+        conn = await endpoint.connect(node_addr, ALPN)
+        bi = await conn.open_bi()
+        # Open is lazy until first write on some QUIC stacks; the caller sends
+        # HELLO immediately, which flushes it.
+        transport = IrohStreamTransport(conn, bi.send(), bi.recv())
+        try:
+            peer_id = str(await conn.remote_node_id())[:16]
+        except Exception:
+            peer_id = "hub"
+        return PeerConnection(transport, peer_id, handler)
+
+    async def shutdown(self) -> None:
+        try:
+            await self._node.node().shutdown()
+        except Exception:
+            log.debug("iroh node shutdown error", exc_info=True)

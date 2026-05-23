@@ -3,9 +3,13 @@ name = "dots"
 version = "0.0.1"
 description = "Distributed LLM inference across laptops on a LAN."
 requires-python = ">=3.11"
+# Core deps = everything the hub and chat client need, on any platform.
+# Deliberately excludes mlx so the hub installs and runs on the Linux VM
+# (and elsewhere) — the hub imports mlx lazily and never runs a model itself.
+# `iroh` is the single network transport (QUIC p2p + NAT traversal + relays);
+# it ships prebuilt wheels for macOS arm64 and linux x86_64/aarch64.
 dependencies = [
-    "mlx>=0.20.0",
-    "mlx-lm>=0.20.0",
+    "iroh>=0.35.0",
     "msgpack>=1.0.0",
     "numpy>=1.26.0",
     "rich>=13.0.0",
@@ -16,6 +20,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Apple-silicon compute workers: the MLX backend that runs model layers.
+# Install on each Mac with `uv sync --extra mac`. mlx is Apple-only and not
+# needed on the hub VM (which runs `uv sync` with no extras).
+mac = [
+    "mlx>=0.20.0",
+    "mlx-lm>=0.20.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -27,6 +38,9 @@ sim = [
 ]
 
 [tool.pytest.ini_options]
+# Only collect our own suite — keep pytest out of vendored clones under
+# _external/ (e.g. the iroh/mlx source trees used for exploration).
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

@@ -36,6 +36,7 @@ from .. import ui
 from ..accounting.ledger import Ledger
 from ..backends.registry import get_backend_runtime, SUPPORTED_BACKENDS
 from .peer import PeerConnection
+from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import Pool, resource_decl_from_hello
 from ..placement.scheduler import Placement, WorkUnit, schedule
 from ..system.util import dots_home
@@ -112,27 +113,15 @@ class Participant:
     # that model as "in use" so the hub won't evict it to free RAM for
     # another. None for compute-only workers (they don't query).
     requested_model_id: str | None = None
-    # Where this worker accepts incoming peer connections (other workers
-    # talk to it on this port for probes + the multi-worker chain).
-    # `peer_listen_port` comes from HELLO; None means chat-only.
-    # `peer_listen_host` is the routable IP the WORKER picked for itself
-    # (Tailscale CGNAT preferred, then RFC1918 LAN, then loopback).
-    peer_listen_port: int | None = None
-    peer_listen_host: str | None = None
+    # How other workers reach this worker directly for the data plane
+    # (probes + the multi-worker chain). `peer_ticket` is this worker's iroh
+    # ticket (NodeId + relay + direct addrs) advertised in HELLO; other
+    # workers dial it over iroh to hole-punch a direct connection. None means
+    # a chat-only client that contributes no compute.
+    peer_ticket: str | None = None
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
-
-    @property
-    def peer_host(self) -> str:
-        """Routable host for incoming peer connections.
-
-        Compute workers must advertise this explicitly. Inferring it
-        from the hub connection is wrong for cross-machine loopback cases.
-        """
-        if not self.peer_listen_host:
-            raise RuntimeError("worker did not advertise peer_listen_host")
-        return self.peer_listen_host
 
     @property
     def short_id(self) -> str:
@@ -189,6 +178,14 @@ class Hub:
         # Set after the model is loaded AND the server is listening — useful
         # for callers (tests, embeddings) that want a deterministic ready signal.
         self.started = asyncio.Event()
+        # The iroh node the hub listens on, and its stable shareable ticket.
+        # Both set in start(); the ticket is how workers/clients reach the hub.
+        self._endpoint: IrohEndpoint | None = None
+        self._ticket: str | None = None
+        # Optional shared join token. When set (via DOTS_JOIN_TOKEN), every
+        # connecting worker/client must present a matching token in HELLO —
+        # a second factor on top of knowing the ticket. Unset ⇒ ticket only.
+        self._join_token: str | None = os.environ.get("DOTS_JOIN_TOKEN") or None
         self._topology_gen = 0
         # Closed credit-unit economy. Persists per-account totals + a
         # per-turn audit log. Tests pass an explicit path so they don't
@@ -314,14 +311,31 @@ class Hub:
         # of its own. Queriers name the model on each request and the hub
         # spins up a deployment per id across the pool on demand.
         ui.notice("hub starting · model-agnostic (queriers choose the model)")
-        server = await asyncio.start_server(self._on_connect, self.host, self.port)
-        addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-        ui.notice(f"hub listening on {addrs} — waiting for workers to join")
+        # The hub listens over iroh: a QUIC node with a stable identity (its
+        # persisted secret key → stable NodeId → stable ticket). Workers and
+        # clients dial that ticket from anywhere; iroh hole-punches or relays.
+        self._endpoint = await IrohEndpoint.create(
+            on_accept=self._serve_peer,
+            secret_key=load_or_create_secret_key("hub"),
+        )
+        self._ticket = await self._endpoint.ticket()
+        node_id = await self._endpoint.node_id()
+        ui.notice(f"hub node {node_id[:16]}… listening (iroh) — share this ticket to join:")
+        ui.notice(f"  {self._ticket}")
+        # Also write the ticket to a file so operators/automation can read it
+        # back unwrapped (terminal/journald line-wrapping mangles the printed
+        # one). This is the canonical place to fetch the join ticket.
+        try:
+            ticket_path = dots_home() / "hub_ticket.txt"
+            ticket_path.write_text(self._ticket + "\n")
+            ui.notice(f"  (also written to {ticket_path})")
+        except Exception:
+            log.debug("could not write hub ticket file", exc_info=True)
         self.started.set()
 
-        # OpenAI-compatible HTTP API alongside the worker TCP server. On
-        # by default; users can pass --http-port 0 to disable. Lives only
-        # for as long as the hub does; cancellation tears it down.
+        # OpenAI-compatible HTTP API alongside the iroh listener. On by
+        # default; users can pass --http-port 0 to disable. Lives only for as
+        # long as the hub does; cancellation tears it down.
         http_task: asyncio.Task | None = None
         if self.http_port:
             from ..app.api import HttpApi
@@ -329,10 +343,12 @@ class Hub:
             api = HttpApi(self, host=self.host, port=self.http_port)
             http_task = asyncio.create_task(api.serve_forever())
 
+        # The iroh node runs its own accept loop in the background; just stay
+        # alive until cancelled, then tear everything down.
         try:
-            await server.serve_forever()
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
-            server.close()
+            await self._endpoint.shutdown()
             if http_task is not None:
                 http_task.cancel()
                 try:
@@ -683,11 +699,14 @@ class Hub:
 
     # ─────────────────────────── connection lifecycle ────────────────────
 
-    async def _on_connect(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        peer_addr = writer.get_extra_info("peername")
-        addr_str = f"{peer_addr[0]}:{peer_addr[1]}"
+    async def _serve_peer(self, transport: IrohStreamTransport, peer_id: str) -> None:
+        """Serve one inbound iroh connection for its whole lifetime.
+
+        Called by the iroh ALPN listener with the connection's transport and a
+        short peer id. Builds the RPC channel, does the HELLO handshake,
+        registers the participant, and returns when the peer disconnects.
+        """
+        addr_str = peer_id
 
         # worker_id is resolved from the HELLO payload below. Until then
         # we can't route worker-initiated messages (prompt / reset), so the
@@ -698,6 +717,14 @@ class Hub:
         async def handler(msg: dict) -> dict | None:
             kind = msg.get("kind")
             if kind == "hello":
+                # Optional shared join token (second factor on top of the
+                # ticket). Enforced only when the hub is configured with one.
+                if self._join_token is not None and (
+                    msg.get("join_token") != self._join_token
+                ):
+                    if not hello_fut.done():
+                        hello_fut.set_exception(PermissionError("bad join token"))
+                    return {"kind": "error", "error": "unauthorized: bad join token"}
                 if not hello_fut.done():
                     hello_fut.set_result(msg)
                 # The hub advertises no model: the querier names it on
@@ -737,18 +764,26 @@ class Hub:
                     return {"kind": "error", "error": "model_id is required"}
                 await self.ensure_model_started(model_id)
                 return self._status_response_for(wid, model_id=model_id)
+            if kind == "credits":
+                # Ledger query over the control channel (the iroh equivalent
+                # of the HTTP /v1/credits endpoint, for NATed clients).
+                return {"kind": "credits", "data": self.ledger.as_dict()}
             return {
                 "kind": "error",
                 "error": f"unexpected worker-initiated kind: {kind}",
             }
 
-        conn = PeerConnection(reader, writer, addr_str, handler)
+        conn = PeerConnection(transport, addr_str, handler)
         log.info("connection from %s", addr_str)
 
         try:
             hello_msg = await asyncio.wait_for(hello_fut, timeout=HELLO_TIMEOUT_SEC)
         except asyncio.TimeoutError:
             log.warning("connection from %s: HELLO timeout, dropping", addr_str)
+            await conn.close()
+            return
+        except PermissionError:
+            log.warning("connection from %s: rejected (bad join token)", addr_str)
             await conn.close()
             return
 
@@ -780,21 +815,15 @@ class Hub:
                     await stale.conn.close()
                 except Exception:
                     pass
-            peer_port_raw = hello_msg.get("peer_listen_port")
-            peer_port = (
-                int(peer_port_raw)
-                if isinstance(peer_port_raw, int) and peer_port_raw > 0
+            advertised_ticket = hello_msg.get("peer_ticket")
+            peer_ticket = (
+                advertised_ticket
+                if isinstance(advertised_ticket, str) and advertised_ticket
                 else None
             )
-            advertised_host = hello_msg.get("peer_listen_host")
-            peer_host = (
-                advertised_host
-                if isinstance(advertised_host, str) and advertised_host
-                else None
-            )
-            if compute and (peer_port is None or peer_host is None):
+            if compute and peer_ticket is None:
                 log.warning(
-                    "compute worker %s did not advertise peer host/port; dropping",
+                    "compute worker %s did not advertise peer_ticket; dropping",
                     worker_id,
                 )
                 await conn.close()
@@ -809,8 +838,7 @@ class Hub:
                 account_id=account_id,
                 account_alias=account_alias,
                 requested_model_id=req_model,
-                peer_listen_port=peer_port,
-                peer_listen_host=peer_host,
+                peer_ticket=peer_ticket,
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
@@ -1535,18 +1563,13 @@ class Hub:
                     chain_payload: list[dict] = []
                     for worker_id, start, end, _ in deployment.current_placement[1:]:
                         p = next((p for p in candidates if p.id == worker_id), None)
-                        if (
-                            p is None
-                            or p.peer_listen_port is None
-                            or p.peer_listen_host is None
-                        ):
+                        if p is None or p.peer_ticket is None:
                             chain_payload = []
                             break
                         chain_payload.append(
                             {
                                 "worker_id": worker_id,
-                                "host": p.peer_host,
-                                "port": int(p.peer_listen_port),
+                                "ticket": p.peer_ticket,
                                 "layer_start": int(start),
                                 "layer_end": int(end),
                             }
@@ -1620,14 +1643,13 @@ class Hub:
         chain_payload: list[dict] = []
         for worker_id, start, end in segs[1:]:
             p = next((p for p in candidates if p.id == worker_id), None)
-            if p is None or p.peer_listen_port is None or p.peer_listen_host is None:
+            if p is None or p.peer_ticket is None:
                 # Chain peer unreachable with this placement.
                 return head, geom.n_layers, []
             chain_payload.append(
                 {
                     "worker_id": worker_id,
-                    "host": p.peer_host,
-                    "port": int(p.peer_listen_port),
+                    "ticket": p.peer_ticket,
                     "layer_start": start,
                     "layer_end": end,
                 }
@@ -1791,11 +1813,7 @@ class Hub:
         # Now that this worker can serve, kick off pairwise RTT probes
         # between it and every other ready compute worker. Each pair
         # produces one cell in `pool_view.latency`.
-        if (
-            p.compute
-            and p.peer_listen_port is not None
-            and p.peer_listen_host is not None
-        ):
+        if p.compute and p.peer_ticket is not None:
             asyncio.create_task(self._probe_pairs_for(worker_id))
         return None
 
@@ -1814,8 +1832,7 @@ class Hub:
                 me is None
                 or not me.compute
                 or not me.ready
-                or me.peer_listen_host is None
-                or me.peer_listen_port is None
+                or me.peer_ticket is None
             ):
                 return
             others = [
@@ -1825,22 +1842,15 @@ class Hub:
                     p.id != worker_id
                     and p.compute
                     and p.ready
-                    and p.peer_listen_port is not None
-                    and p.peer_listen_host is not None
+                    and p.peer_ticket is not None
                 )
             ]
         if not others:
             return
         tasks = []
         for other in others:
-            tasks.append(
-                self._probe_one(
-                    me.id, other.id, other.peer_host, other.peer_listen_port
-                )
-            )
-            tasks.append(
-                self._probe_one(other.id, me.id, me.peer_host, me.peer_listen_port)
-            )
+            tasks.append(self._probe_one(me.id, other.id, other.peer_ticket))
+            tasks.append(self._probe_one(other.id, me.id, me.peer_ticket))
         await asyncio.gather(*tasks, return_exceptions=True)
         # Single mesh print once every probe in this batch settled.
         self._log_latency_mesh()
@@ -1849,8 +1859,7 @@ class Hub:
         self,
         source_id: str,
         target_id: str,
-        target_host: str,
-        target_port: int,
+        target_ticket: str,
     ) -> None:
         p = self.participants.get(source_id)
         if p is None:
@@ -1859,8 +1868,7 @@ class Hub:
             resp = await p.conn.call(
                 "probe_peer",
                 target_id=target_id,
-                target_host=target_host,
-                target_port=int(target_port),
+                target_ticket=target_ticket,
                 samples=3,
             )
         except Exception:
@@ -1890,11 +1898,7 @@ class Hub:
             (
                 p
                 for p in self.participants.values()
-                if (
-                    p.compute
-                    and p.peer_listen_port is not None
-                    and p.peer_listen_host is not None
-                )
+                if (p.compute and p.peer_ticket is not None)
             ),
             key=lambda p: p.id,
         )

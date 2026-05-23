@@ -165,7 +165,7 @@ class ChatUI:
         worker = self.worker
         await self._wait_for_pool_ready(worker)
 
-        hub_addr = f"{worker.hub_host}:{worker.hub_port}"
+        hub_addr = f"hub:{worker.hub_ticket[:12]}…"
         ui.banner(
             worker.requested_model_id or worker.model_id, hub_addr, layer_range=None
         )
@@ -352,14 +352,18 @@ class ChatUI:
 
     async def _print_usage(self) -> None:
         worker = self.worker
-        url = f"http://{worker.hub_host}:8080/v1/credits"
+        # Ask the hub for the ledger over the iroh control channel — workers
+        # behind NAT can't reach the hub's HTTP API by host:port.
+        if worker.conn is None:
+            self._console.print(
+                Text(f"{INDENT}/usage unavailable: not connected", style="red"),
+            )
+            return
         try:
-            import json
-            import urllib.request
-
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=3.0) as r:
-                data = json.loads(r.read())
+            resp = await worker.conn.call("credits")
+            if resp.get("kind") != "credits":
+                raise RuntimeError(resp.get("error", "credits query failed"))
+            data = resp.get("data", {})
         except Exception as e:
             self._console.print(
                 Text(f"{INDENT}/usage failed: {e}", style="red"),

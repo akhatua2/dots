@@ -1,0 +1,51 @@
+name: Deploy hub
+
+# Auto-deploy the hub to the GCP VM whenever hub-relevant code lands on main.
+# The VM pulls the new code, re-syncs deps, and restarts the systemd service.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dots/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "deploy/**"
+      - ".github/workflows/deploy-hub.yml"
+  workflow_dispatch: {}
+
+# Keyless auth to GCP via Workload Identity Federation (no long-lived secret).
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-hub
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to dots-hub
+        env:
+          ZONE: us-west1-a
+          INSTANCE: dots-hub
+        run: |
+          gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
+            --command 'set -euo pipefail; \
+              cd ~/dots && \
+              git fetch origin && \
+              git reset --hard origin/main && \
+              ~/.local/bin/uv sync && \
+              sudo systemctl restart dots-hub && \
+              echo "deployed $(git rev-parse --short HEAD)"'
