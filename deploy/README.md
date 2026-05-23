@@ -36,9 +36,13 @@ The ticket already gates access (you must know it to connect). For a second
 factor you can set a join token the hub requires from every client:
 
 ```bash
-echo 'DOTS_JOIN_TOKEN=some-long-secret' >> ~/dots/deploy/hub.env
+mkdir -p ~/.dots
+echo 'DOTS_JOIN_TOKEN=some-long-secret' >> ~/.dots/hub.env
 sudo systemctl restart dots-hub
 ```
+
+Clients then connect with that token in their environment:
+`DOTS_JOIN_TOKEN=some-long-secret dots chat <TICKET>`.
 
 ## 2. One-time CI/CD setup (Workload Identity Federation — keyless)
 

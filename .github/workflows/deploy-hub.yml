@@ -36,16 +36,24 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      # Private repo: ship the checked-out code to the VM (it has no GitHub
+      # creds) rather than having the VM pull. A clean tarball -> scp ->
+      # extract -> uv sync -> restart the systemd service.
       - name: Deploy to dots-hub
         env:
           ZONE: us-west1-a
           INSTANCE: dots-hub
         run: |
-          gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
-            --command 'set -euo pipefail; \
-              cd ~/dots && \
-              git fetch origin && \
-              git reset --hard origin/main && \
-              ~/.local/bin/uv sync && \
-              sudo systemctl restart dots-hub && \
-              echo "deployed $(git rev-parse --short HEAD)"'
+          tar --exclude=./.git --exclude=./_external -czf /tmp/dots.tar.gz .
+          gcloud compute scp /tmp/dots.tar.gz "$INSTANCE:~/dots.tar.gz" \
+            --zone="$ZONE" --quiet
+          gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet --command '
+            set -euo pipefail
+            export PATH=$HOME/.local/bin:$PATH
+            rm -rf ~/dots && mkdir -p ~/dots && tar xzf ~/dots.tar.gz -C ~/dots
+            cd ~/dots && uv sync
+            sudo cp deploy/dots-hub.service /etc/systemd/system/dots-hub.service
+            sudo sed -i -e "s|__USER__|$USER|g" -e "s|__APP_DIR__|$HOME/dots|g" -e "s|__HOME__|$HOME|g" /etc/systemd/system/dots-hub.service
+            sudo systemctl daemon-reload
+            sudo systemctl restart dots-hub
+            echo "deployed"'
