@@ -29,10 +29,10 @@ from ..backends.registry import get_backend_runtime
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
 from .peer import PeerConnection
+from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import resource_decl_to_hello_field
 from ..placement.scheduler import ResourceDecl
 from ..system.util import (
-    best_peer_listen_host,
     load_or_create_account,
     load_or_create_identity,
     save_last_hub,
@@ -40,6 +40,12 @@ from ..system.util import (
 from ..system.resources import discover_worker_limits
 
 log = logging.getLogger("dots.worker")
+
+
+async def _ignore_inbound(_msg: dict) -> None:
+    """Handler for outgoing-only peer channels: they only receive responses to
+    our own calls, never inbound requests, so nothing to serve."""
+    return None
 
 
 class PoolNotReadyError(RuntimeError):
@@ -57,8 +63,7 @@ class Worker:
 
     def __init__(
         self,
-        hub_host: str,
-        hub_port: int,
+        hub_ticket: str,
         one_shot: str | None = None,
         max_tokens: int = 128,
         headless: bool = False,
@@ -69,8 +74,9 @@ class Worker:
         account_alias: str | None = None,
         requested_model_id: str | None = None,
     ):
-        self.hub_host = hub_host
-        self.hub_port = hub_port
+        # The hub's shareable iroh ticket — the "join token". The worker dials
+        # this over iroh (NAT-traversed) rather than a host:port.
+        self.hub_ticket = hub_ticket
         self.one_shot = one_shot
         self.max_tokens = max_tokens
         self.headless = headless
@@ -120,12 +126,12 @@ class Worker:
         # range/head".
         self._loaded_assignment: tuple[str, str, int, int | None, bool] | None = None
         self._loaded_assignments: dict[str, tuple[str, str, int, int | None, bool]] = {}
-        # Peer server: compute workers also listen for incoming peer
-        # connections so the hub can ask them to probe each other (and so
-        # the future multi-worker pipeline can pass hidden states without
-        # routing through the hub).
-        self._peer_server: asyncio.Server | None = None
-        self._peer_listen_port: int | None = None
+        # The worker's own iroh node. It serves two roles: dialing the hub,
+        # and accepting incoming peer connections from other workers (so the
+        # multi-worker pipeline can pass hidden states directly, peer-to-peer).
+        # Its ticket is advertised to the hub in HELLO as `peer_ticket`.
+        self._endpoint: IrohEndpoint | None = None
+        self._peer_ticket: str | None = None
         # Outgoing connections to chain peers (only populated when we're
         # the head worker in a multi-worker placement). Keyed by peer
         # worker_id; cached so the per-token hot path doesn't reconnect.
@@ -207,36 +213,35 @@ class Worker:
             except Exception:
                 pass
         self._peer_conns.clear()
-        if self._peer_server is not None:
-            try:
-                self._peer_server.close()
-                await self._peer_server.wait_closed()
-            except Exception:
-                pass
-            self._peer_server = None
         if self.conn is not None:
             try:
                 await self.conn.close()
             except Exception:
                 pass
             self.conn = None
+        if self._endpoint is not None:
+            try:
+                await self._endpoint.shutdown()
+            except Exception:
+                pass
+            self._endpoint = None
 
     async def connect(self) -> None:
-        """Open TCP, send HELLO, wait for the hub's WELCOME."""
-        # Compute workers stand up a small peer-listen server before they
-        # phone the hub, so they can be probed and (in the future) be a
-        # target of worker-to-worker `compute_unit` calls.
-        if self.compute and self._peer_server is None:
-            await self._start_peer_server()
+        """Create our iroh node, dial the hub by ticket, HELLO, await WELCOME."""
+        # The worker's iroh node does double duty: it dials the hub, and it
+        # accepts inbound connections from other workers for the data plane.
+        # A stable secret key keyed on our identity gives us a stable NodeId
+        # (and ticket) across reconnects.
+        if self._endpoint is None:
+            self._endpoint = await IrohEndpoint.create(
+                on_accept=self._serve_incoming_peer,
+                secret_key=load_or_create_secret_key(f"worker-{self.identity}"),
+            )
+            if self.compute:
+                self._peer_ticket = await self._endpoint.ticket()
 
-        ui.info(f"connecting to hub at {self.hub_host}:{self.hub_port}…")
-        reader, writer = await asyncio.open_connection(self.hub_host, self.hub_port)
-        self.conn = PeerConnection(
-            reader,
-            writer,
-            f"{self.hub_host}:{self.hub_port}",
-            self._handle,
-        )
+        ui.info("connecting to hub (iroh)…")
+        self.conn = await self._endpoint.connect(self.hub_ticket, self._handle)
         # Build the worker's bounded resource declaration. Defaults are
         # conservative fractions of available machine resources; hard caps
         # come from CLI/env policy.
@@ -258,15 +263,11 @@ class Worker:
             "compute": bool(self.compute),
             "resources": resource_decl_to_hello_field(decl),
         }
-        if self._peer_listen_port is not None:
-            hello_payload["peer_listen_port"] = self._peer_listen_port
-            # Tell the hub the routable IP it should advertise to other
-            # workers for chain-forwarding. Connect-from address breaks
-            # cross-machine setups: a local worker connects to the hub via
-            # loopback, so other workers get told "reach me at 127.0.0.1"
-            # which from THEIR view points at themselves, not at this
-            # worker.
-            hello_payload["peer_listen_host"] = best_peer_listen_host()
+        if self._peer_ticket is not None:
+            # Our iroh ticket: how other workers dial us directly for the
+            # data plane. The hub hands it to chain peers; iroh hole-punches
+            # or relays, so it works across NATs with no routable IP.
+            hello_payload["peer_ticket"] = self._peer_ticket
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
         # A chat client tells the hub which model it intends to query so
@@ -281,10 +282,10 @@ class Worker:
         # client supplies its own `requested_model_id`; a compute worker
         # leaves it unset and loads whatever the hub later assigns.
         ui.info(f"hub accepted (model: {self.requested_model_id or 'assigned by hub'})")
-        # Persist this hub address so the next `dots chat` / `dots worker`
+        # Persist this hub ticket so the next `dots chat` / `dots worker`
         # invocation can default to it when the user omits the argument.
         try:
-            save_last_hub(f"{self.hub_host}:{self.hub_port}")
+            save_last_hub(self.hub_ticket)
         except Exception:
             log.debug("failed to persist last_hub", exc_info=True)
 
@@ -294,33 +295,15 @@ class Worker:
         # _host_load_task is kicked off inside `_handle_load_units`.
         await self._welcome.wait()
 
-    # ────────────────────── peer-server lifecycle ───────────────────────
+    # ────────────────────── incoming peer connections ───────────────────
 
-    async def _start_peer_server(self) -> None:
-        """Bind a small TCP server for incoming peer connections.
-
-        The OS picks a free port. We bind to all interfaces so peers on
-        the same LAN / tailnet can reach us. The hub learns this port
-        from HELLO's `peer_listen_port` and tells other workers to use
-        it when probing.
-        """
-        self._peer_server = await asyncio.start_server(
-            self._on_peer_connect,
-            host="0.0.0.0",
-            port=0,
-        )
-        sock = self._peer_server.sockets[0]
-        self._peer_listen_port = sock.getsockname()[1]
-        log.info("peer server listening on port %d", self._peer_listen_port)
-
-    async def _on_peer_connect(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+    async def _serve_incoming_peer(
+        self, transport: IrohStreamTransport, peer_id: str
     ) -> None:
-        addr = writer.get_extra_info("peername")
-        addr_str = f"{addr[0]}:{addr[1]}" if addr else "?"
-        conn = PeerConnection(reader, writer, addr_str, self._handle_peer_msg)
+        """Serve one inbound peer connection (another worker dialing us over
+        iroh for the data plane) until it disconnects. Invoked by our iroh
+        endpoint's ALPN listener."""
+        conn = PeerConnection(transport, peer_id, self._handle_peer_msg)
         try:
             await conn._closed.wait()
         finally:
@@ -375,24 +358,18 @@ class Worker:
             "hidden": runtime.encode_hidden(hidden_out),
         }
 
-    async def _get_or_open_peer(
-        self, peer_id: str, host: str, port: int
-    ) -> PeerConnection:
-        """Cached outgoing connection to a peer worker. Workers in the
-        head role open one of these per downstream chain member and reuse
-        it for every hidden-state hop across all tokens."""
+    async def _get_or_open_peer(self, peer_id: str, ticket: str) -> PeerConnection:
+        """Cached outgoing iroh connection to a peer worker. Workers in the
+        head role open one per downstream chain member (dialing the peer's
+        ticket) and reuse it for every hidden-state hop across all tokens."""
         existing = self._peer_conns.get(peer_id)
         if existing is not None and not existing._closed.is_set():
             return existing
-        reader, writer = await asyncio.open_connection(host, port)
-        # Peer-initiated connections only RECEIVE responses, never serve
+        if self._endpoint is None:
+            raise RuntimeError("worker iroh endpoint not started")
+        # Outgoing chain connections only RECEIVE responses, never serve
         # requests, so the handler is a no-op.
-        conn = PeerConnection(
-            reader,
-            writer,
-            f"{host}:{port}",
-            lambda _m: None,
-        )
+        conn = await self._endpoint.connect(ticket, _ignore_inbound)
         self._peer_conns[peer_id] = conn
         return conn
 
@@ -527,7 +504,7 @@ class Worker:
         ui.notice("disconnected")
 
     async def _run_one_shot(self) -> None:
-        hub_addr = f"{self.hub_host}:{self.hub_port}"
+        hub_addr = f"hub:{self.hub_ticket[:12]}…"
         # Wait briefly for the host to load if we're also a compute worker;
         # otherwise we're a chat-only client and there's nothing to wait for.
         if self.compute:
@@ -904,11 +881,10 @@ class Worker:
         peer_conns: list[tuple[PeerConnection, int, int]] = []
         for entry in chain:
             peer_id = str(entry["worker_id"])
-            host_addr = str(entry["host"])
-            port = int(entry["port"])
+            ticket = str(entry["ticket"])
             start = int(entry["layer_start"])
             end = int(entry["layer_end"])
-            conn = await self._get_or_open_peer(peer_id, host_addr, port)
+            conn = await self._get_or_open_peer(peer_id, ticket)
             peer_conns.append((conn, start, end))
 
         async def forward_through_chain(hidden):
@@ -939,24 +915,23 @@ class Worker:
         import time as _time
 
         target_id = msg.get("target_id")
-        target_host = msg.get("target_host")
-        target_port = msg.get("target_port")
+        target_ticket = msg.get("target_ticket")
         samples = int(msg.get("samples", 3))
-        if not target_host or not target_port:
+        if not target_ticket:
             return {
                 "kind": "probe_result",
                 "target_id": target_id,
-                "error": "missing target host/port",
+                "error": "missing target ticket",
+            }
+        if self._endpoint is None:
+            return {
+                "kind": "probe_result",
+                "target_id": target_id,
+                "error": "iroh endpoint not started",
             }
         rtts: list[float] = []
         try:
-            reader, writer = await asyncio.open_connection(target_host, target_port)
-            conn = PeerConnection(
-                reader,
-                writer,
-                f"{target_host}:{target_port}",
-                lambda _m: None,
-            )
+            conn = await self._endpoint.connect(target_ticket, _ignore_inbound)
             for _ in range(samples):
                 t0 = _time.perf_counter_ns()
                 try:

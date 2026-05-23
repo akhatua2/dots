@@ -72,26 +72,19 @@ from .system.util import (
 )
 
 
-def _parse_hub_addr(s: str) -> tuple[str, int]:
-    host, _, port = s.rpartition(":")
-    if not host or not port:
-        raise argparse.ArgumentTypeError(f"expected host:port, got {s!r}")
-    return host, int(port)
-
-
-def _resolve_hub_addr(arg: str | None) -> tuple[str, int]:
-    """Parse a host:port string, falling back to the last-used hub written
-    to ~/.dots/last_hub by a previous successful connect."""
+def _resolve_hub_ticket(arg: str | None) -> str:
+    """Return the hub's iroh ticket — from the argument, else the last-used
+    ticket written to ~/.dots/last_hub by a previous successful connect."""
     if arg is not None:
-        return _parse_hub_addr(arg)
+        return arg.strip()
     saved = load_last_hub()
     if saved is None:
         sys.stderr.write(
-            "no hub address given and no remembered hub in ~/.dots/last_hub\n"
-            "usage: dots chat HOST:PORT   (or)   dots worker HOST:PORT\n"
+            "no hub ticket given and no remembered hub in ~/.dots/last_hub\n"
+            "usage: dots chat <HUB_TICKET>   (or)   dots worker <HUB_TICKET>\n"
         )
         sys.exit(2)
-    return _parse_hub_addr(saved)
+    return saved.strip()
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -566,13 +559,12 @@ def main() -> None:
             sys.stdout.write(f"email set to: {args.email}\n")
             return
 
-    host, port = _resolve_hub_addr(args.hub)
+    hub_ticket = _resolve_hub_ticket(args.hub)
     from .distributed.worker import Worker
 
     if args.cmd == "serve":
         client = Worker(
-            host,
-            port,
+            hub_ticket,
             headless=True,
             compute=False,
             identity=str(uuid.uuid4()),
@@ -603,7 +595,7 @@ def main() -> None:
         companion: Optional[subprocess.Popen] = None
         if not args.no_worker:
             companion = _spawn_companion_worker(
-                f"{host}:{port}",
+                hub_ticket,
                 max_ram_gb=args.max_ram,
             )
             if companion is not None:
@@ -617,8 +609,7 @@ def main() -> None:
         # `dots worker` process; if we reused it here the hub would think
         # they're the same registration and kick the worker out.
         worker = Worker(
-            host,
-            port,
+            hub_ticket,
             one_shot=args.prompt,
             max_tokens=args.max_tokens,
             headless=False,
@@ -634,7 +625,7 @@ def main() -> None:
             if companion is not None:
                 _shutdown_companion_worker(companion)
     elif args.cmd == "worker":
-        worker = Worker(host, port, headless=True, max_load_gb=args.max_ram)
+        worker = Worker(hub_ticket, headless=True, max_load_gb=args.max_ram)
         # Record our PID so a sibling `dots chat` knows there's already a
         # local worker and doesn't auto-spawn a duplicate.
         write_worker_pid(os.getpid())
