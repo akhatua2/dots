@@ -9,6 +9,11 @@ the wrapper + the per-token fallback deterministically (no real model).
 
 from __future__ import annotations
 
+import pytest
+
+# mlx is Apple-only; skip where it isn't installed (e.g. the Linux PR runner).
+pytest.importorskip("mlx")
+
 from dots.backends.base import _PerTokenDetokenizer
 from dots.backends.mlx.runtime import _MlxStreamDetokenizer
 

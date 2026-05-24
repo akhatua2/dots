@@ -11,8 +11,13 @@ function against real `mx.argmax` instead of routing through them.
 
 from __future__ import annotations
 
-import mlx.core as mx
+import pytest
 
+# mlx is Apple-only; skip this whole module where it isn't installed (e.g. the
+# Linux CI test gate). Mac dev machines run it normally.
+pytest.importorskip("mlx")
+
+import mlx.core as mx
 from dots.backends.mlx.runtime import _apply_repetition_penalty
 
 

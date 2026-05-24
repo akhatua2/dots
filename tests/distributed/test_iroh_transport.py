@@ -38,8 +38,10 @@ async def test_iroh_rpc_round_trip_and_notify():
         server_conns.append(conn)
         await conn._closed.wait()
 
-    server = await IrohEndpoint.create(on_accept)
-    client = await IrohEndpoint.create(_noop)  # create() requires a handler
+    # discovery=False: stay offline (connect via the ticket's direct loopback
+    # addresses, no n0 DNS/relay network calls).
+    server = await IrohEndpoint.create(on_accept, discovery=False)
+    client = await IrohEndpoint.create(_noop, discovery=False)
     ticket = await server.ticket()
 
     client_conn = await asyncio.wait_for(client.connect(ticket, _noop), timeout=30)
@@ -68,11 +70,11 @@ async def test_iroh_ticket_is_stable_with_persistent_key():
 
     # Same secret key -> same NodeId -> stable, shareable identity.
     key = load_or_create_secret_key("test-stable")
-    ep1 = await IrohEndpoint.create(_noop, secret_key=key)
+    ep1 = await IrohEndpoint.create(_noop, secret_key=key, discovery=False)
     id1 = await ep1.node_id()
     await ep1.shutdown()
 
-    ep2 = await IrohEndpoint.create(_noop, secret_key=key)
+    ep2 = await IrohEndpoint.create(_noop, secret_key=key, discovery=False)
     id2 = await ep2.node_id()
     await ep2.shutdown()
 
