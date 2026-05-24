@@ -35,6 +35,7 @@ from .pool import resource_decl_to_hello_field
 from ..placement.scheduler import ResourceDecl
 from ..system.geo import lookup_coarse_geo
 from ..system.util import (
+    detect_device,
     load_or_create_account,
     load_or_create_identity,
     save_last_hub,
@@ -264,6 +265,9 @@ class Worker:
         # slow) just omits it and never blocks joining. Runs off-loop so the
         # network call doesn't stall the event loop.
         geo = await asyncio.to_thread(lookup_coarse_geo)
+        # Device type/name for the pool map (e.g. "MacBook Pro · Apple M1 Pro").
+        # Off-loop like geo; best-effort, never blocks joining.
+        device = await asyncio.to_thread(detect_device)
         hello_payload: dict = {
             "worker_id": self.identity,
             "account_id": self.account_id,
@@ -272,6 +276,8 @@ class Worker:
         }
         if geo:
             hello_payload["geo"] = geo
+        if device:
+            hello_payload["device"] = device
         if self._peer_ticket is not None:
             # Our iroh ticket: how other workers dial us directly for the
             # data plane. The hub hands it to chain peers; iroh hole-punches

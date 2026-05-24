@@ -11,6 +11,46 @@ import subprocess
 import uuid
 
 
+def detect_device() -> str | None:
+    """Best-effort human device name for the pool map, e.g. "MacBook Pro · Apple M1 Pro".
+
+    macOS only. Uses `system_profiler` for the marketing model name (reliable
+    across Apple-silicon models, where `hw.model` is the opaque "MacN,N") plus
+    the chip. Returns None off macOS or on any failure — never fatal.
+    """
+    if platform.system() != "Darwin":
+        return None
+    model = None
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPHardwareDataType"],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        ).stdout
+        for line in out.splitlines():
+            if "Model Name:" in line:
+                model = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    chip = None
+    try:
+        chip = (
+            subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout.strip()
+            or None
+        )
+    except Exception:
+        pass
+    parts = [p for p in (model, chip) if p]
+    return " · ".join(parts) if parts else None
+
+
 def free_ram_gb() -> float:
     """Available RAM in gigabytes.
 
