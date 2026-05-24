@@ -240,7 +240,19 @@ class IrohEndpoint:
             if self._looks_like_node_id(t):
                 node_addr = iroh.NodeAddr(iroh.PublicKey.from_string(t), None, [])
             else:
-                node_addr = iroh.NodeTicket.parse(t).node_addr()
+                try:
+                    node_addr = iroh.NodeTicket.parse(t).node_addr()
+                except Exception as e:
+                    hint = (
+                        " — that looks like a join token; pass the hub TICKET "
+                        "(starts with 'node…') here and set the token via "
+                        "DOTS_JOIN_TOKEN instead"
+                        if t.startswith("dots_")
+                        else ""
+                    )
+                    raise ValueError(
+                        f"not a valid hub ticket or NodeId: {t[:24]}…{hint}"
+                    ) from e
         else:
             node_addr = ticket_or_addr
         endpoint = self._node.node().endpoint()
