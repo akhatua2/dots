@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "dots",
+  "version": "0.1.0",
+  "identifier": "computer.dots.app",
+  "build": {
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "dots",
+        "width": 920,
+        "height": 700,
+        "minWidth": 560,
+        "minHeight": 440
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"],
+    "category": "Utility",
+    "shortDescription": "Run an LLM across your Macs",
+    "externalBin": []
+  }
+}

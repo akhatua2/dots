@@ -1,0 +1,338 @@
+@import 'tailwindcss';
+
+/*
+  dots — minimal, light, editorial (shared with the web app).
+  Clean white canvas, near-black ink, hairline borders, generous whitespace.
+  One restrained accent (burnt sienna) for active/live signals; green only for
+  "online". Mono (IBM Plex Mono) is the instrument voice for labels/data;
+  Hanken Grotesk carries readable prose.
+*/
+@theme {
+  --color-bg: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f3;
+  --color-line: #ececeb;
+  --color-line-2: #dcdcda;
+  --color-ink: #1a1a1a;
+  --color-dim: #8a8a87;
+  --color-faint: #b6b5b1;
+  --color-signal: #c6571f; /* burnt sienna — the one accent */
+  --color-signal-dim: #ecd2bf;
+  --color-live: #2f8f5b; /* green — online only */
+  --color-warn: #bd3b2c;
+
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  --font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  background-color: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Native window chrome: header/rail drag the window; interactive bits don't. */
+.drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Instrument micro-label: uppercase mono with wide tracking. */
+.label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-dim);
+}
+
+/* Blinking caret for streaming output. */
+@keyframes blink {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  56%,
+  100% {
+    opacity: 0;
+  }
+}
+.cursor {
+  display: inline-block;
+  width: 0.46em;
+  height: 1.02em;
+  margin-left: 2px;
+  translate: 0 0.14em;
+  background: var(--color-signal);
+  animation: blink 1.1s step-end infinite;
+}
+
+/* Soft pulse for the live status dot — opacity only, no shadow (stays flat). */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-2);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: var(--color-signal);
+  color: var(--color-bg);
+}
+
+/* Worker map markers: a location pin whose head is a conic green/red ring
+   (contributed vs used, set inline) around a white disc with a device icon.
+   At globe scale it collapses to a small dot; .map-zoomed expands it. */
+.node-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+}
+.node-marker {
+  /* compact (globe) default: a small dot */
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  padding: 2px; /* ring thickness */
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  box-sizing: border-box;
+  transition:
+    width 0.15s ease,
+    height 0.15s ease;
+}
+.node-marker-inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  display: grid;
+  place-items: center;
+}
+.node-marker-inner svg {
+  display: none; /* hidden at globe scale */
+  width: 15px;
+  height: 15px;
+}
+.node-tip {
+  display: none; /* hidden at globe scale */
+}
+
+/* Zoomed in → full pin: bigger head, visible device icon, pointed tip. */
+.map-zoomed .node-marker {
+  width: 32px;
+  height: 32px;
+  padding: 3px;
+}
+.map-zoomed .node-marker-inner svg {
+  display: block;
+}
+.map-zoomed .node-tip {
+  display: block;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid var(--color-ink);
+  margin-top: -2px;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.3));
+}
+
+/* Hover popup — strip Mapbox's default chrome, render our own card. */
+.node-popup .mapboxgl-popup-content {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+.node-popup .mapboxgl-popup-tip {
+  display: none;
+}
+.node-pop {
+  min-width: 192px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-line-2);
+  border-radius: 12px;
+  padding: 11px 13px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+  font-family: var(--font-sans);
+  cursor: default;
+}
+.node-pop-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.node-pop-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-ink);
+}
+.node-pop-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--color-faint);
+}
+.node-pop-status.on {
+  color: var(--color-live);
+}
+.node-pop-meta {
+  margin-top: 3px;
+}
+.node-pop-bar {
+  display: flex;
+  height: 5px;
+  margin: 9px 0 7px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--color-surface-2);
+}
+.node-pop-bar i {
+  display: block;
+  height: 100%;
+}
+.node-pop-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--color-ink);
+}
+.node-pop-stats b {
+  font-weight: 600;
+}
+.node-pop-cu {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-dim);
+}
+.node-pop-idle {
+  font-size: 12px;
+  color: var(--color-faint);
+}
+
+/* Rendered markdown in assistant messages — editorial, restrained. */
+.prose-dots > :first-child {
+  margin-top: 0;
+}
+.prose-dots > :last-child {
+  margin-bottom: 0;
+}
+.prose-dots p {
+  margin: 0.6em 0;
+}
+.prose-dots h1,
+.prose-dots h2,
+.prose-dots h3 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1em 0 0.4em;
+}
+.prose-dots h1 {
+  font-size: 1.3em;
+}
+.prose-dots h2 {
+  font-size: 1.15em;
+}
+.prose-dots h3 {
+  font-size: 1.03em;
+}
+.prose-dots ul,
+.prose-dots ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.prose-dots li {
+  margin: 0.25em 0;
+}
+.prose-dots ul {
+  list-style: disc;
+}
+.prose-dots ol {
+  list-style: decimal;
+}
+.prose-dots a {
+  color: var(--color-signal);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-dots strong {
+  font-weight: 600;
+}
+.prose-dots blockquote {
+  border-left: 2px solid var(--color-line-2);
+  margin: 0.6em 0;
+  padding-left: 0.9em;
+  color: var(--color-dim);
+}
+/* Inline + block code in IBM Plex Mono on a faint fill. */
+.prose-dots code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--color-surface-2);
+  padding: 0.12em 0.36em;
+  border-radius: 5px;
+}
+.prose-dots pre {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  padding: 0.85em 1em;
+  overflow-x: auto;
+  margin: 0.7em 0;
+}
+.prose-dots pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+/* GFM tables. */
+.prose-dots table {
+  border-collapse: collapse;
+  margin: 0.7em 0;
+  font-size: 0.92em;
+  display: block;
+  overflow-x: auto;
+}
+.prose-dots th,
+.prose-dots td {
+  border: 1px solid var(--color-line-2);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.prose-dots th {
+  background: var(--color-surface-2);
+  font-weight: 600;
+}

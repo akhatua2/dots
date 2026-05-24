@@ -1,0 +1,15 @@
+{
+  "name": "dots-macos",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "ui:install": "cd ui && npm install",
+    "ui:build": "cd ui && npm run build",
+    "tauri": "tauri",
+    "dev": "npm run ui:build && DOTS_BRIDGE_CMD=\"$PWD/../../core/.venv/bin/python $PWD/backend/bridge.py\" tauri dev",
+    "build": "npm run ui:build && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

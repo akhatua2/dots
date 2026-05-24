@@ -1,0 +1,9 @@
+# dots macOS app — single source of truth for non-secret defaults.
+# Edit values HERE; never hardcode them in code. Each can be overridden per-run
+# by the matching env var. Secrets (DOTS_JOIN_TOKEN, Mapbox) live in .env, not here.
+
+# Model the chat/worker uses.            override: DOTS_UI_MODEL
+model = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
+# Hub HTTP API base (worker map data).   override: DOTS_HUB_HTTP
+hub_http = "https://delpha-perse-granville.ngrok-free.dev"
