@@ -72,19 +72,31 @@ from .system.util import (
 )
 
 
+# The dots hub's permanent NodeId (its iroh public key). Baked in so anyone can
+# just run `dots chat` with no address — iroh discovery resolves the NodeId to
+# the hub's current location. Override by passing a ticket/NodeId explicitly.
+DEFAULT_HUB = "16abb79c0b61706f178f734e8d071b813a8badc3982579c06c85638736e2870f"
+
+
+def _looks_like_hub(s: str) -> bool:
+    """A hub address is either a ticket (base32, starts with 'node') or a bare
+    64-hex NodeId. Guards against stale/garbage ~/.dots/last_hub values."""
+    s = s.strip().lower()
+    return s.startswith("node") or (
+        len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+    )
+
+
 def _resolve_hub_ticket(arg: str | None) -> str:
-    """Return the hub's iroh ticket — from the argument, else the last-used
-    ticket written to ~/.dots/last_hub by a previous successful connect."""
+    """Hub address: explicit arg → last successful hub → the baked-in default
+    hub NodeId (resolved via iroh discovery). So `dots chat` works with no
+    argument out of the box."""
     if arg is not None:
         return arg.strip()
     saved = load_last_hub()
-    if saved is None:
-        sys.stderr.write(
-            "no hub ticket given and no remembered hub in ~/.dots/last_hub\n"
-            "usage: dots chat <HUB_TICKET>   (or)   dots worker <HUB_TICKET>\n"
-        )
-        sys.exit(2)
-    return saved.strip()
+    if saved and _looks_like_hub(saved):
+        return saved.strip()
+    return DEFAULT_HUB
 
 
 def _configure_logging(verbose: bool) -> None:
