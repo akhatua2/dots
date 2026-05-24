@@ -33,6 +33,7 @@ from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import resource_decl_to_hello_field
 from ..placement.scheduler import ResourceDecl
+from ..system.geo import lookup_coarse_geo
 from ..system.util import (
     load_or_create_account,
     load_or_create_identity,
@@ -258,12 +259,19 @@ class Worker:
             io_read_gbps=self.resource_limits.io_read_gbps,
             io_write_gbps=self.resource_limits.io_write_gbps,
         )
+        # Best-effort: advertise our coarse location + public IP so the hub can
+        # show a map of the pool. Opt-out via DOTS_NO_GEO; any failure (offline,
+        # slow) just omits it and never blocks joining. Runs off-loop so the
+        # network call doesn't stall the event loop.
+        geo = await asyncio.to_thread(lookup_coarse_geo)
         hello_payload: dict = {
             "worker_id": self.identity,
             "account_id": self.account_id,
             "compute": bool(self.compute),
             "resources": resource_decl_to_hello_field(decl),
         }
+        if geo:
+            hello_payload["geo"] = geo
         if self._peer_ticket is not None:
             # Our iroh ticket: how other workers dial us directly for the
             # data plane. The hub hands it to chain peers; iroh hole-punches
