@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "real_model: tests that run a real backend/model and skip when hardware or cached/network access is unavailable",
+    "simulation: simulation/benchmark scenarios (minutes), not unit tests; excluded from the PR gate, run with -m simulation",
 ]
 filterwarnings = [
     "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",

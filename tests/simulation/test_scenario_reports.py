@@ -23,6 +23,11 @@ from tests.simulation.scenarios import (
     worker,
 )
 
+# These are simulations / benchmarks, not unit tests — they model large pools
+# over time and take minutes. Excluded from the PR gate via `simulation`; run
+# them explicitly with `-m simulation` (or on a schedule).
+pytestmark = pytest.mark.simulation
+
 
 def test_single_turn_choice_report_measures_known_suboptimality_gap():
     comparison = compare_single_turn_choice()
@@ -37,6 +42,7 @@ def test_single_turn_choice_report_measures_known_suboptimality_gap():
 
 
 def test_real_world_large_pool_run_generates_metrics_report():
+    # Heavy simulation: 200 workers × 100 users, ~3 min (module marked slow).
     pool = run_large_dynamic_pool(n_workers=200, n_users=100)
     report = build_report(
         pool,

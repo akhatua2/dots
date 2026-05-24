@@ -31,4 +31,4 @@ jobs:
       # test gets its own DOTS_HOME etc.), so -n auto distributes test
       # functions automatically and self-balances — no manual shard bookkeeping.
       - name: Tests
-        run: uv run pytest tests -m "not real_model" -n auto -q
+        run: uv run pytest tests -m "not real_model and not simulation" -n auto -q
