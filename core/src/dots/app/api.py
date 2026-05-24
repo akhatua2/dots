@@ -105,6 +105,7 @@ class HttpApi:
         app.router.add_get("/v1/credits", self._credits_all)
         app.router.add_get("/v1/credits/{account_id}", self._credits_one)
         app.router.add_get("/v1/pool/nodes", self._pool_nodes)
+        app.router.add_get("/v1/events", self._events)
         app.router.add_get("/v1/download/worker", self._download_worker)
         app.router.add_get("/healthz", self._healthz)
         self._runner = web.AppRunner(app, access_log=None)
@@ -156,18 +157,20 @@ class HttpApi:
 
         return web.json_response(asdict(acc) | {"balance": acc.balance})
 
-    async def _pool_nodes(self, _request: web.Request) -> web.Response:
-        """List the compute workers in the pool, with their advertised location.
-
-        Powers the worker map: each entry carries the coarse geo (and public IP)
-        the worker chose to advertise, plus what it's doing right now.
-        """
-        nodes = [
+    def _pool_nodes_data(self) -> list[dict]:
+        """The pool-map node list — shared by /v1/pool/nodes and the /v1/events
+        stream. Each entry carries the coarse geo + device the worker advertised
+        and what it's doing right now."""
+        return [
             {
                 "id": p.id,
+                # account_id is the user identity (for per-user contribution);
+                # alias is display-only and not unique across users.
+                "account_id": p.account_id,
                 "alias": p.account_alias,
                 "ready": p.ready,
                 "backend": p.backend,
+                "device": p.device,
                 "model": p.requested_model_id,
                 "layer_range": list(p.layer_range) if p.layer_range else None,
                 "geo": p.geo,
@@ -175,7 +178,39 @@ class HttpApi:
             for p in self.hub.participants.values()
             if p.compute
         ]
-        return web.json_response({"nodes": nodes})
+
+    async def _pool_nodes(self, _request: web.Request) -> web.Response:
+        """List the compute workers in the pool, with their advertised location."""
+        return web.json_response({"nodes": self._pool_nodes_data()})
+
+    async def _events(self, request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events stream of pool + credit state for live UIs.
+
+        Lets clients (e.g. the macOS app) render a near-live worker map and
+        contribution without polling: hold one connection, receive a snapshot
+        on connect and then on a short cadence. Token-gated like the rest of /v1.
+        """
+        resp = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+                **_CORS_HEADERS,
+            }
+        )
+        await resp.prepare(request)
+        try:
+            while True:
+                payload = {
+                    "nodes": self._pool_nodes_data(),
+                    "credits": self.hub.ledger.as_dict(),
+                }
+                await resp.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                await asyncio.sleep(1.0)
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionError):
+            pass
+        return resp
 
     async def _download_worker(self, request: web.Request) -> web.StreamResponse:
         """Serve the pre-built macOS arm64 worker binary.

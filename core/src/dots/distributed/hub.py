@@ -95,6 +95,14 @@ class ModelDeployment:
     last_used_at: float = 0.0
 
 
+def _sanitize_device(d: object) -> str | None:
+    """Validate a worker-advertised device string: non-empty str, length-capped.
+    The hub never trusts unbounded client input."""
+    if isinstance(d, str) and d.strip():
+        return d.strip()[:80]
+    return None
+
+
 @dataclass
 class Participant:
     """A connected worker (or chat-only client) and its hub-side state."""
@@ -125,6 +133,9 @@ class Participant:
     # country}. Best-effort and opt-out on the worker side; the hub never sees
     # the worker's IP except what it chooses to send here.
     geo: dict | None = None
+    # Worker-advertised device name for the pool map, e.g. "MacBook Pro · Apple
+    # M1 Pro". Best-effort; None if the worker didn't send one.
+    device: str | None = None
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
@@ -845,6 +856,7 @@ class Hub:
                 requested_model_id=req_model,
                 peer_ticket=peer_ticket,
                 geo=sanitize_geo(hello_msg.get("geo")),
+                device=_sanitize_device(hello_msg.get("device")),
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
