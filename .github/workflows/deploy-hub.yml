@@ -6,10 +6,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "dots/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "deploy/**"
+      - "core/**"
+      - "infra/**"
       - ".github/workflows/deploy-hub.yml"
   workflow_dispatch: {}
 
@@ -48,16 +46,19 @@ jobs:
           # email and targets the wrong home dir.
           TARGET_USER: arpan
         run: |
-          tar --exclude=./.git --exclude=./_external --exclude=./web \
-            --exclude=./desktop -czf /tmp/dots.tar.gz .
+          # The hub only needs core/ (the engine) and infra/ (the service unit);
+          # apps/, docs/, _external/ are client/dev-only.
+          tar --exclude=./.git --exclude=./_external --exclude=./apps \
+            --exclude=./docs -czf /tmp/dots.tar.gz .
           gcloud compute scp /tmp/dots.tar.gz "$TARGET_USER@$INSTANCE:~/dots.tar.gz" \
             --zone="$ZONE" --quiet
           gcloud compute ssh "$TARGET_USER@$INSTANCE" --zone="$ZONE" --quiet --command '
             set -euo pipefail
             rm -rf ~/dots && mkdir -p ~/dots && tar xzf ~/dots.tar.gz -C ~/dots
-            cd ~/dots && ~/.local/bin/uv sync
-            sudo cp deploy/dots-hub.service /etc/systemd/system/dots-hub.service
-            sudo sed -i -e "s|__USER__|$USER|g" -e "s|__APP_DIR__|$HOME/dots|g" -e "s|__HOME__|$HOME|g" /etc/systemd/system/dots-hub.service
+            # pyproject.toml now lives in core/ — sync and run the hub from there.
+            cd ~/dots/core && ~/.local/bin/uv sync
+            sudo cp ~/dots/infra/dots-hub.service /etc/systemd/system/dots-hub.service
+            sudo sed -i -e "s|__USER__|$USER|g" -e "s|__APP_DIR__|$HOME/dots/core|g" -e "s|__HOME__|$HOME|g" /etc/systemd/system/dots-hub.service
             sudo systemctl daemon-reload
             sudo systemctl restart dots-hub
             echo "deployed"'

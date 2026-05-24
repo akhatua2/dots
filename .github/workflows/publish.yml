@@ -9,6 +9,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: pypi
+    defaults:
+      run:
+        working-directory: core  # the Python package lives here
     permissions:
       id-token: write  # trusted publishing — no token needed in secrets
 

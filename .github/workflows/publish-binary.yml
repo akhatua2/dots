@@ -12,6 +12,9 @@ permissions:
 jobs:
   build:
     runs-on: macos-14  # Apple Silicon arm64
+    defaults:
+      run:
+        working-directory: core  # the engine + packaging spec live here
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +27,7 @@ jobs:
         run: uv sync --extra mac --extra dev
 
       - name: Build binary
-        run: uv run pyinstaller worker.spec --distpath dist/
+        run: uv run pyinstaller packaging/worker.spec --distpath dist/
 
       - name: Smoke test
         run: ./dist/dots-worker --help
@@ -33,13 +36,13 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/dots-worker
+          files: core/dist/dots-worker
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
         with:
           name: dots-worker-macos-arm64
-          path: dist/dots-worker
+          path: core/dist/dots-worker
           retention-days: 7
 
   deploy-to-hub:

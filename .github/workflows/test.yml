@@ -10,6 +10,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core        # the Python engine lives here now
     steps:
       - uses: actions/checkout@v4
 
@@ -17,7 +20,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true            # cache the dependency store across runs
-          cache-dependency-glob: uv.lock
+          cache-dependency-glob: core/uv.lock
 
       # Hub/client deps only (no 'mac' extra) — mlx is Apple-only; mlx tests
       # skip via pytest.importorskip.
@@ -25,7 +28,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Lint (ruff)
-        run: uv run ruff check dots tests
+        run: uv run ruff check src tests
 
       # Parallel across all runner cores. The suite is isolation-clean (each
       # test gets its own DOTS_HOME etc.), so -n auto distributes test

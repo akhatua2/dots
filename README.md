@@ -18,4 +18,13 @@ Your Mac will appear on the pool map once it connects.
 
 ## Development
 
+This is a monorepo:
+
+| Dir | What |
+|-----|------|
+| [`core/`](core/) | the Python engine — hub, worker, chat, CLI, HTTP API |
+| [`apps/`](apps/) | end-user clients (`web/`, `macos/`) |
+| [`infra/`](infra/) | hosted-hub deploy (systemd, bootstrap) |
+| [`docs/`](docs/) | docs + design notes |
+
 See [`docs/development.md`](docs/development.md) for setup, architecture, and contribution guidelines.
