@@ -39,6 +39,7 @@ dev = [
     # distribution, self-balancing, no manual shard assignment.
     "pytest-xdist>=3.5",
     "ruff>=0.8",
+    "pyinstaller>=6.0",
 ]
 sim = [
     "matplotlib>=3.7",

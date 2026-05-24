@@ -92,10 +92,16 @@ def load_dotenv_into_env() -> str | None:
         from dotenv import load_dotenv
     except ImportError:
         return None
+    import sys
+
     candidates = [
         pathlib.Path.cwd() / ".env",
         dots_home() / ".env",
         pathlib.Path(__file__).resolve().parent.parent / ".env",
+        # When running as a PyInstaller binary, pick up hub.env sitting
+        # next to the executable (e.g. both in ~/Downloads/).
+        pathlib.Path(sys.executable).parent / "hub.env",
+        pathlib.Path(sys.executable).parent / ".env",
     ]
     for path in candidates:
         if path.is_file():

@@ -40,6 +40,7 @@ from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_k
 from .pool import Pool, resource_decl_from_hello
 from ..placement.scheduler import Placement, WorkUnit, schedule
 from ..system.util import dots_home
+from ..system.geo import sanitize_geo
 from ..placement.work_units import ModelGeometry, units_for_geometry
 from ..placement.model_metadata import fetch_model_geometry
 
@@ -120,6 +121,10 @@ class Participant:
     # workers dial it over iroh to hole-punch a direct connection. None means
     # a chat-only client that contributes no compute.
     peer_ticket: str | None = None
+    # Coarse, worker-advertised location for the pool map: {ip, lat, lng, city,
+    # country}. Best-effort and opt-out on the worker side; the hub never sees
+    # the worker's IP except what it chooses to send here.
+    geo: dict | None = None
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
@@ -839,6 +844,7 @@ class Hub:
                 account_alias=account_alias,
                 requested_model_id=req_model,
                 peer_ticket=peer_ticket,
+                geo=sanitize_geo(hello_msg.get("geo")),
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:

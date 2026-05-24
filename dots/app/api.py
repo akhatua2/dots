@@ -104,6 +104,7 @@ class HttpApi:
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/v1/credits", self._credits_all)
         app.router.add_get("/v1/credits/{account_id}", self._credits_one)
+        app.router.add_get("/v1/pool/nodes", self._pool_nodes)
         app.router.add_get("/healthz", self._healthz)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -153,6 +154,27 @@ class HttpApi:
         from dataclasses import asdict
 
         return web.json_response(asdict(acc) | {"balance": acc.balance})
+
+    async def _pool_nodes(self, _request: web.Request) -> web.Response:
+        """List the compute workers in the pool, with their advertised location.
+
+        Powers the worker map: each entry carries the coarse geo (and public IP)
+        the worker chose to advertise, plus what it's doing right now.
+        """
+        nodes = [
+            {
+                "id": p.id,
+                "alias": p.account_alias,
+                "ready": p.ready,
+                "backend": p.backend,
+                "model": p.requested_model_id,
+                "layer_range": list(p.layer_range) if p.layer_range else None,
+                "geo": p.geo,
+            }
+            for p in self.hub.participants.values()
+            if p.compute
+        ]
+        return web.json_response({"nodes": nodes})
 
     async def _healthz(self, _request: web.Request) -> web.Response:
         ready = any(d.pool_ready.is_set() for d in self.hub.deployments.values())

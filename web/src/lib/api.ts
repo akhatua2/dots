@@ -70,6 +70,27 @@ export const listModels = (conn: Conn, signal?: AbortSignal) =>
 export const getCredits = (conn: Conn, signal?: AbortSignal) =>
   getJson<Credits>(conn, '/v1/credits', signal)
 
+export interface Geo {
+  ip: string | null
+  lat: number
+  lng: number
+  city: string | null
+  country: string | null
+}
+
+export interface Node {
+  id: string
+  alias: string | null
+  ready: boolean
+  backend: string | null
+  model: string | null
+  layer_range: [number, number] | null
+  geo: Geo | null
+}
+
+export const getNodes = (conn: Conn, signal?: AbortSignal) =>
+  getJson<{ nodes: Node[] }>(conn, '/v1/pool/nodes', signal).then((r) => r.nodes)
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string

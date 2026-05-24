@@ -13,9 +13,15 @@ export interface Conn {
 const LS_KEY = 'dots.conn'
 
 function defaultApi(): string {
-  // Baked at build time (VITE_DOTS_API); empty in dev so the Connect screen
-  // can ask for it.
+  // Baked at build time (VITE_DOTS_API). The deployed web app ships pointing at
+  // its hub so users never type an address.
   return (import.meta.env.VITE_DOTS_API as string | undefined)?.trim() || ''
+}
+
+function defaultToken(): string {
+  // Baked at build time (VITE_DOTS_TOKEN) so a plain visit just works — no
+  // paste screen. An invite link still overrides it.
+  return (import.meta.env.VITE_DOTS_TOKEN as string | undefined)?.trim() || ''
 }
 
 function normalizeApi(api: string): string {
@@ -39,7 +45,7 @@ export function loadConn(): Conn | null {
       return conn
     }
   }
-  // 2) Previously saved.
+  // 2) Previously saved in this browser.
   const raw = localStorage.getItem(LS_KEY)
   if (raw) {
     try {
@@ -48,6 +54,14 @@ export function loadConn(): Conn | null {
     } catch {
       /* ignore corrupt storage */
     }
+  }
+  // 3) Baked-in default (this build ships pointing at its hub).
+  const api = defaultApi()
+  const token = defaultToken()
+  if (api && token) {
+    const conn = { api: normalizeApi(api), token }
+    saveConn(conn)
+    return conn
   }
   return null
 }

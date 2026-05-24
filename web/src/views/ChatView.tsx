@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listModels, streamChat, ApiError, type ChatMessage } from '../lib/api'
 import type { Conn } from '../lib/config'
@@ -13,7 +13,7 @@ export function ChatView({ conn }: { conn: Conn }) {
     queryKey: ['models', conn.api],
     queryFn: ({ signal }) => listModels(conn, signal),
   })
-  const [model, setModel] = useState<string>('')
+  const model = models.data?.[0] ?? ''
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -21,13 +21,8 @@ export function ChatView({ conn }: { conn: Conn }) {
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Default to the first served model once we know them.
   useEffect(() => {
-    if (!model && models.data?.length) setModel(models.data[0])
-  }, [models.data, model])
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
   async function send() {
@@ -37,12 +32,7 @@ export function ChatView({ conn }: { conn: Conn }) {
     setInput('')
 
     const userMsg: Msg = { id: crypto.randomUUID(), role: 'user', content: text }
-    const asstMsg: Msg = {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: '',
-      streaming: true,
-    }
+    const asstMsg: Msg = { id: crypto.randomUUID(), role: 'assistant', content: '', streaming: true }
     const history = [...messages, userMsg]
     setMessages([...history, asstMsg])
     setBusy(true)
@@ -61,117 +51,121 @@ export function ChatView({ conn }: { conn: Conn }) {
       })
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        // user stopped — keep whatever streamed so far
+        /* keep partial */
       } else if (err instanceof ApiError && err.status === 503) {
-        setError('The pool has no compute workers online yet. Try again shortly.')
-      } else if (err instanceof ApiError && err.status === 401) {
-        setError('Your token was rejected. Reconnect with a valid invite.')
+        setError('No compute nodes online yet.')
       } else {
         setError((err as Error).message)
       }
     } finally {
-      setMessages((m) =>
-        m.map((x) => (x.id === asstMsg.id ? { ...x, streaming: false } : x)),
-      )
+      setMessages((m) => m.map((x) => (x.id === asstMsg.id ? { ...x, streaming: false } : x)))
       setBusy(false)
       abortRef.current = null
     }
   }
 
-  function stop() {
-    abortRef.current?.abort()
+  const composer = (
+    <Composer
+      value={input}
+      onChange={setInput}
+      onSend={send}
+      onStop={() => abortRef.current?.abort()}
+      busy={busy}
+      disabled={!model}
+    />
+  )
+
+  // Empty: a single centered input. Active: transcript + input pinned bottom.
+  if (messages.length === 0) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6">
+        <div className="w-full max-w-2xl">{composer}</div>
+      </div>
+    )
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-border px-6 py-3">
-        <h1 className="text-sm font-medium">Chat</h1>
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="rounded-lg border border-border bg-panel-2 px-3 py-1.5 text-xs text-muted outline-none focus:border-accent"
-        >
-          {!models.data?.length && <option>loading models…</option>}
-          {models.data?.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-      </header>
-
+    <div className="flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-6 py-6">
-          {messages.length === 0 && (
-            <div className="mt-24 text-center text-muted">
-              <div className="mx-auto mb-4 size-12 rounded-2xl bg-gradient-to-br from-accent to-accent-2" />
-              <p className="text-lg text-text">Ask the pool anything</p>
-              <p className="mt-1 text-sm">
-                Your prompt runs across every Mac contributing right now.
-              </p>
-            </div>
-          )}
+        <div className="mx-auto max-w-2xl space-y-6 px-6 py-8">
           {messages.map((m) => (
-            <Bubble key={m.id} msg={m} />
+            <Entry key={m.id} msg={m} />
           ))}
-          {error && (
-            <div className="my-3 rounded-lg border border-bad/40 bg-bad/10 px-4 py-2 text-sm text-bad">
-              {error}
-            </div>
-          )}
+          {error && <div className="font-mono text-[12px] text-warn">{error}</div>}
         </div>
       </div>
-
-      <div className="border-t border-border px-6 py-4">
-        <div className="mx-auto flex max-w-2xl items-end gap-2">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                send()
-              }
-            }}
-            rows={1}
-            placeholder="Message the pool…"
-            className="max-h-40 flex-1 resize-none rounded-xl border border-border bg-panel-2 px-4 py-3 text-sm outline-none focus:border-accent"
-          />
-          {busy ? (
-            <button
-              onClick={stop}
-              className="rounded-xl border border-border bg-panel-2 px-4 py-3 text-sm text-muted hover:text-text"
-            >
-              Stop
-            </button>
-          ) : (
-            <button
-              onClick={send}
-              disabled={!input.trim() || !model}
-              className="rounded-xl bg-gradient-to-br from-accent to-accent-2 px-5 py-3 text-sm font-medium text-white disabled:opacity-40"
-            >
-              Send
-            </button>
-          )}
-        </div>
+      <div className="px-6 pb-5">
+        <div className="mx-auto max-w-2xl">{composer}</div>
       </div>
     </div>
   )
 }
 
-function Bubble({ msg }: { msg: Msg }) {
-  const isUser = msg.role === 'user'
+function Entry({ msg }: { msg: Msg }) {
+  if (msg.role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[80%] whitespace-pre-wrap rounded-3xl bg-surface-2 px-4 py-2.5 font-sans text-[15px] leading-relaxed text-ink">
+          {msg.content}
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className={`mb-5 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-          isUser
-            ? 'bg-gradient-to-br from-accent to-accent-2 text-white'
-            : 'bg-panel-2 text-text'
-        }`}
-      >
-        {msg.content}
-        {msg.streaming && !msg.content && <span className="text-muted">▍</span>}
+    <div className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed text-ink">
+      {msg.content}
+      {msg.streaming && <span className="cursor" />}
+    </div>
+  )
+}
+
+function Composer({
+  value,
+  onChange,
+  onSend,
+  onStop,
+  busy,
+  disabled,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onSend: () => void
+  onStop: () => void
+  busy: boolean
+  disabled: boolean
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = '0px'
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  }, [value])
+
+  return (
+    <div className="rounded-3xl border border-line-2 bg-bg p-2 transition-shadow focus-within:border-faint">
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            onSend()
+          }
+        }}
+        rows={1}
+        placeholder="Message the pool"
+        className="max-h-52 w-full resize-none bg-transparent px-3 py-2 font-sans text-[15px] text-ink outline-none placeholder:text-faint"
+      />
+      <div className="flex justify-end pt-1 pr-1">
+        <button
+          onClick={busy ? onStop : onSend}
+          disabled={!busy && (!value.trim() || disabled)}
+          className="grid size-8 shrink-0 place-items-center rounded-full bg-signal text-bg transition-opacity hover:opacity-90 disabled:bg-line disabled:text-faint"
+        >
+          {busy ? '■' : '↑'}
+        </button>
       </div>
     </div>
   )
