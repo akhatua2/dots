@@ -34,13 +34,14 @@ from dataclasses import dataclass, field, replace
 
 from .. import ui
 from ..accounting.ledger import Ledger
-from ..backends.registry import get_backend_runtime, SUPPORTED_BACKENDS
+from ..backends.registry import SUPPORTED_BACKENDS
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import Pool, resource_decl_from_hello
 from ..placement.scheduler import Placement, WorkUnit, schedule
 from ..system.util import dots_home
 from ..placement.work_units import ModelGeometry, units_for_geometry
+from ..placement.model_metadata import fetch_model_geometry
 
 log = logging.getLogger("dots.hub")
 
@@ -364,25 +365,24 @@ class Hub:
         candidates = self._backend_candidates_from_pool()
         if not candidates:
             return
-        errors: list[str] = []
-        for backend_name in candidates:
-            try:
-                metadata = await get_backend_runtime(backend_name).metadata_for(
-                    self.model_id
-                )
-            except Exception as e:
-                errors.append(f"{backend_name}: {e}")
-                continue
-            self._selected_backend = backend_name
-            self._geometry = metadata.geometry
-            self.n_layers = metadata.geometry.n_layers
+        # Geometry is backend-neutral and read straight from the HF config —
+        # the hub has no mlx/mlx_lm, so it must NOT go through a model runtime.
+        # The "backend" is only which worker runtime will load the weights;
+        # take the first the pool offers.
+        try:
+            geometry = await asyncio.to_thread(
+                fetch_model_geometry, self.model_id
+            )
+        except Exception as e:
+            ui.error(
+                f"could not load model metadata for '{self.model_id}': {e}. "
+                f"check the model id — common typos include 30B (use 32B) "
+                f"or omitted '-4bit' / '-Instruct' suffixes."
+            )
             return
-        ui.error(
-            f"could not load model metadata for '{self.model_id}' with any "
-            f"available worker backend ({'; '.join(errors)}). "
-            f"check the model id — common typos include 30B (use 32B) "
-            f"or omitted '-4bit' / '-Instruct' suffixes."
-        )
+        self._selected_backend = candidates[0]
+        self._geometry = geometry
+        self.n_layers = geometry.n_layers
 
     def _backend_candidates_from_pool(self) -> list[str]:
         offered: set[str] = set()

@@ -175,6 +175,41 @@ def geometry_with_safetensors_metadata(
     )
 
 
+def fetch_model_geometry(model_id: str) -> ModelGeometry:
+    """Backend-neutral model geometry, read straight from the HF `config.json`.
+
+    This lets the hub plan placement WITHOUT a model runtime — crucially, the
+    hub has no mlx/mlx_lm (it's Apple-only), so it can't go through the mlx
+    backend to read geometry. We download just `config.json` via
+    huggingface_hub, parse layers/hidden/vocab, and enrich with exact
+    safetensors byte counts when the HF metadata exposes them (best-effort;
+    config-only geometry is still enough for placement to proceed).
+    """
+    import json
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        cfg_path = hf_hub_download(model_id, "config.json")
+        with open(cfg_path) as f:
+            config = json.load(f)
+    except Exception as e:
+        raise ModelMetadataError(
+            f"could not fetch config.json for {model_id!r}: {e}"
+        ) from e
+
+    geom = geometry_from_config(config)
+    if geom is None:
+        raise ModelMetadataError(
+            f"config.json for {model_id!r} is missing layers/hidden/vocab"
+        )
+    try:
+        geom = geometry_with_safetensors_metadata(model_id, geom)
+    except ModelMetadataError:
+        pass  # exact per-tensor sizes unavailable; config-only geometry stands
+    return geom
+
+
 def geometry_with_local_safetensors_metadata(
     model_path: str | Path,
     base: ModelGeometry,
