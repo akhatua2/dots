@@ -9,7 +9,10 @@ export function ContributePanel({ conn, onClose }: { conn: Conn; onClose: () => 
     try {
       // Fetch the binary from the hub (token-gated, no public hosting needed).
       const res = await fetch(`${conn.api}/v1/download/worker`, {
-        headers: { Authorization: `Bearer ${conn.token}` },
+        headers: {
+          Authorization: `Bearer ${conn.token}`,
+          'ngrok-skip-browser-warning': 'true',
+        },
       })
       if (!res.ok) throw new Error(`hub returned ${res.status}`)
       const blob = await res.blob()

@@ -43,8 +43,12 @@ export class ApiError extends Error {
   }
 }
 
-function authHeaders(conn: Conn): HeadersInit {
-  return conn.token ? { Authorization: `Bearer ${conn.token}` } : {}
+function authHeaders(conn: Conn): Record<string, string> {
+  // ngrok-skip-browser-warning suppresses ngrok's free-tier interstitial so
+  // fetch() gets the real JSON/stream instead of an HTML click-through page.
+  const h: Record<string, string> = { 'ngrok-skip-browser-warning': 'true' }
+  if (conn.token) h.Authorization = `Bearer ${conn.token}`
+  return h
 }
 
 async function getJson<T>(conn: Conn, path: string, signal?: AbortSignal): Promise<T> {
