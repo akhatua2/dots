@@ -21,12 +21,13 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # No baked-in hub URL or token — the app is invite-only. Access comes
+      # from the invite link fragment (#t=<token>&api=<hub-url>), which is
+      # saved to localStorage on first open. A bare visit shows "open your
+      # invite link".
       - name: Build
         working-directory: web
         run: npm run build
-        env:
-          VITE_DOTS_API: ${{ secrets.VITE_DOTS_API }}
-          VITE_DOTS_TOKEN: ${{ secrets.VITE_DOTS_TOKEN }}
 
       - name: Deploy to Vercel
         working-directory: web
