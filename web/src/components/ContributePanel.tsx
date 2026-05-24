@@ -1,34 +1,41 @@
 import { useState } from 'react'
 import type { Conn } from '../lib/config'
 
-// Latest release binary URL — update when the binary name changes.
-const BINARY_URL =
-  'https://github.com/akhatua2/dots/releases/latest/download/dots-worker'
-
 export function ContributePanel({ conn, onClose }: { conn: Conn; onClose: () => void }) {
-  const [step, setStep] = useState<'idle' | 'downloading' | 'done'>('idle')
+  const [step, setStep] = useState<'idle' | 'downloading' | 'done' | 'error'>('idle')
 
-  function download() {
+  async function download() {
     setStep('downloading')
+    try {
+      // Fetch the binary from the hub (token-gated, no public hosting needed).
+      const res = await fetch(`${conn.api}/v1/download/worker`, {
+        headers: { Authorization: `Bearer ${conn.token}` },
+      })
+      if (!res.ok) throw new Error(`hub returned ${res.status}`)
+      const blob = await res.blob()
 
-    // 1. Download the token config file — binary reads this from its folder.
-    const cfg = `DOTS_JOIN_TOKEN=${conn.token}\n`
-    const cfgBlob = new Blob([cfg], { type: 'text/plain' })
-    const cfgUrl = URL.createObjectURL(cfgBlob)
-    const cfgLink = document.createElement('a')
-    cfgLink.href = cfgUrl
-    cfgLink.download = 'hub.env'
-    cfgLink.click()
-    URL.revokeObjectURL(cfgUrl)
-
-    // 2. Trigger the pre-built binary download from GitHub Releases.
-    setTimeout(() => {
+      // 1. Binary
+      const binUrl = URL.createObjectURL(blob)
       const binLink = document.createElement('a')
-      binLink.href = BINARY_URL
+      binLink.href = binUrl
       binLink.download = 'dots-worker'
       binLink.click()
+      URL.revokeObjectURL(binUrl)
+
+      // 2. Token config — binary reads hub.env from its own directory.
+      const cfg = `DOTS_JOIN_TOKEN=${conn.token}\n`
+      const cfgBlob = new Blob([cfg], { type: 'text/plain' })
+      const cfgUrl = URL.createObjectURL(cfgBlob)
+      const cfgLink = document.createElement('a')
+      cfgLink.href = cfgUrl
+      cfgLink.download = 'hub.env'
+      cfgLink.click()
+      URL.revokeObjectURL(cfgUrl)
+
       setStep('done')
-    }, 400)
+    } catch {
+      setStep('error')
+    }
   }
 
   return (
@@ -61,6 +68,18 @@ export function ContributePanel({ conn, onClose }: { conn: Conn; onClose: () => 
 
         {step === 'downloading' && (
           <p className="font-sans text-[14px] text-dim">Downloading…</p>
+        )}
+
+        {step === 'error' && (
+          <div className="space-y-3 text-center">
+            <p className="font-sans text-[14px] text-warn">Download failed.</p>
+            <button
+              onClick={() => setStep('idle')}
+              className="font-mono text-[11px] text-dim hover:text-ink"
+            >
+              ← try again
+            </button>
+          </div>
         )}
 
         {step === 'done' && (

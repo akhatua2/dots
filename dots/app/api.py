@@ -105,6 +105,7 @@ class HttpApi:
         app.router.add_get("/v1/credits", self._credits_all)
         app.router.add_get("/v1/credits/{account_id}", self._credits_one)
         app.router.add_get("/v1/pool/nodes", self._pool_nodes)
+        app.router.add_get("/v1/download/worker", self._download_worker)
         app.router.add_get("/healthz", self._healthz)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -175,6 +176,27 @@ class HttpApi:
             if p.compute
         ]
         return web.json_response({"nodes": nodes})
+
+    async def _download_worker(self, _request: web.Request) -> web.Response:
+        """Serve the pre-built macOS arm64 worker binary.
+
+        The binary lives at ~/.dots/worker/dots-worker on the hub server and
+        is uploaded there by the publish-binary CI workflow. Gated by the join
+        token so only invited contributors can download it.
+        """
+        import pathlib
+
+        binary_path = pathlib.Path.home() / ".dots" / "worker" / "dots-worker"
+        if not binary_path.is_file():
+            return _error(404, "worker binary not available yet")
+        return web.FileResponse(
+            binary_path,
+            headers={
+                "Content-Disposition": 'attachment; filename="dots-worker"',
+                "Content-Type": "application/octet-stream",
+                **_CORS_HEADERS,
+            },
+        )
 
     async def _healthz(self, _request: web.Request) -> web.Response:
         ready = any(d.pool_ready.is_set() for d in self.hub.deployments.values())

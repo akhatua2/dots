@@ -1,12 +1,17 @@
-name: Build worker binary
+name: Build and deploy worker binary
 
 on:
   release:
     types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # upload release assets
+  id-token: write  # GCP Workload Identity
 
 jobs:
-  build-macos:
-    runs-on: macos-14  # Apple Silicon (arm64)
+  build:
+    runs-on: macos-14  # Apple Silicon arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -15,16 +20,57 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install deps (mac extras + pyinstaller)
+      - name: Install deps
         run: uv sync --extra mac --extra dev
 
       - name: Build binary
         run: uv run pyinstaller worker.spec --distpath dist/
 
-      - name: Smoke-test
+      - name: Smoke test
         run: ./dist/dots-worker --help
 
       - name: Upload to release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/dots-worker
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dots-worker-macos-arm64
+          path: dist/dots-worker
+          retention-days: 7
+
+  deploy-to-hub:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dots-worker-macos-arm64
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload to hub server
+        env:
+          ZONE: us-west1-a
+          INSTANCE: dots-hub
+          TARGET_USER: arpan
+        run: |
+          chmod +x dots-worker
+          gcloud compute scp dots-worker "$TARGET_USER@$INSTANCE:~/dots-worker-new" \
+            --zone="$ZONE" --quiet
+          gcloud compute ssh "$TARGET_USER@$INSTANCE" --zone="$ZONE" --quiet --command '
+            mkdir -p ~/.dots/worker
+            mv ~/dots-worker-new ~/.dots/worker/dots-worker
+            chmod +x ~/.dots/worker/dots-worker
+            echo "binary deployed: $(ls -lh ~/.dots/worker/dots-worker)"'
