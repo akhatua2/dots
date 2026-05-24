@@ -177,7 +177,7 @@ class HttpApi:
         ]
         return web.json_response({"nodes": nodes})
 
-    async def _download_worker(self, _request: web.Request) -> web.Response:
+    async def _download_worker(self, request: web.Request) -> web.StreamResponse:
         """Serve the pre-built macOS arm64 worker binary.
 
         The binary lives at ~/.dots/worker/dots-worker on the hub server and
@@ -189,14 +189,23 @@ class HttpApi:
         binary_path = pathlib.Path.home() / ".dots" / "worker" / "dots-worker"
         if not binary_path.is_file():
             return _error(404, "worker binary not available yet")
-        return web.FileResponse(
-            binary_path,
+
+        size = binary_path.stat().st_size
+        resp = web.StreamResponse(
+            status=200,
             headers={
-                "Content-Disposition": 'attachment; filename="dots-worker"',
                 "Content-Type": "application/octet-stream",
+                "Content-Disposition": 'attachment; filename="dots-worker"',
+                "Content-Length": str(size),
                 **_CORS_HEADERS,
             },
         )
+        await resp.prepare(request)
+        with binary_path.open("rb") as f:
+            while chunk := f.read(256 * 1024):
+                await resp.write(chunk)
+        await resp.write_eof()
+        return resp
 
     async def _healthz(self, _request: web.Request) -> web.Response:
         ready = any(d.pool_ready.is_set() for d in self.hub.deployments.values())
