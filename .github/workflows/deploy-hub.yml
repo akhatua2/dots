@@ -48,7 +48,8 @@ jobs:
           # email and targets the wrong home dir.
           TARGET_USER: arpan
         run: |
-          tar --exclude=./.git --exclude=./_external -czf /tmp/dots.tar.gz .
+          tar --exclude=./.git --exclude=./_external --exclude=./web \
+            --exclude=./desktop -czf /tmp/dots.tar.gz .
           gcloud compute scp /tmp/dots.tar.gz "$TARGET_USER@$INSTANCE:~/dots.tar.gz" \
             --zone="$ZONE" --quiet
           gcloud compute ssh "$TARGET_USER@$INSTANCE" --zone="$ZONE" --quiet --command '

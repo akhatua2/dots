@@ -20,8 +20,10 @@ weights are sharded behind the scenes.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import os
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -35,6 +37,56 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("dots.api")
 
+# Endpoints reachable without a token: liveness probes and CORS preflight.
+# Everything under /v1/* is gated by the shared join token (when one is set).
+_OPEN_PATHS = frozenset({"/healthz"})
+
+# CORS: the API is meant to be called from a browser app on another origin.
+# Auth rides in the Authorization header (not cookies), so a wildcard origin is
+# safe — a stranger's page still can't call the pool without the token.
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "86400",
+}
+
+
+def _bearer(request: web.Request) -> str | None:
+    """Extract the bearer token from `Authorization: Bearer <token>`."""
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        return header[len("Bearer ") :].strip()
+    return None
+
+
+@web.middleware
+async def _auth_cors_middleware(request: web.Request, handler):
+    """Gate /v1/* on the shared join token and stamp CORS headers on every
+    response (including the OPTIONS preflight a browser sends first).
+
+    The token is the same `DOTS_JOIN_TOKEN` secret that gates the iroh HELLO,
+    so the pool has one shared secret. If it is unset (local dev), the API is
+    open — matching the iroh gate, which only enforces when a token is set.
+    """
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers=_CORS_HEADERS)
+
+    token = os.environ.get("DOTS_JOIN_TOKEN")
+    if token and request.path not in _OPEN_PATHS:
+        provided = _bearer(request)
+        if not provided or not hmac.compare_digest(provided, token):
+            resp = _error(401, "missing or invalid token")
+            resp.headers.extend(_CORS_HEADERS)
+            return resp
+
+    response = await handler(request)
+    # A streaming response has already flushed its headers in `prepare()` (it
+    # sets CORS itself), so only stamp ones we can still mutate.
+    if not response.prepared:
+        response.headers.extend(_CORS_HEADERS)
+    return response
+
 
 class HttpApi:
     def __init__(self, hub: "Hub", host: str = "0.0.0.0", port: int = 8080):
@@ -44,7 +96,10 @@ class HttpApi:
         self._runner: web.AppRunner | None = None
 
     async def start(self) -> None:
-        app = web.Application(client_max_size=4 * 1024 * 1024)
+        app = web.Application(
+            client_max_size=4 * 1024 * 1024,
+            middlewares=[_auth_cors_middleware],
+        )
         app.router.add_post("/v1/chat/completions", self._chat_completions)
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/v1/credits", self._credits_all)
@@ -239,6 +294,7 @@ class HttpApi:
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                **_CORS_HEADERS,
             },
         )
         await response.prepare(request)
