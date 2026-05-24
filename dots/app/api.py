@@ -47,7 +47,7 @@ _OPEN_PATHS = frozenset({"/healthz"})
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, ngrok-skip-browser-warning",
     "Access-Control-Max-Age": "86400",
 }
 
