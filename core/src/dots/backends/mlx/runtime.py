@@ -267,7 +267,7 @@ class MlxBackendRuntime(BackendRuntime):
                 monitor_download_progress(prepared.runtime_id, progress_callback)
             )
         try:
-            model_path = await asyncio.to_thread(_download, prepared.runtime_id)
+            await asyncio.to_thread(_download, prepared.runtime_id)
         finally:
             if monitor is not None:
                 monitor.cancel()
