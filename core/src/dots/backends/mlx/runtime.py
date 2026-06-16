@@ -256,19 +256,18 @@ class MlxBackendRuntime(BackendRuntime):
         progress_callback: ProgressCallback | None = None,
     ) -> None:
         prepared = await self.prepare_model(model_id, assignment)
+
+        # Download weights on a background thread (network/disk I/O) so
+        # the event loop stays responsive for hub heartbeats + progress.
+        from mlx_lm.utils import _download
+
         monitor: asyncio.Task | None = None
         if progress_callback is not None:
             monitor = asyncio.create_task(
                 monitor_download_progress(prepared.runtime_id, progress_callback)
             )
         try:
-            model, tokenizer, _n_total = await asyncio.to_thread(
-                self._load_partial,
-                prepared.runtime_id,
-                layer_start=assignment.layer_start,
-                layer_end=assignment.layer_end,
-                needs_head=assignment.needs_head,
-            )
+            model_path = await asyncio.to_thread(_download, prepared.runtime_id)
         finally:
             if monitor is not None:
                 monitor.cancel()
@@ -276,6 +275,18 @@ class MlxBackendRuntime(BackendRuntime):
                     await monitor
                 except (asyncio.CancelledError, Exception):
                     pass
+
+        # Construct the model on the event-loop thread.  MLX arrays
+        # carry affinity to the GPU stream of the thread that created
+        # them; inference handlers also run on the event-loop thread, so
+        # loading here avoids cross-thread "no Stream(gpu, N)" errors.
+        # _download inside load_partial is a fast cache-hit now.
+        model, tokenizer, _n_total = load_partial(
+            prepared.runtime_id,
+            layer_start=assignment.layer_start,
+            layer_end=assignment.layer_end,
+            needs_head=assignment.needs_head,
+        )
 
         self.model_id = prepared.source_id
         self.assignment = assignment
