@@ -1,0 +1,11 @@
+# Build output
+build/
+DerivedData/
+
+# Generated from project.yml by xcodegen
+dots.xcodeproj/
+
+# Xcode and macOS
+xcuserdata/
+*.xcuserstate
+.DS_Store
