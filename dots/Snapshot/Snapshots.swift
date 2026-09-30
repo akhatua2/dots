@@ -23,6 +23,8 @@ enum Snapshots {
         let model = AppModel(backend: Simulation(fresh: true, persists: false), settings: AppSettings())
         model.isSnapshot = true
         model.persistsSettings = false
+        // The API server doesn't run for snapshots; draw it the way it looks in the app
+        model.gatewayState = "Running on port \(model.settings.gatewayPort)"
         model.signals.onPower = true
         model.signals.idleSeconds = 999
         let window = CGSize(width: 1_180, height: 780)
