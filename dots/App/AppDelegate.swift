@@ -24,6 +24,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         AppModel.shared.start()
+        // `dots --ask "question"` opens the panel and asks it, for reproducing the ask flow without clicking
+        if let i = args.firstIndex(of: "--ask"), i + 1 < args.count {
+            let question = args[i + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                MainActor.assumeIsolated {
+                    AskPanelController.shared.show()
+                    AppModel.shared.ask.input = question
+                    AppModel.shared.ask.submit(model: AppModel.shared)
+                }
+            }
+        }
         // ⌥ Space opens the ask panel over whatever you're doing
         hotKey = GlobalHotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) {
             AskPanelController.shared.toggle()

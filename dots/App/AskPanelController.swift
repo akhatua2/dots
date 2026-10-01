@@ -9,12 +9,6 @@ final class AskPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
-    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
-        var r = frameRect
-        if let top = anchorTop { r.origin.y = top - r.height }
-        super.setFrame(r, display: flag)
-    }
-
     override func cancelOperation(_ sender: Any?) {
         AskPanelController.shared.hide()
     }
@@ -53,8 +47,11 @@ final class AskPanelController {
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.animationBehavior = .utilityWindow
+        // SwiftUI doesn't size this window. The view reports its height and fit(height:) resizes the panel
+        // outside the layout pass: letting the hosting view resize the window from inside layout, while the
+        // answer streamed in and the Macs' rings animated, recursed until the stack ran out.
         let host = NSHostingController(rootView: AskPanelView().environment(AppModel.shared))
-        host.sizingOptions = [.preferredContentSize]
+        host.sizingOptions = []
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = .clear
         panel.contentViewController = host
@@ -64,6 +61,22 @@ final class AskPanelController {
         }
         self.panel = panel
         return panel
+    }
+
+    /// Grows or shrinks the panel to its content, keeping the top edge fixed. Called from the view's
+    /// geometry, so the resize is deferred to the next turn of the run loop.
+    func fit(height: CGFloat) {
+        let height = (height * 2).rounded() / 2
+        guard let panel, abs(panel.frame.height - height) > 0.5 else { return }
+        DispatchQueue.main.async { [weak panel] in
+            guard let panel, abs(panel.frame.height - height) > 0.5 else { return }
+            var frame = panel.frame
+            let top = panel.anchorTop ?? frame.maxY
+            frame.origin.y = top - height
+            frame.size.height = height
+            panel.setFrame(frame, display: true, animate: false)
+            panel.invalidateShadow()
+        }
     }
 
     /// Centered on the screen with the pointer, a quarter of the way down.

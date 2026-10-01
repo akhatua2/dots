@@ -106,6 +106,12 @@ build/Build/Products/Debug/dots.app/Contents/MacOS/dots --selftest
 Starts the local API on a spare port against a fresh, in-memory network and checks it end to end: keys, routing, privacy, credits, streaming and limits. Set `DOTS_SELFTEST_ENDPOINT` to an OpenAI-compatible URL to check real answers too. Nothing is saved.
 
 ```bash
+build/Build/Products/Debug/dots.app/Contents/MacOS/dots --ask "Is my lease fair on repairs?"
+```
+
+Launches the app, opens the ask panel and asks the question, so the whole ask flow can be reproduced without clicking.
+
+```bash
 build/Build/Products/Debug/dots.app/Contents/MacOS/dots --snapshot ~/Desktop/dots-shots
 ```
 

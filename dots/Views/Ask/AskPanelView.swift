@@ -7,6 +7,9 @@ struct AskPanelView: View {
     @Environment(\.isSnapshot) private var isSnapshot
     @FocusState private var focused: Bool
     @State private var dropTargeted = false
+    /// The answer's own height, measured inside the scroll view. The panel is sized from this, never the other
+    /// way round: sizing the scroll view to fit while the window sized itself to the scroll view looped forever.
+    @State private var bodyHeight: CGFloat = 0
 
     var body: some View {
         @Bindable var ask = model.ask
@@ -19,9 +22,11 @@ struct AskPanelView: View {
                         AskBody()
                     }
                     .padding(18)
+                    .frame(width: 720, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
                 }
-                .frame(maxHeight: 560)
-                .fixedSize(horizontal: false, vertical: true)
+                .scrollIndicators(.never)
+                .frame(height: isSnapshot ? nil : min(max(bodyHeight, 40), 560))
             }
             Hairline()
             HStack(spacing: 14) {
@@ -40,6 +45,11 @@ struct AskPanelView: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(dropTargeted ? D.accent : Color.white.opacity(0.1), lineWidth: dropTargeted ? 1.5 : 1))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+            if !isSnapshot { AskPanelController.shared.fit(height: height) }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
         .modifier(FileDrop(enabled: !isSnapshot, targeted: $dropTargeted) { url in model.ask.attach(url) })
         .onAppear { focused = true }
         .onChange(of: ask.focusToken) { _, _ in focused = true }
