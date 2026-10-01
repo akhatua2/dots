@@ -86,21 +86,33 @@ enum SelfTest {
         // With an endpoint set, your pools' answers are real (DOTS_SELFTEST_ENDPOINT points at any OpenAI-compatible server)
         if let url = ProcessInfo.processInfo.environment["DOTS_SELFTEST_ENDPOINT"] {
             print("\nReal answers from \(url)")
-            let endpoint = EndpointConfig(enabled: true, label: "Test", baseURL: url, model: "", keychainAccount: "dots-selftest-none")
-            let ids = (try? await OpenAIClient.models(endpoint)) ?? []
+            let probe = EndpointConfig(enabled: true, label: "Test", baseURL: url, model: "", keychainAccount: "dots-selftest-none")
+            let ids = (try? await OpenAIClient.models(probe)) ?? []
             check("Test lists the endpoint's models", !ids.isEmpty)
-            model.settings.poolEndpoint = EndpointConfig(enabled: true, label: "Test", baseURL: url, model: ids.first ?? "",
-                                                         keychainAccount: "dots-selftest-none")
+            let chat = ids.first { !$0.contains("embed") } ?? ids.first ?? ""
+            let answerText = { (r: [String: Any]?) in (((r?["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String) ?? "" }
+            model.settings.poolEndpoint = EndpointConfig(enabled: true, label: "Test", baseURL: url, model: chat, keychainAccount: "dots-selftest-none")
             let (real, realCode) = await call(base, "POST", "/chat/completions", key: secret,
-                                              body: ["messages": [["role": "user", "content": "What's a good name for a dog?"]]])
-            let realText = (((real?["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String) ?? ""
+                                              body: ["messages": [["role": "user", "content": "What's a good name for a dog? One line."]]])
             let realDots = real?["dots"] as? [String: Any]
             check("A pool question gets the endpoint's own answer, not a simulated one",
-                  realCode == 200 && realText == "Real answer from the endpoint." && realDots?["simulated"] as? Bool == false)
-            print("      answer: \(realText)")
+                  realCode == 200 && !answerText(real).isEmpty && realDots?["simulated"] as? Bool == false)
+            print("      \(chat): \(answerText(real).prefix(90).replacingOccurrences(of: "\n", with: " "))")
             let (stream, _) = await raw(base, "POST", "/chat/completions", key: secret,
-                                        body: ["stream": true, "messages": [["role": "user", "content": "And a cat?"]]])
-            check("Streaming passes the endpoint's words through", streamText(stream) == "Real answer from the endpoint.")
+                                        body: ["stream": true, "messages": [["role": "user", "content": "And a cat? One line."]]])
+            check("Streaming passes the endpoint's words through", !streamText(stream).isEmpty)
+
+            // Set up under frontier models instead, with your pools off: a model on this Mac still answers everyday questions
+            model.settings.poolEndpoint.enabled = false
+            model.settings.frontierEndpoint = EndpointConfig(enabled: true, label: "Anthropic", baseURL: url, model: chat, keychainAccount: "dots-selftest-none")
+            let (alt, altCode) = await call(base, "POST", "/chat/completions", key: secret,
+                                            body: ["messages": [["role": "user", "content": "What's a good name for a cat? One line."]]])
+            let altDots = alt?["dots"] as? [String: Any]
+            let local = model.settings.frontierEndpoint.isLocal
+            check("Set up under frontier models, a model on this Mac still answers everyday questions",
+                  altCode == 200 && !answerText(alt).isEmpty && altDots?["simulated"] as? Bool == false
+                  && (!local || (altDots?["credits"] as? Int == 0 && altDots?["ran_on"] as? String == "this Mac")))
+            print("      ran on: \(altDots?["ran_on"] ?? "?") · credits \(altDots?["credits"] ?? "?")")
         }
 
         print(failures == 0 ? "\nAll passed." : "\n\(failures) failed.")

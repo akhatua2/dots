@@ -12,6 +12,25 @@ struct EndpointConfig: Codable, Equatable {
     var apiKey: String? { Keychain.get(keychainAccount) }
     var url: URL? { URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
     var isReady: Bool { enabled && url != nil && !model.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Runs on this Mac (LM Studio, Ollama): nothing sent to it leaves the Mac, and it costs no credits.
+    var isLocal: Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasSuffix(".localhost")
+    }
+
+    /// The app serving it, when it's a known one on this Mac.
+    var serverName: String? {
+        guard isLocal else { return nil }
+        switch url?.port { case 1234: return "LM Studio"; case 11434: return "Ollama"; default: return nil }
+    }
+
+    /// Where answers come from, named from the address (a label can go stale when the address changes).
+    var placeName: String {
+        if isLocal { return "this Mac" }
+        guard let host = url?.host else { return label }
+        return host.hasSuffix("anthropic.com") ? "Anthropic" : host
+    }
 }
 
 struct RouterRules: Codable, Equatable {

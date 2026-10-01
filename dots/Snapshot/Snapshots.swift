@@ -57,7 +57,7 @@ enum Snapshots {
         ask.asked = ask.input
         ask.answer = SimulatedAnswers.lease
         if let chosen = decision.chosen {
-            let plan = AnswerRunner.Plan(events: AsyncThrowingStream { $0.finish() }, isSimulated: true, endpointLabel: nil)
+            let plan = AnswerRunner.Plan(events: AsyncThrowingStream { $0.finish() }, isSimulated: true, endpoint: nil)
             var receipt = AnswerRunner.receipt(for: chosen, decision: decision, plan: plan, state: model.state)
             if let priya = receipt.macs.first(where: { $0.name == "Priya" }) {
                 receipt.asleepMacID = priya.id

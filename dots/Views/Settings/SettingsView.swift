@@ -155,6 +155,14 @@ struct EndpointEditor: View {
                     Button("Test") { runTest() }.buttonStyle(DButtonStyle(kind: .grey))
                 }
                 if let test { Text(test).font(D.ui(12)).foregroundStyle(D.t3) }
+                if config.isLocal {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "desktopcomputer").font(.system(size: 11, weight: .medium))
+                        Text("On this Mac\(config.serverName.map { ", in \($0)" } ?? ""). It can answer any question, stays private, and costs no credits.")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(D.ui(12)).foregroundStyle(D.t3)
+                }
             }
         }
         .onAppear { key = Keychain.get(config.keychainAccount) ?? "" }

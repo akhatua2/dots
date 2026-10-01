@@ -30,19 +30,28 @@ enum AnswerRunner {
     struct Plan {
         var events: AsyncThrowingStream<AnswerEvent, Error>
         var isSimulated: Bool
-        var endpointLabel: String?
+        var endpoint: EndpointConfig?
+    }
+
+    /// The endpoint that really answers a route, if any. Frontier routes use the frontier endpoint. Your pools
+    /// and the network use the pools endpoint, or a model on this Mac set up under frontier models: it's
+    /// private and free, so it can take any question.
+    static func endpoint(for c: RouteCandidate, settings: AppSettings) -> EndpointConfig? {
+        let pool = settings.poolEndpoint, frontier = settings.frontierEndpoint
+        switch c.destination {
+        case .frontier: return frontier.isReady ? frontier : nil
+        case .yourPool, .publicPool:
+            if pool.isReady { return pool }
+            return frontier.isReady && frontier.isLocal ? frontier : nil
+        }
     }
 
     static func plan(for c: RouteCandidate, messages: [ChatMessage], question: String, documentName: String?,
                      second: Bool = false, settings: AppSettings, state: NetworkState, allowSleep: Bool) -> Plan {
-        switch c.destination {
-        case .yourPool where settings.poolEndpoint.isReady:
-            return Plan(events: OpenAIClient.stream(settings.poolEndpoint, messages: messages), isSimulated: false,
-                        endpointLabel: settings.poolEndpoint.label)
-        case .frontier where settings.frontierEndpoint.isReady:
-            return Plan(events: OpenAIClient.stream(settings.frontierEndpoint, messages: messages), isSimulated: false,
-                        endpointLabel: settings.frontierEndpoint.label)
-        default:
+        if let endpoint = endpoint(for: c, settings: settings) {
+            return Plan(events: OpenAIClient.stream(endpoint, messages: messages), isSimulated: false, endpoint: endpoint)
+        }
+        do {
             let text = second
                 ? SimulatedAnswers.secondOpinion(for: question, documentName: documentName)
                 : SimulatedAnswers.answer(for: question, documentName: documentName)
@@ -54,7 +63,7 @@ enum AnswerRunner {
                     sleeper = (mac.macID, owner.name)
                 }
             }
-            return Plan(events: SimulatedAnswers.stream(text, tokPerSec: c.tokPerSec, sleeper: sleeper), isSimulated: true, endpointLabel: nil)
+            return Plan(events: SimulatedAnswers.stream(text, tokPerSec: c.tokPerSec, sleeper: sleeper), isSimulated: true, endpoint: nil)
         }
     }
 
@@ -67,12 +76,17 @@ enum AnswerRunner {
             }
         }
         var reasons = decision.reasons
-        if let label = plan.endpointLabel, c.destination == .yourPool {
-            reasons.append(RouteReason(symbol: "network", text: "Your pools answer through \(label)."))
+        guard let e = plan.endpoint else {
+            return Receipt(destination: c.destination, model: c.model, place: c.place, macs: macs,
+                           tokPerSec: c.tokPerSec, credits: c.credits, saved: max(0, c.listCredits - c.credits),
+                           isPrivate: decision.isPrivate && c.isPrivate, isSimulated: true, reasons: reasons)
         }
-        return Receipt(destination: c.destination, model: c.model, place: plan.endpointLabel ?? c.place, macs: macs,
-                       tokPerSec: c.tokPerSec, credits: c.credits, saved: max(0, c.listCredits - c.credits),
-                       isPrivate: decision.isPrivate && c.isPrivate, isSimulated: plan.isSimulated, reasons: reasons)
+        // A real answer says what really answered it. On this Mac, nothing left it and nothing is charged.
+        let via = e.serverName.map { "\($0) on this Mac" } ?? e.placeName
+        reasons.append(RouteReason(symbol: e.isLocal ? "desktopcomputer" : "network", text: "Answered by \(e.model) through \(via)."))
+        return Receipt(destination: c.destination, model: e.model, place: e.placeName, macs: [],
+                       tokPerSec: 0, credits: e.isLocal ? 0 : c.credits, saved: e.isLocal ? 0 : max(0, c.listCredits - c.credits),
+                       isPrivate: e.isLocal || (decision.isPrivate && c.isPrivate), isSimulated: false, reasons: reasons)
     }
 
     static func messages(question: String, attachment: AskController.Attachment?) -> [ChatMessage] {
