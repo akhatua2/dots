@@ -53,6 +53,7 @@ struct MainWindow: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,6 +97,9 @@ struct Sidebar: View {
             .padding(.horizontal, 8)
 
             Spacer(minLength: 16)
+
+            NavRow(symbol: "gearshape", title: "Settings", trailing: "⌘,", selected: false) { model.showSettings(openSettings) }
+                .padding(.horizontal, 8)
 
             ThisMacCard()
                 .padding(10)

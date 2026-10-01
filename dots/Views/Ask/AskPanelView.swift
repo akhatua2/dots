@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct AskPanelView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.isSnapshot) private var isSnapshot
+    @Environment(\.openSettings) private var openSettings
     @FocusState private var focused: Bool
     @State private var dropTargeted = false
     /// The answer's own height, measured inside the scroll view. The panel is sized from this, never the other
@@ -34,8 +35,9 @@ struct AskPanelView: View {
                 hint("esc", "close")
                 Text("Drop a file on the panel to ask about it").font(D.ui(11.5)).foregroundStyle(D.t5)
                 Spacer()
-                SettingsLink { Image(systemName: "gearshape").font(.system(size: 11)) }
+                Button { model.showSettings(openSettings) } label: { Image(systemName: "gearshape").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(D.t5)
+                    .help("Settings")
             }
             .padding(.horizontal, 18)
             .frame(height: 34)

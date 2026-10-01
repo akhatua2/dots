@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuBarPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.isSnapshot) private var isSnapshot
 
     var body: some View {
@@ -108,6 +109,13 @@ struct MenuBarPanel: View {
                 }
                 .buttonStyle(.plain).font(D.ui(13)).foregroundStyle(D.t2)
                 Spacer()
+                Button { model.showSettings(openSettings) } label: {
+                    Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(D.t3)
+                .help("Settings")
+                .accessibilityLabel("Settings")
+                .padding(.trailing, 6)
                 Button("Open dots") {
                     model.openWindowAction = openWindow
                     model.openMainWindow()

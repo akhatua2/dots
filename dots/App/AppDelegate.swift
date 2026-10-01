@@ -43,8 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The app lives in the menu bar: it shows in the Dock only while its window is open
         NSApp.setActivationPolicy(.regular)
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { note in
-            guard let window = note.object as? NSWindow, window.identifier?.rawValue.hasPrefix("main") == true else { return }
-            MainActor.assumeIsolated { NSApp.setActivationPolicy(.accessory) }
+            guard let closing = note.object as? NSWindow, closing.styleMask.contains(.titled) else { return }
+            MainActor.assumeIsolated {
+                let others = NSApp.windows.filter { $0 !== closing && $0.isVisible && $0.styleMask.contains(.titled) }
+                if others.isEmpty { NSApp.setActivationPolicy(.accessory) }
+            }
         }
     }
 

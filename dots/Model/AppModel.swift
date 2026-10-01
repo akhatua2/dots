@@ -230,6 +230,15 @@ final class AppModel {
         NSApp.activate()
     }
 
+    /// Opens Settings in front of everything. dots is a menu bar app, so it becomes a regular, active app
+    /// first; otherwise the Settings window can open behind whatever you're using.
+    func showSettings(_ open: OpenSettingsAction) {
+        AskPanelController.shared.hide()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        open()
+    }
+
     // MARK: Gateway
 
     func restartGateway() {
