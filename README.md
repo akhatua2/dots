@@ -65,10 +65,10 @@ Signing uses your Apple Development certificate (team 9P3ZR93NDF in `project.yml
 
 ## Real answers
 
-Open Settings (⌘,) and set an endpoint under **Real answers**:
+Open Settings (⌘, or Settings in the sidebar) and set an endpoint under **Real answers**:
 
-- **Your pools**: stands in for the pool until dots has a real hub. Use a model on this Mac. In LM Studio, load a model and start the server (it listens on `http://localhost:1234/v1`), or run Ollama (`http://localhost:11434/v1`). Press **Test** to list the models and pick one.
-- **Frontier models**: any OpenAI-compatible provider. Anthropic works at `https://api.anthropic.com/v1` with your Anthropic API key and a model such as `claude-opus-5-5` or `claude-sonnet-5`.
+- **Local model**: a model on this Mac answers everyday questions, privately and for free. In LM Studio, load a model and start the server (it listens on `http://localhost:1234/v1`), or run Ollama (`http://localhost:11434/v1`). Press **Test** to list the models and pick one. A model on this Mac can answer any question, so it also covers your pools and the network.
+- **Frontier models**: hard questions and second opinions. Anthropic works at `https://api.anthropic.com/v1` with your Anthropic API key and a model such as `claude-opus-5-5` or `claude-sonnet-5`. A remote endpoint needs its key before it counts as set.
 
 A route without an endpoint is simulated, and its receipt says so.
 

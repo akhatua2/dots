@@ -9,10 +9,10 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 section("Real answers", "With an endpoint set, that route's questions get real answers. Without one, dots simulates them and says so.") {
-                    EndpointEditor(title: "Your pools", detail: "The dots hub, or a model on this Mac",
+                    EndpointEditor(title: "Local model", detail: "LM Studio or Ollama on this Mac. It answers everyday questions, privately and for free.",
                                    config: $model.settings.poolEndpoint,
                                    presets: [("LM Studio", "http://localhost:1234/v1"), ("Ollama", "http://localhost:11434/v1")])
-                    EndpointEditor(title: "Frontier models", detail: "Any OpenAI-compatible provider, like Anthropic",
+                    EndpointEditor(title: "Frontier models", detail: "Anthropic, or any OpenAI-compatible provider. Hard questions and second opinions go here.",
                                    config: $model.settings.frontierEndpoint,
                                    presets: [("Anthropic", "https://api.anthropic.com/v1")])
                 }
@@ -134,7 +134,7 @@ struct EndpointEditor: View {
                     ForEach(presets, id: \.0) { name, url in
                         Chip(title: name, selected: config.baseURL == url) {
                             config.baseURL = url
-                            if config.label == "Your pools" || config.label.isEmpty { config.label = name }
+                            if config.label == "Local" || config.label.isEmpty { config.label = name }
                         }
                     }
                 }
@@ -155,6 +155,14 @@ struct EndpointEditor: View {
                     Button("Test") { runTest() }.buttonStyle(DButtonStyle(kind: .grey))
                 }
                 if let test { Text(test).font(D.ui(12)).foregroundStyle(D.t3) }
+                if !config.isLocal && key.trimmingCharacters(in: .whitespaces).isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "key").font(.system(size: 11, weight: .medium))
+                        Text("Add your \(config.placeName) API key to get real answers. Until then, answers on this route are simulated.")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(D.ui(12)).foregroundStyle(D.accentText)
+                }
                 if config.isLocal {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Image(systemName: "desktopcomputer").font(.system(size: 11, weight: .medium))

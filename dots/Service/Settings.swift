@@ -11,7 +11,11 @@ struct EndpointConfig: Codable, Equatable {
 
     var apiKey: String? { Keychain.get(keychainAccount) }
     var url: URL? { URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    var isReady: Bool { enabled && url != nil && !model.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// Ready to answer: switched on, with an address and a model, and a key unless it runs on this Mac.
+    /// A remote endpoint without its key stays simulated instead of failing every request.
+    var isReady: Bool {
+        enabled && url != nil && !model.trimmingCharacters(in: .whitespaces).isEmpty && (isLocal || !(apiKey ?? "").isEmpty)
+    }
 
     /// Runs on this Mac (LM Studio, Ollama): nothing sent to it leaves the Mac, and it costs no credits.
     var isLocal: Bool {
@@ -46,7 +50,7 @@ struct RouterRules: Codable, Equatable {
 
 struct AppSettings: Codable, Equatable {
     /// Where "your pools" answers come from when set: the dots hub, or a model on this Mac (LM Studio, Ollama).
-    var poolEndpoint = EndpointConfig(enabled: false, label: "Your pools", baseURL: "http://localhost:1234/v1",
+    var poolEndpoint = EndpointConfig(enabled: false, label: "Local", baseURL: "http://localhost:1234/v1",
                                       model: "", keychainAccount: "pool-endpoint")
     /// Where frontier answers come from when set. Anthropic speaks the OpenAI API at this address.
     var frontierEndpoint = EndpointConfig(enabled: false, label: "Anthropic", baseURL: "https://api.anthropic.com/v1",
