@@ -41,8 +41,11 @@ from pathlib import Path
 
 import numpy as np
 
-DEFAULT_COMMAND = "uvx --from mflux==0.24.0 mflux-generate-flux3"
-DEFAULT_EDIT_COMMAND = "uvx --from mflux==0.24.0 mflux-generate-flux3-edit"
+# FLUX 3 Image Klein runs through dots' own driver of mflux, which shows the picture the model is heading for
+# after each step instead of the noisy one (image_tools/flux3_draw.py); it edits when given a picture
+_DRIVER = Path(__file__).parent / "image_tools" / "flux3_draw.py"
+DEFAULT_COMMAND = f"uvx --from mflux==0.24.0 python -I {shlex.quote(str(_DRIVER))}"
+DEFAULT_EDIT_COMMAND = DEFAULT_COMMAND
 DEFAULT_BASE_MODEL = "flux3-klein"
 # Sides are multiples of this, as the models' latents need
 SIDE_STEP = 16

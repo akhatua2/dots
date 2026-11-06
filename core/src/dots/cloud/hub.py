@@ -49,7 +49,12 @@ class HubClient:
 
     async def models(self) -> dict[str, float]:
         """The models the hub serves, with each one's recent speed in tokens a second (0 before any turn)."""
-        return {m["id"]: float(m.get("tok_per_sec") or 0) for m in (await self._get("/v1/models")).get("data", [])}
+        return {m["id"]: float(m.get("tok_per_sec") or 0) for m in (await self._get("/v1/models")).get("data", [])
+                if m.get("type") != "image"}
+
+    async def image_models(self) -> list[str]:
+        """The image models the hub's Macs draw with."""
+        return [m["id"] for m in (await self._get("/v1/models")).get("data", []) if m.get("type") == "image"]
 
     async def complete(self, body: dict, account: str) -> dict:
         """A whole answer, in OpenAI's chat completions format, charged to `account`."""
@@ -91,8 +96,9 @@ class HubClient:
                                          timeout=aiohttp.ClientTimeout(total=1800)) as r:
                 if r.status >= 400:
                     raise HubError(r.status, _message(await r.json(content_type=None), r.status))
-                async for line in r.content:
-                    yield line
+                # The bytes as they come: a finished picture is one event far longer than a line may be
+                async for chunk in r.content.iter_any():
+                    yield chunk
         except aiohttp.ClientError as e:
             raise HubError(503, f"the hub didn't answer: {e}") from e
 

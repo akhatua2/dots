@@ -143,6 +143,8 @@ struct Pool: Codable, Hashable, Identifiable {
     var phase: Double
     var createdAt: Date
     var servesModelID: String?
+    /// The image model a Mac in the pool draws pictures with, if one offers it
+    var drawsWith: String? = nil
     /// How close the pool's Macs are to you: scales the speed you'd get.
     var speedFactor = 1.0
     /// How busy the pool is: scales what a lending Mac earns there.

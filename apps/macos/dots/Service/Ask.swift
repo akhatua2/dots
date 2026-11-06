@@ -244,8 +244,14 @@ final class AskController {
         phase = .routing
         let attachment = self.attachment
         let side = attachment?.picture == nil ? model.settings.pictureSide : nil
-        let places = ([decision.chosen].compactMap { $0 } + decision.fallbacks + decision.candidates)
-            .filter { $0.destination == .yourPool || (!decision.isPrivate && $0.destination == .publicPool) }
+        // Pools with a Mac that draws: your own first, then public ones unless the picture is yours
+        let pools = model.state.myPools.filter { !$0.isPublic && $0.drawsWith != nil }
+            + (decision.isPrivate ? [] : model.state.publicPools.filter { $0.drawsWith != nil })
+        let places = pools.map { p in
+            RouteCandidate(id: "pool:\(p.id)", destination: p.isPublic ? .publicPool : .yourPool, place: p.name,
+                           model: p.drawsWith ?? "", modelID: p.drawsWith ?? "", credits: 0, listCredits: 0, tokPerSec: 0,
+                           isPrivate: !p.isPublic, poolID: p.id, minGB: 0)
+        }
         task = Task { [weak self] in
             guard let self else { return }
             var seen = Set<String>()

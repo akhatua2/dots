@@ -44,7 +44,7 @@ private struct DrawingProgress: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle().fill(D.accent).frame(width: 5, height: 5)
-            Text(of > 0 ? "Drawing · step \(min(step, of)) of \(of)" : "Starting the drawing")
+            Text(step > 0 && of > 0 ? "Drawing · step \(min(step, of)) of \(of)" : "Starting the drawing")
                 .font(D.ui(12).monospacedDigit()).foregroundStyle(D.t5)
             GeometryReader { geo in
                 Capsule().fill(D.btn)

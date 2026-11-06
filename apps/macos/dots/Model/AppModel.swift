@@ -526,6 +526,15 @@ final class AppModel {
         ask.focusToken += 1
     }
 
+    /// Opens Ask and asks `question`, as if typed in the box and sent. An empty one just opens Ask.
+    func send(question: String) {
+        showAsk()
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !ask.isBusy else { return }
+        ask.input = question
+        ask.submit(model: self)
+        ask.input = ""
+    }
+
     // MARK: Gateway
 
     func restartGateway() {

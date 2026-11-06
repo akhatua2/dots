@@ -81,9 +81,11 @@ private struct Conversation: View {
                     QuestionBubble(text: ask.asked, attachment: ask.attachment?.name)
                     VStack(alignment: .leading, spacing: 8) {
                         if let picture = ask.picture {
-                            PictureAnswer(image: picture.image, step: picture.step, of: picture.of, done: picture.done)
                             if case .failed(let why) = ask.phase {
+                                if picture.image != nil { PictureAnswer(image: picture.image) }
                                 Text(why).font(D.ui(13)).foregroundStyle(D.t3)
+                            } else {
+                                PictureAnswer(image: picture.image, step: picture.step, of: picture.of, done: picture.done)
                             }
                         } else {
                             AskBody(compact: true)

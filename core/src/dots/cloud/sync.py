@@ -28,6 +28,8 @@ class HubView:
     model: str | None = None
     online: bool = False
     tok_per_sec: float = 0.0
+    # The image models the pool's Macs draw with, if any offer one
+    draws: list[str] = field(default_factory=list)
 
     @classmethod
     async def read(cls, hub: HubClient, pool_model: str) -> "HubView":
@@ -36,10 +38,11 @@ class HubView:
             nodes = await hub.nodes()
             ledger = await hub.ledger()
             models = await hub.models()
+            draws = await hub.image_models()
         except HubError:
             return cls(model=pool_model)
         model = pool_model if pool_model in models or not models else next(iter(models))
-        return cls(nodes=nodes, ledger=ledger, model=model, online=True, tok_per_sec=models.get(model, 0.0))
+        return cls(nodes=nodes, ledger=ledger, model=model, online=True, tok_per_sec=models.get(model, 0.0), draws=draws)
 
     def layers(self) -> int:
         ends = [n["layer_range"][1] for n in self.nodes if n.get("layer_range")]
@@ -111,6 +114,8 @@ class SyncBuilder:
             "speedFactor": 1,
             "demand": 0.8,
         }
+        if pool_id == HUB_POOL and hub.draws:
+            pool["drawsWith"] = hub.draws[0]  # a Mac in the pool draws pictures with this model
         if mine is not None:
             pool["endorsedAtMacs"] = mine["macs_at"]
         if pool_id == HUB_POOL and hub.model:
