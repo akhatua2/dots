@@ -133,13 +133,13 @@ struct RoutePicker: View {
     }
 
     private var pill: some View {
-        HStack(spacing: 5) {
-            Text(label).font(D.ui(12.5, .semibold)).lineLimit(1)
-            Image(systemName: "chevron.down").font(.system(size: 8, weight: .heavy))
+        HStack(spacing: 4) {
+            Text(label).font(D.ui(12.5, .medium)).lineLimit(1)
+            Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .bold))
         }
-        .foregroundStyle(D.accentText)
-        .padding(.horizontal, 11).frame(height: 26)
-        .background(Capsule().fill(D.accentTint))
+        .foregroundStyle(D.t3)
+        .frame(height: 26)
+        .contentShape(Rectangle())
     }
 
     private var menu: some View {
@@ -176,7 +176,7 @@ struct RoutePicker: View {
 /// Everything under the question: routing, the answer, its receipt, and the second opinion.
 struct AskBody: View {
     @Environment(AppModel.self) private var model
-    /// In the main window the receipt folds to one line and the second opinion to one row.
+    /// In the main window the receipt lives in the composer and the second opinion is one quiet link.
     var compact = false
 
     var body: some View {
@@ -200,8 +200,8 @@ struct AskBody: View {
         default:
             EmptyView()
         }
-        if let receipt = ask.receipt, ask.phase != .routing {
-            ReceiptView(receipt: receipt, compact: compact)
+        if !compact, let receipt = ask.receipt, ask.phase != .routing {
+            ReceiptView(receipt: receipt)
         }
         if let second = ask.second {
             SecondOpinionView(second: second, compact: compact)
@@ -250,56 +250,20 @@ struct ConsentCard: View {
 
 struct ReceiptView: View {
     var receipt: Receipt
-    var compact = false
-    @State private var expanded = false
 
-    var body: some View {
-        if compact && !expanded { line } else { card }
-    }
-
-    /// The receipt as one quiet line under an answer: where it ran, how fast, what it cost. Click for why.
-    private var line: some View {
-        Button { withAnimation(.easeOut(duration: 0.18)) { expanded = true } } label: {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 10.5, weight: .medium))
-                Text(summary).font(D.ui(12))
-                Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .bold)).opacity(0.7)
-            }
-            .foregroundStyle(D.t5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Where this ran, and why")
-    }
-
-    private var summary: String {
-        var parts = [receipt.place, Self.modelName(receipt.model)]
-        if receipt.tokPerSec > 0 { parts.append("\(Int(receipt.tokPerSec.rounded())) tok/s") }
-        parts.append(receipt.paidWithKey ? receipt.usd.dollars : receipt.credits == 0 ? "free" : "\(receipt.credits) credits")
-        if receipt.isPrivate { parts.append("private") }
-        return parts.joined(separator: " · ")
-    }
-
-    /// "mlx-community/Qwen2.5-0.5B-Instruct-4bit" -> "Qwen2.5 0.5B"; names like "Qwen3 235B" pass through.
-    static func modelName(_ id: String) -> String {
-        var name = id.split(separator: "/").last.map(String.init) ?? id
-        for suffix in ["-4bit", "-8bit", "-bf16", "-Instruct", "-Chat", "-it"] {
-            name = name.replacingOccurrences(of: suffix, with: "")
-        }
-        return name.replacingOccurrences(of: "-", with: " ")
-    }
+    var body: some View { card }
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 if receipt.macs.isEmpty {
-                    Image(systemName: icon).font(.system(size: 14, weight: .medium)).foregroundStyle(D.t2)
+                    Image(systemName: receipt.symbol).font(.system(size: 14, weight: .medium)).foregroundStyle(D.t2)
                         .frame(width: 32, height: 32).background(RoundedRectangle(cornerRadius: 9).fill(D.raised))
                 } else {
                     MacsServing(macs: receipt.macs, asleepID: receipt.asleepMacID, serving: !receipt.finished)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ran on \(receipt.place) · \(Self.modelName(receipt.model))").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
+                    Text("Ran on \(receipt.place) · \(receipt.modelName)").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
                     Text(subline).font(D.ui(12)).foregroundStyle(D.t4)
                 }
                 Spacer()
@@ -316,9 +280,6 @@ struct ReceiptView: View {
                 .fixedSize()
             }
             .padding(14)
-            .contentShape(Rectangle())
-            .onTapGesture { if compact { withAnimation(.easeOut(duration: 0.18)) { expanded = false } } }
-            if !compact || expanded {
             Hairline().padding(.horizontal, 14)
             VStack(alignment: .leading, spacing: 9) {
                 CapLabel("Why this route")
@@ -336,18 +297,8 @@ struct ReceiptView: View {
                 }
             }
             .padding(14)
-            }
         }
         .card(fill: D.deep)
-    }
-
-    private var icon: String {
-        switch receipt.destination {
-        case .thisMac: "desktopcomputer"
-        case .frontier: "sparkle"
-        case .publicPool: "globe"
-        case .yourPool: "network"
-        }
     }
 
     private var subline: String {

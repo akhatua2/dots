@@ -67,11 +67,8 @@ private struct Conversation: View {
                     // The turn being shown live below is drawn there, with its second opinion.
                     if !(live && turn.id == ask.recordedTurnID) {
                         QuestionBubble(text: turn.question, attachment: turn.attachment)
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text(turn.answer).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            if let receipt = turn.receipt { ReceiptView(receipt: receipt, compact: true) }
-                        }
+                        Text(turn.answer).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 if live {
@@ -138,6 +135,7 @@ struct AskComposer: View {
                 Button(action: pickFile) { Image(systemName: "paperclip").font(.system(size: 13, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(D.t4)
                 Spacer()
+                LastRun()
                 RoutePicker()
                 SendButton(enabled: canSend, busy: ask.isBusy, action: send)
             }
@@ -165,6 +163,24 @@ struct AskComposer: View {
         panel.allowedContentTypes = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText]
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url) }
+    }
+}
+
+/// Where the last answer ran, how fast, and what it cost, beside the route picker. Hover for why.
+private struct LastRun: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let ask = model.ask
+        let last = model.chats.current?.turns.last?.receipt
+        if let receipt = ask.isBusy ? (ask.receipt ?? last) : last {
+            HStack(spacing: 5) {
+                Image(systemName: receipt.symbol).font(.system(size: 10, weight: .medium))
+                Text(receipt.summary).font(D.ui(12)).lineLimit(1)
+            }
+            .foregroundStyle(D.t5)
+            .help(receipt.why)
+        }
     }
 }
 

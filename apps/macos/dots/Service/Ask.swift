@@ -25,6 +25,40 @@ struct Receipt: Codable, Equatable {
     var fallbackNote: String?
 }
 
+extension Receipt {
+    /// One quiet line: where it ran, the model, how fast, what it cost.
+    var summary: String {
+        var parts = [place, modelName]
+        if tokPerSec > 0 { parts.append("\(Int(tokPerSec.rounded())) tok/s") }
+        parts.append(paidWithKey ? usd.dollars : credits == 0 ? "free" : "\(credits) credits")
+        if isPrivate { parts.append("private") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Why it went where it did, one reason a line.
+    var why: String {
+        (reasons.map(\.text) + [fallbackNote, handoffNote].compactMap { $0 }).joined(separator: "\n")
+    }
+
+    var symbol: String {
+        switch destination {
+        case .thisMac: "desktopcomputer"
+        case .frontier: "sparkle"
+        case .publicPool: "globe"
+        case .yourPool: "network"
+        }
+    }
+
+    /// "mlx-community/Qwen2.5-0.5B-Instruct-4bit" -> "Qwen2.5 0.5B"; names like "Qwen3 235B" pass through.
+    var modelName: String {
+        var name = model.split(separator: "/").last.map(String.init) ?? model
+        for suffix in ["-4bit", "-8bit", "-bf16", "-Instruct", "-Chat", "-it"] {
+            name = name.replacingOccurrences(of: suffix, with: "")
+        }
+        return name.replacingOccurrences(of: "-", with: " ")
+    }
+}
+
 struct ReceiptMac: Codable, Equatable, Identifiable {
     var id: String
     var initial: String
