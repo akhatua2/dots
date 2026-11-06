@@ -151,6 +151,9 @@ struct RoutePicker: View {
             Section("Frontier, paid in credits") {
                 ForEach(FrontierModel.all) { f in Button("\(f.name) · \(f.credits) credits") { model.ask.forcedID = "frontier:\(f.id)" } }
             }
+            Divider()
+            // A pool's draft model guesses the next words and the pool checks them at once: written answers only
+            Toggle("Draft ahead in pools", isOn: Binding(get: { model.settings.draftAhead }, set: { model.settings.draftAhead = $0 }))
         } label: {
             pill
         }

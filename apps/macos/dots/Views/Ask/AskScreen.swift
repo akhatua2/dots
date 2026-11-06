@@ -148,11 +148,9 @@ struct AskComposer: View {
                 Button(action: pickFile) { Image(systemName: "paperclip").font(.system(size: 13, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(D.t4)
                 Spacer()
-                LastRun()
                 if Drawing.wantsPicture(ask.input, hasPicture: false) && ask.attachment?.picture == nil {
                     PictureSizePicker()
                 }
-                DraftAheadToggle()
                 RoutePicker()
                 SendButton(enabled: canSend, busy: ask.isBusy, action: send)
             }
@@ -180,55 +178,6 @@ struct AskComposer: View {
         panel.allowedContentTypes = AskController.attachable
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) }
-    }
-}
-
-/// Lets a pool's draft model guess ahead. It only means something for written answers from a pool, so it
-/// hides when the route is a frontier model or the question asks for a picture.
-private struct DraftAheadToggle: View {
-    @Environment(AppModel.self) private var model
-    @State private var hovered = false
-
-    var body: some View {
-        let on = model.settings.draftAhead
-        let ask = model.ask
-        if !(ask.forcedID?.hasPrefix("frontier:") ?? false),
-           !Drawing.wantsPicture(ask.input, hasPicture: ask.attachment?.picture != nil) {
-            Button { model.settings.draftAhead.toggle() } label: {
-                HStack(spacing: 5) {
-                    Circle().fill(on ? D.accent : D.btn).frame(width: 6, height: 6)
-                    Text("Draft ahead").font(D.ui(12.5, .medium))
-                }
-                .foregroundStyle(on || hovered ? D.t2 : D.t4)
-                .padding(.horizontal, 8).frame(height: 26)
-                .background(Capsule().fill(hovered ? D.raised : .clear))
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovered = $0 }
-            .help(on ? "A small model guesses the next words and the pool checks them in batches: faster when a pool spans Macs. Click to turn off."
-                     : "Off: the pool writes one word at a time. Click to let a small model guess ahead.")
-            .accessibilityLabel("Draft ahead")
-            .accessibilityValue(on ? "on" : "off")
-        }
-    }
-}
-
-/// Where the last answer ran, how fast, and what it cost, beside the route picker. Hover for why.
-private struct LastRun: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let ask = model.ask
-        let last = model.chats.current?.turns.last?.receipt
-        if let receipt = ask.isBusy ? (ask.receipt ?? last) : last {
-            HStack(spacing: 5) {
-                Image(systemName: receipt.symbol).font(.system(size: 10, weight: .medium))
-                Text(receipt.summary).font(D.ui(12)).lineLimit(1)
-            }
-            .foregroundStyle(D.t5)
-            .help(receipt.why)
-        }
     }
 }
 

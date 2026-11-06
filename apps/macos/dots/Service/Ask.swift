@@ -52,6 +52,12 @@ extension Receipt {
     }
 
     /// Why it went where it did, one reason a line.
+    /// Where it ran and what it cost, as a sentence: "Answered in dots pool by Qwen3.5 0.8B, free."
+    var sentence: String {
+        let cost = paidWithKey ? "billed \(usd.dollars) to your key" : credits == 0 ? "free" : "for \(credits) credits"
+        return "Answered in \(place) by \(modelName), \(cost)."
+    }
+
     var why: String {
         (reasons.map(\.text) + [fallbackNote, handoffNote].compactMap { $0 }).joined(separator: "\n")
     }

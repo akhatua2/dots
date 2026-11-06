@@ -18,6 +18,9 @@ struct AnswerActions: View {
                        on: turn.rating == 1) { model.chats.rate(turn.id, 1) }
             ActionIcon(symbol: turn.rating == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown", help: "Bad answer",
                        on: turn.rating == -1) { model.chats.rate(turn.id, -1) }
+            if let receipt = turn.receipt {
+                ActionIcon(symbol: receipt.symbol, help: ([receipt.sentence] + [receipt.why]).joined(separator: "\n")) {}
+            }
             if let drafted {
                 Text(drafted).font(D.ui(12).monospacedDigit()).foregroundStyle(D.t5).padding(.leading, 8)
                     .help(helpText)

@@ -22,13 +22,15 @@ struct PictureAnswer: View {
                 }
             }
             .grain(grainAmount, alive: drawing && !reduceMotion)
+            .overlay(alignment: .bottomLeading) {
+                if let progress, drawing {
+                    DrawingProgress(progress: progress).padding(10).transition(.opacity)
+                }
+            }
             .aspectRatio(aspect, contentMode: .fit)
             .frame(maxWidth: 460, alignment: .leading)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .animation(.easeInOut(duration: 0.4), value: progress?.step)
-            if let progress, drawing {
-                DrawingProgress(progress: progress)
-            }
         }
     }
 
@@ -46,9 +48,8 @@ struct PictureAnswer: View {
     }
 }
 
-/// How far a drawing has come, in the app's own dots: one a step, quiet once drawn, the one being drawn
-/// breathing in orange, the rest still to come. Beside them, about how long is left. The height of the row of
-/// actions that replaces it.
+/// How far a drawing has come, on the picture itself, in the app's own dots: one a step, light once drawn, the
+/// one being drawn breathing in orange, the rest still to come; then, once it can tell, about how long is left.
 private struct DrawingProgress: View {
     var progress: AskController.PictureProgress
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -56,17 +57,20 @@ private struct DrawingProgress: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
             let now = context.date
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 HStack(spacing: 5) {
                     ForEach(0..<max(progress.of, 1), id: \.self) { i in
                         dot(i, at: now)
                     }
                 }
-                Text(caption(at: now)).font(D.ui(12).monospacedDigit()).foregroundStyle(D.t5)
-                    .contentTransition(.numericText(countsDown: true))
+                if let left = timeLeft(at: now) {
+                    Text(left).font(D.ui(11.5, .medium).monospacedDigit()).foregroundStyle(D.t2)
+                        .contentTransition(.numericText(countsDown: true))
+                }
             }
+            .padding(.horizontal, 10).frame(height: 24)
+            .background(Capsule().fill(D.bg0.opacity(0.6)))
         }
-        .frame(height: 26)
         .animation(.easeOut(duration: 0.3), value: progress.step)
         .help("One Mac in the pool draws the picture, one step at a time, and sends it after each so you see it take shape.")
     }
@@ -75,21 +79,21 @@ private struct DrawingProgress: View {
     @ViewBuilder private func dot(_ i: Int, at now: Date) -> some View {
         let current = min(progress.step, max(progress.of - 1, 0))
         if i < current {
-            Circle().fill(D.t4).frame(width: 6, height: 6)
+            Circle().fill(D.t2).frame(width: 6, height: 6)
         } else if i == current {
             let phase = reduceMotion ? 1 : (sin(now.timeIntervalSinceReferenceDate * 3.2) + 1) / 2
             Circle().fill(D.accent).frame(width: 6, height: 6)
                 .scaleEffect(1 + 0.35 * phase)
                 .opacity(0.55 + 0.45 * phase)
         } else {
-            Circle().fill(D.btn).frame(width: 6, height: 6)
+            Circle().fill(D.t2.opacity(0.25)).frame(width: 6, height: 6)
         }
     }
 
-    private func caption(at now: Date) -> String {
-        guard progress.image != nil, progress.of > 0 else { return "Starting" }
-        guard let left = progress.secondsLeft(at: now) else { return "Drawing" }
+    private func timeLeft(at now: Date) -> String? {
+        guard let left = progress.secondsLeft(at: now) else { return nil }
         let seconds = Int(left.rounded())
-        return seconds < 90 ? "About \(seconds) s left" : "About \(Int((left / 60).rounded())) min left"
+        let span = seconds < 90 ? seconds.counted("second") : Int((left / 60).rounded()).counted("minute")
+        return "About \(span) left"
     }
 }
