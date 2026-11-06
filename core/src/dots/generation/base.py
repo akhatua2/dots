@@ -26,6 +26,8 @@ class GenerationRequest:
     # Text a draft model has proposed but the model hasn't confirmed yet, replacing the last proposal; "" clears it.
     # Only speculative decoding has drafts. It is for showing, never part of the answer.
     on_draft: TokenCallback | None = None
+    # After each check of a draft: how many of the proposed tokens the model kept, and how many there were
+    on_verified: "Callable[[int, int], Awaitable[None]] | None" = None
     forward_hidden: "ForwardHidden | None" = None
     trim_remote: TrimRemote | None = None
     # Penalize tokens seen in the last `repetition_context` generated

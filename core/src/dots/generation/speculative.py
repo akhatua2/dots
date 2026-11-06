@@ -77,7 +77,8 @@ class SpeculativeGeneration(GenerationStrategy):
                 fed = proposal[-1]
             proposed += self.k
             if request.on_draft is not None:
-                await request.on_draft(target.decode_tokens(proposal))
+                # `token` isn't shown yet either: it is emitted once the pool has checked the proposal
+                await request.on_draft(_pending_text(target, out, [token, *proposal]))
 
             # One pass of the big model over `token` and every proposal: row i predicts what follows input i.
             rows = await target.decode_many(conv, [token, *proposal], forward_hidden=request.forward_hidden)
@@ -102,6 +103,8 @@ class SpeculativeGeneration(GenerationStrategy):
                 await emit(guess)
                 emitted += 1
             accepted_total += emitted - 1
+            if request.on_verified is not None:
+                await request.on_verified(emitted - 1, self.k)
 
             # Keep exactly what was emitted. The big model was fed 1 + k tokens; the draft was fed k.
             await _trim(target, request, conv, (1 + self.k) - emitted)
@@ -133,6 +136,15 @@ class SpeculativeGeneration(GenerationStrategy):
                 "draft_accepted": accepted_total,
             },
         )
+
+
+def _pending_text(runtime: "BackendRuntime", emitted: list[int], pending: list[int]) -> str:
+    """What `pending` adds after the emitted tokens. Decoded after the last emitted token, so the first
+    pending word keeps its leading space (a tokenizer drops it when decoding a word on its own)."""
+    anchor = emitted[-1:]
+    before = runtime.decode_tokens(anchor)
+    after = runtime.decode_tokens(anchor + pending)
+    return after[len(before):] if after.startswith(before) else runtime.decode_tokens(pending)
 
 
 async def _trim(target: "BackendRuntime", request: GenerationRequest, conv: str, n: int) -> None:

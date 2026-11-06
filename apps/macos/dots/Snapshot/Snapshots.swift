@@ -97,9 +97,14 @@ enum Snapshots {
         ask.answer = String(full[..<confirmed])
         ask.draft = String(full[confirmed..<proposed])
         ask.phase = .streaming
+        ask.checks = [(3, 4), (1, 4), (4, 4), (0, 4), (2, 4), (4, 4), (3, 4), (1, 4), (4, 4), (2, 4)]
+            .map { DraftCheck(kept: $0.0, proposed: $0.1) }
+        ask.fresh = (12, .now)
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-drafting", fitHeight: true)
         ask.answer = full
         ask.draft = ""
+        ask.checks = []
+        ask.fresh = nil
         ask.phase = .done
 
         // 5. A week of work, and your profile with this week's note

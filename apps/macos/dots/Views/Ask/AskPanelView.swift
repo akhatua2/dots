@@ -185,7 +185,16 @@ struct AskBody: View {
             RoutingRow(decision: decision)
         }
         if !ask.answer.isEmpty || !ask.draft.isEmpty {
-            MarkdownText(text: ask.answer, draft: ask.draft)
+            // While a draft model works: its guesses breathe in grey, and what a check confirms flashes orange
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: !ask.isBusy || ask.checks.isEmpty)) { context in
+                let glow = ask.fresh.map { max(0, 1 - context.date.timeIntervalSince($0.at) / 0.7) } ?? 0
+                let breath = 0.42 + 0.14 * sin(context.date.timeIntervalSinceReferenceDate * 5)
+                MarkdownText(text: ask.answer, draft: ask.draft, fresh: glow > 0 ? ask.fresh?.count ?? 0 : 0,
+                             tint: .init(glow: glow, draft: breath))
+            }
+        }
+        if !ask.checks.isEmpty {
+            SpeculationMeter(checks: ask.checks, live: ask.isBusy)
         }
         switch ask.phase {
         case .needsConsent(let why):

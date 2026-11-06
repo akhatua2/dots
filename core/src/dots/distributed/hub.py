@@ -2020,11 +2020,11 @@ class Hub:
         text = msg.get("text", "")
         if not conv_id:
             return None
-        if msg.get("draft"):  # a proposal, not a token: show it, don't count it
+        if msg.get("draft"):  # a proposal or how a check went, not a token: show it, don't count it
             draft_cb = self._draft_routers.get(conv_id)
             if draft_cb is not None:
                 try:
-                    await draft_cb(text)
+                    await draft_cb({k: msg[k] for k in ("text", "kept", "proposed") if k in msg})
                 except Exception:
                     self._draft_routers.pop(conv_id, None)
             return None

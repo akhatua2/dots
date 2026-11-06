@@ -8,15 +8,18 @@ import SwiftUI
 struct MarkdownText: View {
     var text: String
     var draft = ""
+    /// The answer's last characters a check just confirmed, which glow by `tint.glow`
+    var fresh = 0
+    var tint = Markdown.Tint()
 
     var body: some View {
-        let blocks = Markdown.blocks(draft.isEmpty ? text : text + Markdown.draftMark + draft)
+        let blocks = Markdown.blocks(Markdown.marked(text, fresh: fresh, draft: draft))
         let pieces = Markdown.pieces(blocks)
         let firstDraft = draft.isEmpty ? nil : pieces.firstIndex(where: \.holdsDraft)
         VStack(alignment: .leading, spacing: 14) {
             ForEach(Array(pieces.enumerated()), id: \.offset) { i, piece in
-                PieceView(piece: piece)
-                    .opacity(firstDraft.map { i > $0 } == true ? Markdown.draftOpacity : 1)
+                PieceView(piece: piece, tint: tint)
+                    .opacity(firstDraft.map { i > $0 } == true ? tint.draft : 1)
             }
         }
         .textSelection(.enabled)
@@ -28,17 +31,18 @@ struct MarkdownText: View {
 /// rules are views of their own.
 private struct PieceView: View {
     var piece: Markdown.Piece
+    var tint: Markdown.Tint
 
     var body: some View {
         switch piece {
         case .prose(let blocks):
-            Text(Markdown.prose(blocks))
+            Text(Markdown.prose(blocks, tint: tint))
                 .font(D.ui(15))
                 .foregroundStyle(D.t2)
                 .lineSpacing(3.5)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .code(let language, let code):
-            CodeBlock(language: language, code: code)
+            CodeBlock(language: language, code: code, tint: tint)
         case .table(let header, let rows):
             MarkdownTable(header: header, rows: rows)
         case .rule:
@@ -51,6 +55,7 @@ private struct PieceView: View {
 private struct CodeBlock: View {
     var language: String
     var code: String
+    var tint = Markdown.Tint()
     @State private var copied = false
 
     var body: some View {
@@ -69,7 +74,7 @@ private struct CodeBlock: View {
             .frame(height: 32)
             Rectangle().fill(D.line).frame(height: 1)
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(Markdown.withDraft(code))
+                Text(Markdown.withDraft(code, tint: tint))
                     .font(D.mono(13))
                     .foregroundStyle(D.t2)
                     .lineSpacing(3)
@@ -82,7 +87,7 @@ private struct CodeBlock: View {
 
     private func copy() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(code.components(separatedBy: Markdown.draftMark)[0], forType: .string)
+        NSPasteboard.general.setString(Markdown.unmarked(code.components(separatedBy: Markdown.draftMark)[0]), forType: .string)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
     }
@@ -119,7 +124,36 @@ private struct MarkdownTable: View {
 enum Markdown {
     /// Marks where the confirmed answer ends and the draft begins. A private-use character no model writes.
     static let draftMark = "\u{E000}"
+    /// Marks where the text a check just confirmed begins
+    static let freshMark = "\u{E001}"
     static let draftOpacity = 0.4
+
+    /// How the parts of a speculative answer look right now: how brightly just-confirmed text glows
+    /// (0 to 1), and how strongly the draft shows.
+    struct Tint {
+        var glow = 0.0
+        var draft = Markdown.draftOpacity
+    }
+
+    /// The answer with its marks: before the text a check just confirmed, and before the draft.
+    static func marked(_ text: String, fresh: Int, draft: String) -> String {
+        var out = text
+        if fresh > 0 {
+            out.insert(contentsOf: freshMark, at: out.index(out.endIndex, offsetBy: -min(fresh, out.count)))
+        }
+        return draft.isEmpty ? out : out + draftMark + draft
+    }
+
+    static func unmarked(_ text: String) -> String {
+        text.replacingOccurrences(of: freshMark, with: "").replacingOccurrences(of: draftMark, with: "")
+    }
+
+    /// The dots orange fading back to the answer's grey as `glow` goes from 1 to 0.
+    static func glowColor(_ glow: Double) -> Color {
+        let g = max(0, min(1, glow))
+        let mix = { (from: Double, to: Double) in (from + (to - from) * g) / 255 }
+        return Color(.sRGB, red: mix(0xD6, 0xFF), green: mix(0xD6, 0x8A), blue: mix(0xD6, 0x5C))
+    }
 
     enum Block: Equatable {
         case heading(level: Int, text: String)
@@ -180,7 +214,7 @@ enum Markdown {
     }
 
     /// Paragraphs, headings, lists, quotes and math as one styled text, a blank line between blocks.
-    static func prose(_ blocks: [Block]) -> AttributedString {
+    static func prose(_ blocks: [Block], tint: Tint = Tint()) -> AttributedString {
         var out = AttributedString()
         for (i, block) in blocks.enumerated() {
             if i > 0 { out += AttributedString("\n\n") }
@@ -204,7 +238,7 @@ enum Markdown {
                 quote.foregroundColor = D.t3
                 out += quote
             case .math(let latex):
-                var math = AttributedString(LaTeX.plain(latex))
+                var math = AttributedString(LaTeX.plain(unmarked(latex)))
                 math.font = .system(size: 17, design: .serif)
                 math.foregroundColor = D.t1
                 out += math
@@ -212,7 +246,7 @@ enum Markdown {
                 break
             }
         }
-        return greyDraft(out)
+        return greyDraft(out, tint: tint)
     }
 
     struct ListItem: Equatable {
@@ -318,7 +352,7 @@ enum Markdown {
     }
 
     /// Bold, italics, inline code, links and inline math, styled for the answer.
-    static func inline(_ text: String, greyingDraft: Bool = true) -> AttributedString {
+    static func inline(_ text: String, greyingDraft: Bool = true, tint: Tint = Tint()) -> AttributedString {
         let source = inlineMath(text)
         var out = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(source)
@@ -332,20 +366,26 @@ enum Markdown {
                 out[run.range].foregroundColor = D.accentText
             }
         }
-        return greyingDraft ? greyDraft(out) : out
+        return greyingDraft ? greyDraft(out, tint: tint) : out
     }
 
     /// Plain text with the draft, if any, greyed out.
-    static func withDraft(_ text: String) -> AttributedString {
-        greyDraft(AttributedString(text))
+    static func withDraft(_ text: String, tint: Tint = Tint()) -> AttributedString {
+        greyDraft(AttributedString(text), tint: tint)
     }
 
-    /// Everything after the draft mark in grey, and the mark itself gone.
-    private static func greyDraft(_ text: AttributedString) -> AttributedString {
+    /// Just-confirmed text in its glow, everything after the draft mark in grey, and the marks gone.
+    private static func greyDraft(_ text: AttributedString, tint: Tint) -> AttributedString {
         var out = text
-        guard let mark = out.range(of: draftMark) else { return out }
-        out[mark.upperBound...].foregroundColor = D.t2.opacity(draftOpacity)
-        out.removeSubrange(mark)
+        if let fresh = out.range(of: freshMark) {
+            let end = out.range(of: draftMark)?.lowerBound ?? out.endIndex
+            out[fresh.upperBound..<end].foregroundColor = glowColor(tint.glow)
+            out.removeSubrange(fresh)
+        }
+        if let mark = out.range(of: draftMark) {
+            out[mark.upperBound...].foregroundColor = D.t2.opacity(tint.draft)
+            out.removeSubrange(mark)
+        }
         return out
     }
 

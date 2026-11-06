@@ -449,10 +449,14 @@ class HttpApi:
         async def emit(text: str) -> None:
             await response.write(chunk({"content": text}))
 
-        async def emit_draft(text: str) -> None:
-            # Not part of the answer: OpenAI clients ignore the extra field; the dots app shows it greyed out
-            payload = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                       "dots": {"event": "draft", "text": text}}
+        async def emit_draft(event: dict) -> None:
+            # Not part of the answer: OpenAI clients ignore the extra field. The dots app shows the draft's
+            # proposal greyed out, and each check as kept and rejected tokens.
+            if "kept" in event:
+                dots = {"event": "verified", "kept": int(event["kept"]), "proposed": int(event["proposed"])}
+            else:
+                dots = {"event": "draft", "text": event.get("text", "")}
+            payload = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}], "dots": dots}
             await response.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
 
         try:

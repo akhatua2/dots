@@ -147,19 +147,25 @@ async def test_remote_caches_are_trimmed_by_the_same_amount():
 async def test_each_round_shows_its_draft_and_the_last_clears_it():
     drafts: list[str] = []
     answer: list[str] = []
+    checks: list[tuple[int, int]] = []
 
     async def on_draft(text: str) -> None:
         drafts.append(text)
+
+    async def on_verified(kept: int, proposed: int) -> None:
+        checks.append((kept, proposed))
 
     async def on_token(text: str) -> None:
         answer.append(text)
 
     target, draft = FakeModel(target_rule), FakeModel(draft_rule_every_third_wrong)
     result = await SpeculativeGeneration(draft, draft_tokens=4).generate(
-        request(target, max_tokens=40, on_draft=on_draft, on_token=on_token))
+        request(target, max_tokens=40, on_draft=on_draft, on_token=on_token, on_verified=on_verified))
     assert len(drafts) == result.stats["verify_passes"] + 1, "one draft a round, then one to clear it"
     assert all(drafts[:-1]) and drafts[-1] == ""
     assert len(answer) == result.stats["decode_tokens"], "only emitted tokens stream as the answer; drafts never do"
+    assert len(checks) == result.stats["verify_passes"] and all(p == 4 and 0 <= k <= 4 for k, p in checks)
+    assert sum(k for k, _ in checks) == result.stats["draft_accepted"]
 
 
 async def test_falls_back_when_a_backend_cannot_verify_several_tokens():

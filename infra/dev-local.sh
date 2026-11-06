@@ -35,6 +35,8 @@ start() {
   [ -x "$PY" ] || { echo "No Python env yet. Run: cd core && uv sync --extra mac" >&2; exit 1; }
   mkdir -p "$LOGS"
   if pgrep -f "dots.cli hub" >/dev/null; then echo "hub already running"; else
+    # The ticket carries the hub's current address; wait for this run's, not the last one's
+    rm -f "$HOME_DIR/hub_ticket.txt"
     run nohup "$PY" -m dots.cli hub --http-port "$HTTP_PORT" >"$LOGS/hub.log" 2>&1 &
     for _ in $(seq 1 30); do [ -s "$HOME_DIR/hub_ticket.txt" ] && break; sleep 1; done
   fi

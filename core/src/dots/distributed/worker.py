@@ -917,6 +917,15 @@ class Worker:
             except Exception:
                 log.debug("draft notify failed", exc_info=True)
 
+        async def on_verified(kept: int, proposed: int) -> None:
+            """How a check of the draft went, so the asker can see speculation working."""
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify("delegate_token", conv_id=conv_id, draft=True, kept=kept, proposed=proposed)
+            except Exception:
+                log.debug("verified notify failed", exc_info=True)
+
         async with lock:
             try:
                 forward_hidden = (
@@ -946,6 +955,7 @@ class Worker:
                         temperature=temperature,
                         on_token=on_token,
                         on_draft=on_draft,
+                        on_verified=on_verified,
                         forward_hidden=forward_hidden,
                         trim_remote=trim_remote,
                     )
