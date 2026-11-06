@@ -161,7 +161,7 @@ final class Simulation: DotsBackend {
             // Backing a pool while it's small is what makes you an early backer
             if s.pools[i].totalMacs < 20, !s.badges.contains(where: { $0.id == "backer-\(poolID)" }) {
                 let b = Badge(id: "backer-\(poolID)", symbol: "checkmark.seal.fill", title: "Early backer",
-                              detail: "Endorsed \(s.pools[i].name) at \(s.pools[i].totalMacs) Macs", date: .now, isNew: true)
+                              detail: "Endorsed \(s.pools[i].name) at \(s.pools[i].totalMacs.counted("Mac"))", date: .now, isNew: true)
                 s.badges.insert(b, at: 0)
                 badge = b
             }

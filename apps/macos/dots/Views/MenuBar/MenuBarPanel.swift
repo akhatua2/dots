@@ -119,9 +119,11 @@ struct MenuBarPanel: View {
     /// Tonight so far, in the pool this Mac lends to.
     private func tonightModule(_ s: NetworkState, _ pool: Pool) -> some View {
         let night = Date().nightStart
-        let runs = (s.nights ?? []).filter { $0.date == night && $0.poolID == pool.id }.reduce(0) { $0 + $1.runs }
+        let tonight = (s.nights ?? []).filter { $0.date == night && $0.poolID == pool.id }
+        let runs = tonight.reduce(0) { $0 + $1.runs }
+        let tokens = tonight.reduce(0) { $0 + $1.tokenCount }
         let earned = s.creditLog.filter { $0.date >= night && $0.amount > 0 && $0.poolID == pool.id && ($0.kind == "lend" || $0.kind == "network") }.reduce(0) { $0 + $1.amount }
-        return StatRow(stats: [.init(value: runs.grouped, label: "runs tonight"), .init(value: Runs.tokens(runs), label: "tokens"),
+        return StatRow(stats: [.init(value: runs.grouped, label: "runs tonight"), .init(value: Runs.short(tokens), label: "tokens"),
                                .init(value: "+\(earned.grouped)", label: "credits", accent: true)], size: 18)
             .module()
     }

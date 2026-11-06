@@ -234,8 +234,11 @@ final class CloudBackend: DotsBackend {
         saveLocal()
     }
 
+    /// Against the mock, the change shows at once by the same rules the mock runs. Against a real cloud the pool
+    /// counts what this Mac's worker really lends, which only the hub knows, so the app waits for its answer:
+    /// guessing from the setting made the pool's level flip between the guess and the truth on every heartbeat.
     func applyLendingStatus(active: Bool) -> UnlockEvent? {
-        let unlock = mirror.applyLendingStatus(active: active)
+        let unlock = isMock ? mirror.applyLendingStatus(active: active) : nil
         if active != lastActive { beat(active: active) }
         return unlock
     }

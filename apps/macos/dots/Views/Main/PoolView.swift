@@ -45,11 +45,7 @@ struct PoolView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(.horizontal, 40)
-            .padding(.top, 36)
-            .padding(.bottom, 40)
-            .frame(maxWidth: 1_100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .page()
         }
         .confirmationDialog("Leave \(pool.name)?", isPresented: $confirmLeave) {
             Button("Leave \(pool.name)", role: .destructive) { model.leave(pool) }
@@ -117,7 +113,7 @@ struct PoolView: View {
         if pool.isPublic { parts.append("Public pool") }
         parts.append(pool.model?.name ?? "No model yet")
         if pool.level > 0 { parts.append("Level \(pool.level)") }
-        if pool.isPublic { parts.append("\(pool.totalMacs.grouped) Macs") }
+        if pool.isPublic { parts.append(pool.totalMacs.counted("Mac")) }
         return parts.joined(separator: " · ")
     }
 
@@ -158,7 +154,7 @@ struct PoolView: View {
     private func artStage(_ history: PoolHistory) -> some View {
         let s = model.state
         let now = artClock ?? .now
-        let runs = history.runsTonight(now: now)
+        let served = model.state.served(in: pool.id)
         let live = pool.lendingMacs > 0
         let focusIndex = focus.flatMap { id in history.owners.firstIndex(of: id) }
         return VStack(spacing: 0) {
@@ -172,10 +168,10 @@ struct PoolView: View {
             }
             .frame(maxHeight: .infinity)
             .accessibilityElement()
-            .accessibilityLabel("\(pool.name)'s art: a ring for each of its \(history.nights.count) nights, the hours around it, a dot for every 10 runs")
+            .accessibilityLabel("\(pool.name)'s art: a ring for each of its \(history.nights.count.counted("night")), the hours around it, a dot for every 10 runs")
             Rule().padding(.top, 14)
-            StatRow(stats: [.init(value: runs.grouped, label: "runs tonight"),
-                            .init(value: Runs.tokens(runs), label: "tokens"),
+            StatRow(stats: [.init(value: served.runs.grouped, label: "answered"),
+                            .init(value: Runs.short(served.tokens), label: "tokens"),
                             .init(value: "\(pool.tokPerSec)", label: "tokens a second")], size: 18)
                 .padding(.top, 14)
             HStack(spacing: 2) {
@@ -186,9 +182,9 @@ struct PoolView: View {
                 .font(D.ui(12.5)).foregroundStyle(Color(hex: 0x8A8A8A))
                 Spacer()
                 IconButton(symbol: "arrow.down.to.line", help: "Download") {
-                    ArtExport.save(pool: pool, history: history, thisMacKind: s.thisMac.kind)
+                    ArtExport.save(pool: pool, history: history, served: served, thisMacKind: s.thisMac.kind)
                 }
-                IconButton(symbol: "arrow.counterclockwise", help: "Replay the \(history.nights.count) nights") { replayStart = .now }
+                IconButton(symbol: "arrow.counterclockwise", help: "Replay the \(history.nights.count.counted("night"))") { replayStart = .now }
             }
             .frame(height: 28)
             .padding(.top, 12)
@@ -383,7 +379,7 @@ struct ContributionCard: View {
                        range: 1...max(2, maxLend), enabled: on, label: "Lend in \(pool.name)")
                 .help("Lend 1 to \(maxLend) GB. \(s.thisMac.keptGB) GB always stays with your Mac.")
                 .padding(.top, 12)
-            LayerTicks(shares: shares(includeMe: on), live: on && status.isActive)
+            LayerTicks(shares: shares(includeMe: on), live: on && model.backend.worker?.working == true)
                 .padding(.top, 16)
             HStack {
                 Text(layersLine(on: on)).font(D.ui(12)).foregroundStyle(D.label).lineLimit(1)
@@ -484,7 +480,7 @@ struct JoinCard: View {
             Button(elsewhere != nil ? "Lend Here Instead" : "Add My Mac") { model.join(pool) }
                 .buttonStyle(DButtonStyle(kind: .primary, large: true))
                 .disabled(s.thisMac.maxLendGB == 0)
-                .help("About \(pool.creditsPerHour(lendGB: add)) credits an hour while it lends." + (elsewhere.map { " It stops lending to \($0.name)." } ?? ""))
+                .help("About \(pool.creditsPerHour(lendGB: add).counted("credit")) an hour while it lends." + (elsewhere.map { " It stops lending to \($0.name)." } ?? ""))
                 .padding(.top, 16)
         }
         .panel()
@@ -589,7 +585,7 @@ struct EndorseCard: View {
             if pool.endorsedByMe, let at = pool.endorsedAtMacs, at < 20 {
                 HStack(spacing: 8) {
                     DotGlyph(rows: DotGlyph.sprout, size: 12).foregroundStyle(D.accentText)
-                    Text("You're an early backer. You endorsed it at \(at) Macs.").font(D.ui(12.5, .medium)).foregroundStyle(D.t2)
+                    Text("You're an early backer. You endorsed it at \(at.counted("Mac")).").font(D.ui(12.5, .medium)).foregroundStyle(D.t2)
                 }
                 .padding(.top, 12)
             }

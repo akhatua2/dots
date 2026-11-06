@@ -228,7 +228,7 @@ extension AppModel {
                          fallback: fallback, format: body.format)
             backend.noteKeyUse(id: key.id, credits: credits, usd: usd)
             var d: [String: Any] = [
-                "ran_on": r.macs > 0 ? "\(c.place) · \(r.macs) Macs" : c.destination == .thisMac ? "This Mac" : c.place,
+                "ran_on": r.macs > 0 ? "\(c.place) · \(r.macs.counted("Mac"))" : c.destination == .thisMac ? "This Mac" : c.place,
                 "model": c.model, "why": decision.reasons.map(\.text) + ["Answered through \(t.via)."],
                 "credits": credits, "usd": usd, "saved_usd": saved, "compared_with": settings.savingsBaseline,
                 "private": isPrivate, "simulated": r.simulated, "input_tokens": input, "output_tokens": output,

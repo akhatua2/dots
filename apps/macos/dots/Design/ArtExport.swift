@@ -5,10 +5,10 @@ import UniformTypeIdentifiers
 /// The art as an image to keep: tonight's edition at desktop size, with a quiet caption, saved where you choose.
 @MainActor
 enum ArtExport {
-    static func save(pool: Pool, history: PoolHistory, thisMacKind: String) {
+    static func save(pool: Pool, history: PoolHistory, served: (runs: Int, tokens: Int), thisMacKind: String) {
         let now = Date()
         let edition = history.nights.count
-        let poster = ArtPoster(pool: pool, history: history, now: now)
+        let poster = ArtPoster(pool: pool, history: history, served: served, now: now)
             .environment(\.artClock, now)
             .environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: poster)
@@ -30,10 +30,10 @@ enum ArtExport {
 struct ArtPoster: View {
     var pool: Pool
     var history: PoolHistory
+    var served: (runs: Int, tokens: Int)
     var now: Date
 
     var body: some View {
-        let runs = history.runsTonight(now: now)
         ZStack(alignment: .topLeading) {
             D.bg0
             RingsArt(history: history, size: 846, cells: 423, lastNights: 30, showNow: false)
@@ -45,7 +45,7 @@ struct ArtPoster: View {
             .position(x: 604, y: 450)
             VStack(alignment: .trailing, spacing: 6) {
                 Text("\(pool.name.uppercased()) · NO. \(history.nights.count)").foregroundStyle(D.t3)
-                Text("\(now.formatted(.dateTime.day().month(.abbreviated).year()).uppercased()) · \(runs.grouped) RUNS · \(Runs.tokens(runs)) TOKENS")
+                Text("\(now.formatted(.dateTime.day().month(.abbreviated).year()).uppercased()) · \(served.runs.grouped) RUNS · \(Runs.short(served.tokens)) TOKENS")
                 HStack(spacing: 7) {
                     Rectangle().fill(D.accent).frame(width: 7, height: 7)
                     Text("YOUR MAC")

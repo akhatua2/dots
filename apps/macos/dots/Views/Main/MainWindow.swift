@@ -221,7 +221,7 @@ struct PoolRow: View {
             .frame(height: 38)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
             .contentShape(Rectangle())
-            .help("\(pool.totalMacs.grouped) Macs · \(pool.model?.name ?? "No model yet")")
+            .help("\(pool.totalMacs.counted("Mac")) · \(pool.model?.name ?? "No model yet")")
         }
         .buttonStyle(.plain)
     }

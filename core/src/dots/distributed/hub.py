@@ -56,6 +56,16 @@ _PLACEMENT_RAM_MARGIN_ENV = "DOTS_PLACEMENT_RAM_MARGIN_GB"
 _HEAD_WORKSPACE_RAM_ENV = "DOTS_HEAD_WORKSPACE_RAM_GB"
 
 
+def _note_speed(deployment: "ModelDeployment", resp: dict) -> None:
+    """Folds a finished turn's decode speed into the model's recent speed."""
+    decoded = int(resp.get("decode_tokens") or 0)
+    seconds = float(resp.get("elapsed_ms") or 0) / 1000
+    if decoded < 2 or seconds <= 0:
+        return
+    rate = decoded / seconds
+    deployment.tok_per_sec = rate if not deployment.tok_per_sec else 0.7 * deployment.tok_per_sec + 0.3 * rate
+
+
 def _speculation_note(resp: object) -> str:
     """How much a draft model helped a turn, from the head worker's stats; empty when none ran."""
     if not isinstance(resp, dict) or not resp.get("draft_proposed"):
@@ -93,6 +103,8 @@ class ModelDeployment:
     model_id: str
     n_layers: int = 0
     active_params: int = 0
+    # Recent decode speed in tokens a second, a moving average over finished turns; 0 until one finishes
+    tok_per_sec: float = 0.0
     geometry: ModelGeometry | None = None
     selected_backend: str | None = None
     current_placement: list[tuple[str, int, int, bool]] = field(default_factory=list)
@@ -234,6 +246,8 @@ class Hub:
         # run_turn watchdog to log progress on long turns + by
         # _on_delegate_token to detect the first-token arrival.
         self._turn_token_counts: dict[str, int] = {}
+        # The workers each in-flight turn runs on, so the pool can show who is serving right now.
+        self._serving: dict[str, set[str]] = {}
         self._model_turn_lock = asyncio.Lock()
 
     def _deployment_for(self, model_id: str | None = None) -> ModelDeployment:
@@ -305,6 +319,10 @@ class Hub:
     @_selected_backend.setter
     def _selected_backend(self, value: str | None) -> None:
         self._deployment_for().selected_backend = value
+
+    def is_serving(self, worker_id: str) -> bool:
+        """Whether a worker is part of a turn being answered right now."""
+        return any(worker_id in workers for workers in self._serving.values())
 
     @property
     def _current_placement(self) -> list[tuple[str, int, int, bool]]:
@@ -1473,6 +1491,7 @@ class Hub:
         ui.notice(f"turn {conv.id[:8]} · {selected_model} → {chain_desc}")
         # Track tokens-so-far per conv so the watchdog can report progress.
         self._turn_token_counts[conv.id] = 0
+        self._serving[conv.id] = {worker.id, *(hop["worker_id"] for hop in chain_payload)}
         try:
             t0 = time.perf_counter()
             call_payload = dict(
@@ -1530,6 +1549,7 @@ class Hub:
         finally:
             self._token_routers.pop(conv.id, None)
             self._turn_token_counts.pop(conv.id, None)
+            self._serving.pop(conv.id, None)
 
         if resp.get("kind") != "delegate_done":
             raise RuntimeError(resp.get("error", "delegate_turn failed"))
@@ -1540,6 +1560,7 @@ class Hub:
         active = int(resp.get("active_params") or 0)
         if active and not deployment.active_params:
             deployment.active_params = active
+        _note_speed(deployment, resp)
 
         return resp["text"], {
             "prefill_tokens": int(resp.get("prefill_tokens", 0)),

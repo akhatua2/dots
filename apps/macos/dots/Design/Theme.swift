@@ -63,6 +63,11 @@ enum D {
 }
 
 extension Int {
+    /// 1.counted("Mac") -> "1 Mac", 2406.counted("Mac") -> "2,406 Macs"
+    func counted(_ noun: String, plural: String? = nil) -> String {
+        "\(grouped) \(self == 1 ? noun : plural ?? noun + "s")"
+    }
+
     /// 12406 -> "12,406"
     var grouped: String { formatted(.number.grouping(.automatic)) }
     /// 2400 -> "2.4k"

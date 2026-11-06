@@ -33,11 +33,7 @@ struct ProfileView: View {
                 }
                 CreditsCard()
             }
-            .padding(.horizontal, 40)
-            .padding(.top, 36)
-            .padding(.bottom, 40)
-            .frame(maxWidth: 1_100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .page()
         }
     }
 
@@ -169,7 +165,7 @@ struct AllTimeCard: View {
         VStack(alignment: .leading, spacing: 0) {
             CardHeader("All time", note: nights.first.map { "Since \($0.date.formatted(.dateTime.month(.wide).day()))" })
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(Runs.tokens(s.questionsHelped)).font(D.ui(40, .semibold).monospacedDigit()).tracking(-1).foregroundStyle(D.t1)
+                Text(Runs.short(s.served().tokens)).font(D.ui(40, .semibold).monospacedDigit()).tracking(-1).foregroundStyle(D.t1)
                     .contentTransition(.numericText())
                 Text("tokens run").font(D.ui(14)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
@@ -264,7 +260,7 @@ struct WhereLentCard: View {
         let first = window.first?.date ?? .now
         let pools = poolOrder(window)
         VStack(alignment: .leading, spacing: 0) {
-            CardHeader("Where your Mac lent", note: "\(nights.count) nights")
+            CardHeader("Where your Mac lent", note: nights.count.counted("night"))
             VStack(spacing: 0) {
                 HStack(spacing: 16) {
                     Text("Pool").frame(width: 210, alignment: .leading)
@@ -293,7 +289,7 @@ struct WhereLentCard: View {
                     }
                     .frame(height: 44)
                     .overlay(alignment: .top) { if i > 0 { Rule() } }
-                    .help("\(total) nights since \(nights.first { $0.poolID == pid }?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")")
+                    .help("\(total.counted("night")) since \(nights.first { $0.poolID == pid }?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")")
                 }
             }
             .padding(.top, 10)

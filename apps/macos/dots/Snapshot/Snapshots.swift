@@ -40,7 +40,7 @@ enum Snapshots {
         model.signals.onPower = true
         model.signals.idleSeconds = 999
         await model.backend.syncNow()
-        let window = CGSize(width: 1_180, height: 860)
+        let window = CGSize(width: 1_440, height: 900)
 
         // 1. Explore, before your Mac lends anywhere, with Sam's invite at the top
         save(Shell(route: .explore), model, window, dir, "01-explore")
@@ -131,6 +131,7 @@ enum Snapshots {
                                                         model: "claude-opus-5-5", keychainAccount: "dots-snapshot-none",
                                                         workspaceID: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")
         save(SettingsView(), model, CGSize(width: 560, height: 640), dir, "14-settings", fitHeight: true)
+        save(Shell(route: .settings), model, window, dir, "14-settings-page")
 
         // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with DeepSeek Boost coming
         let lateNight = Date().nightStart.addingTimeInterval(14.1 * 3_600)

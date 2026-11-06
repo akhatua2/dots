@@ -146,12 +146,10 @@ class Cloud:
         if not self.pool_row(pool_id):
             return error(404, f"No pool called {pool_id}.", "not_found_error")
         hub = await HubView.read(self.hub, self.config.pool_model)
-        lend_gb = self.store.lending()["lend_gb"]
-        before = self.sync.pooled_gb(pool_id, hub)
         others = [m for m in self.sync.pool_macs(pool_id, hub) if m["macID"] != self.sync.this_mac]
         self.store.add_member(pool_id, self.me)
         self.store.lend_to(pool_id)
-        unlock = self._unlock(pool_id, before, before + lend_gb, hub)
+        unlock = self._unlock(pool_id, hub)
         return await self.whole(macNumber=len(others) + 1, poolID=pool_id, unlock=unlock)
 
     async def leave(self, request: web.Request) -> web.Response:
@@ -246,20 +244,26 @@ class Cloud:
         self.store.set_device(self.this_mac, self.me, str(beat.get("macKind") or "Mac"), int(beat.get("memoryGB") or 0))
         pool_id = self.store.lending()["pool_id"]
         hub = await HubView.read(self.hub, self.config.pool_model)
-        before = self.sync.pooled_gb(pool_id, hub) if pool_id else 0
         self.store.record_lending(active=bool(beat.get("active")), lend_gb=int(beat.get("lendGB") or 0),
                                   seconds=float(beat.get("seconds") or 0))
-        unlock = self._unlock(pool_id, before, self.sync.pooled_gb(pool_id, hub), hub) if pool_id else None
+        unlock = self._unlock(pool_id, hub) if pool_id else None
         return await self.whole(unlock=unlock)
 
-    def _unlock(self, pool_id: str, before_gb: int, after_gb: int, hub: HubView) -> dict | None:
-        """When this Mac takes a pool over a line for a model it can really run, record it and give the badge.
-
-        Only models the pool's hub serves count: crossing a rung for a model nothing will load is not an unlock.
+    def _unlock(self, pool_id: str, hub: HubView) -> dict | None:
+        """The first time this Mac's share takes a pool over the line for a model it can really run: record it and
+        give the badge. Only models the pool's hub serves count, and a model is unlocked once, so a worker that
+        restarts and comes back is not news.
         """
+        macs = self.sync.pool_macs(pool_id, hub)
+        mine = next((m for m in macs if m["macID"] == self.this_mac and m["state"] == "lending"), None)
+        if mine is None:
+            return None
+        after_gb = sum(m["lendGB"] for m in macs if m["state"] == "lending")
+        before_gb = after_gb - mine["lendGB"]
         servable = {hub.model} if pool_id == HUB_POOL else set()
         crossed = [t for t in self.sync.tiers(hub)["tiers"]
-                   if t["id"] in servable and before_gb < t["minGB"] <= after_gb]
+                   if t["id"] in servable and before_gb < t["minGB"] <= after_gb
+                   and not self.store.one("select 1 from unlocks where pool_id = ? and model_id = ?", pool_id, t["id"])]
         if not crossed:
             return None
         tier = crossed[-1]

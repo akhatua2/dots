@@ -68,11 +68,7 @@ struct APIView: View {
                 CodeSample(tab: $tab, baseURL: model.gatewayBaseURL, copied: $copied)
                     .padding(.top, 24)
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 34)
-            .padding(.bottom, 40)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .page()
         }
     }
 }

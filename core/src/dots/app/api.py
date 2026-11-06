@@ -139,7 +139,7 @@ class HttpApi:
     # ──────────────────────────── handlers ──────────────────────────────
 
     async def _models(self, _request: web.Request) -> web.Response:
-        models = sorted(self.hub.deployments)
+        deployments = self.hub.deployments
         return web.json_response(
             {
                 "object": "list",
@@ -148,8 +148,10 @@ class HttpApi:
                         "id": model_id,
                         "object": "model",
                         "owned_by": "dots",
+                        # Recent decode speed across the pool; 0 until a turn has finished
+                        "tok_per_sec": round(deployments[model_id].tok_per_sec, 1),
                     }
-                    for model_id in models
+                    for model_id in sorted(deployments)
                 ],
             }
         )
@@ -187,6 +189,8 @@ class HttpApi:
                 "layer_range": list(p.layer_range) if p.layer_range else None,
                 # The memory this worker offers the pool (its own cap applied), in GB.
                 "ram_gb": self._ram_gb(p.id),
+                # Part of a turn being answered right now
+                "serving": self.hub.is_serving(p.id),
                 "geo": p.geo,
             }
             for p in self.hub.participants.values()

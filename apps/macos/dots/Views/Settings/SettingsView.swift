@@ -13,7 +13,7 @@ struct SettingsView: View {
         LiveScroll {
             VStack(alignment: .leading, spacing: 22) {
                 if inline {
-                    Text("Settings").font(D.display(26)).foregroundStyle(D.t1)
+                    PageHeader(title: "Settings", subtitle: "Where prompts run, what they may cost, and this Mac's API") { EmptyView() }
                 }
                 section("Real models", "With an endpoint set, that route's prompts run on a real model. Without one, dots simulates the replies and says so.") {
                     EndpointEditor(title: "This Mac", detail: "LM Studio or Ollama. Everyday prompts run here first, privately and for free.",
@@ -115,11 +115,9 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(24)
+            .modifier(SettingsMargins(inline: inline))
         }
         .frame(width: inline ? nil : 560, height: inline || isSnapshot ? nil : 640)
-        .frame(maxWidth: inline ? 640 : nil, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(D.bg2)
         .preferredColorScheme(.dark)
         .onAppear { cloudAddress = model.settings.cloud.address }
@@ -275,5 +273,14 @@ struct EndpointEditor: View {
         } else {
             test = "\(lead) Pick the one dots should use."
         }
+    }
+}
+
+/// In the main window Settings is a page like the others; in a window of its own it keeps a plain margin.
+private struct SettingsMargins: ViewModifier {
+    var inline: Bool
+
+    func body(content: Content) -> some View {
+        if inline { content.page() } else { content.padding(24) }
     }
 }

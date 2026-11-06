@@ -63,9 +63,9 @@ struct FrontierModel: Hashable, Identifiable {
 
 /// What a run is in tokens, on average: a prompt and its answer.
 enum Runs {
+    /// The mock's stand-in for tokens in a run; a real cloud counts them
     static let tokensPerRun = 420
     /// 160_000 -> "160K", 5_210_520 -> "5.2M"
-    static func tokens(_ runs: Int) -> String { Self.short(runs * tokensPerRun) }
     static func short(_ n: Int) -> String {
         switch n {
         case 1_000_000...: let m = Double(n) / 1e6; return (m >= 10 ? String(format: "%.0fM", m) : String(format: "%.1fM", m)).replacingOccurrences(of: ".0M", with: "M")
@@ -185,11 +185,23 @@ struct PoolActivity: Codable, Hashable, Identifiable {
 }
 
 /// A night this Mac lent: where, for how long, and the runs it took part in. Nights run from noon to noon.
+extension NetworkState {
+    /// Everything this Mac has answered, in one pool or in all of them, and the tokens in it.
+    func served(in poolID: String? = nil) -> (runs: Int, tokens: Int) {
+        let rows = (nights ?? []).filter { poolID == nil || $0.poolID == poolID }
+        return (rows.reduce(0) { $0 + $1.runs }, rows.reduce(0) { $0 + $1.tokenCount })
+    }
+}
+
 struct NightLent: Codable, Hashable {
     var date: Date
     var poolID: String
     var minutes: Double
     var runs: Int
+    /// Tokens in those runs, from the hub's ledger; nil from the mock, which only counts runs
+    var tokens: Int?
+
+    var tokenCount: Int { tokens ?? runs * Runs.tokensPerRun }
     /// When this Mac began and last lent that night
     var from: Date?
     var to: Date?

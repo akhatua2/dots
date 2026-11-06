@@ -38,11 +38,12 @@ def fake_hub(*, nodes: list[dict] | None = None) -> web.Application:
          "layer_range": None, "ram_gb": 48.0},
     ]
     ledger = {"accounts": {ME: {"balance_cu": 0.5, "earned_cu": 0.6, "turns_as_worker": 3}},
-              "turns": [{"started_iso": "2026-11-05T22:10:00.123+00:00", "credited": {ME: 6025}, "flops_done": 6_025_000_000}]}
+              "turns": [{"started_iso": "2026-11-05T22:10:00.123+00:00", "credited": {ME: 6025}, "flops_done": 6_025_000_000,
+                         "prefill_tokens": 40, "decode_tokens": 120}]}
     app = web.Application()
     app.router.add_get("/v1/pool/nodes", answers({"nodes": nodes}))
     app.router.add_get("/v1/credits", answers(ledger))
-    app.router.add_get("/v1/models", answers({"data": [{"id": MODEL}]}))
+    app.router.add_get("/v1/models", answers({"data": [{"id": MODEL, "tok_per_sec": 41.6}]}))
 
     async def complete(request: web.Request) -> web.StreamResponse:
         body = await request.json()
@@ -217,18 +218,47 @@ def test_short_model_names(model_id, name):
     assert short_name(model_id) == name
 
 
-async def test_the_hub_pool_unlocks_only_the_model_it_serves(tmp_path):
-    hub_server = TestServer(fake_hub(nodes=[]))
+async def test_the_hub_pool_unlocks_its_model_once_this_macs_worker_is_in(tmp_path):
+    nodes: list[dict] = []
+    hub_server = TestServer(fake_hub(nodes=nodes))
     await hub_server.start_server()
     config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL)
     cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    my_worker = {"id": "w-me", "account_id": ME, "ready": True, "layer_range": [0, 24], "ram_gb": 4.0}
     async with TestClient(TestServer(cloud.app())) as client:
         await client.post("/v1/pools/hub/join")
         beat = {"active": True, "lendGB": 8, "seconds": 5, "macKind": "Mac", "memoryGB": 16}
-        first = await (await client.post("/hub/v1/heartbeat", json=beat)).json()
-        assert first["unlock"]["modelID"] == MODEL, "8 GB is enough for the served model; Llama's rung is not an unlock"
+
+        async def heartbeat() -> dict:
+            return await (await client.post("/hub/v1/heartbeat", json=beat)).json()
+
+        starting = await heartbeat()
+        assert starting["unlock"] is None, "a worker still starting lends nothing"
+        hub_pool = next(p for p in starting["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert [m["state"] for m in hub_pool["macs"]] == ["online"]
+
+        nodes.append(my_worker)
+        first = await heartbeat()
+        assert first["unlock"]["modelID"] == MODEL, "the served model is an unlock; Llama's rung is not"
         hub_pool = next(p for p in first["sync"]["state"]["pools"] if p["id"] == "hub")
         assert hub_pool["servesModelID"] == MODEL
-        again = await (await client.post("/hub/v1/heartbeat", json=beat)).json()
-        assert again["unlock"] is None, "an unlock happens once"
+        assert hub_pool["macs"][0]["lendGB"] == 4, "the pool counts what the worker lends, not the setting"
+
+        nodes.clear()  # the worker restarts
+        await heartbeat()
+        nodes.append(my_worker)
+        again = await heartbeat()
+        assert again["unlock"] is None, "a worker coming back doesn't unlock the model again"
+        hub_pool = next(p for p in again["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert len(hub_pool["unlocks"]) == 1
     await hub_server.close()
+
+
+async def test_speed_and_tokens_come_from_the_hub(env):
+    client, _ = env
+    body = await state(client)
+    served = next(t for t in body["ladder"]["tiers"] if t["id"] == MODEL)
+    assert served["tokPerSec"] == 42, "the served model's speed is what the hub measured"
+    night = next(n for n in body["state"]["nights"] if n["poolID"] == "hub") if body["state"].get("nights") else None
+    if night is not None:
+        assert night["tokens"] == 160

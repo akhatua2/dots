@@ -27,6 +27,7 @@ class HubView:
     ledger: dict = field(default_factory=dict)
     model: str | None = None
     online: bool = False
+    tok_per_sec: float = 0.0
 
     @classmethod
     async def read(cls, hub: HubClient, pool_model: str) -> "HubView":
@@ -37,8 +38,8 @@ class HubView:
             models = await hub.models()
         except HubError:
             return cls(model=pool_model)
-        return cls(nodes=nodes, ledger=ledger, model=pool_model if pool_model in models or not models else models[0],
-                   online=True)
+        model = pool_model if pool_model in models or not models else next(iter(models))
+        return cls(nodes=nodes, ledger=ledger, model=model, online=True, tok_per_sec=models.get(model, 0.0))
 
     def layers(self) -> int:
         ends = [n["layer_range"][1] for n in self.nodes if n.get("layer_range")]
@@ -55,7 +56,7 @@ class SyncBuilder:
     # ---- the ladder and pools ------------------------------------------------
 
     def tiers(self, hub: HubView) -> dict:
-        served = catalog.served_tier(hub.model, hub.layers(), 0) if hub.model else None
+        served = catalog.served_tier(hub.model, hub.layers(), hub.tok_per_sec) if hub.model else None
         return catalog.ladder(served)
 
     def pool_macs(self, pool_id: str, hub: HubView) -> list[dict]:
@@ -67,7 +68,10 @@ class SyncBuilder:
                 macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending" if node.get("ready") else "online"))
         lending = self.store.lending()
         if lending["pool_id"] == pool_id and lending["active"] and all(m["macID"] != self.this_mac for m in macs):
-            macs.append(self._mac(self.this_mac, lending["lend_gb"], "lending"))
+            # In the hub's pool this Mac lends only once its worker is in the hub; until then it is starting up and
+            # adds nothing, so a worker restarting never moves the pool's level.
+            state = "online" if pool_id == HUB_POOL else "lending"
+            macs.append(self._mac(self.this_mac, lending["lend_gb"], state))
         return macs
 
     def _mac(self, mac_id: str, lend_gb: int, state: str) -> dict:
@@ -226,14 +230,17 @@ class SyncBuilder:
 
     def nights(self, hub: HubView) -> list[dict]:
         runs: dict[str, int] = {}
+        tokens: dict[str, int] = {}
         for turn in hub.ledger.get("turns", []):
             if (turn.get("credited") or {}).get(self.me):
                 night = timefmt.iso(timefmt.night_of(timefmt.parse(_wire_date(turn["started_iso"]))))
                 runs[night] = runs.get(night, 0) + 1
+                tokens[night] = tokens.get(night, 0) + int(turn.get("prefill_tokens") or 0) + int(turn.get("decode_tokens") or 0)
         out = []
         for n in self.store.rows("select * from nights order by date"):
             entry = {"date": n["date"], "poolID": n["pool_id"], "minutes": round(n["minutes"], 2),
-                     "runs": runs.get(n["date"], 0) if n["pool_id"] == HUB_POOL else 0}
+                     "runs": runs.get(n["date"], 0) if n["pool_id"] == HUB_POOL else 0,
+                     "tokens": tokens.get(n["date"], 0) if n["pool_id"] == HUB_POOL else 0}
             if n["first"]:
                 entry["from"] = n["first"]
             if n["last"]:
@@ -248,7 +255,7 @@ class SyncBuilder:
             return None
         first, end = mine["layer_range"]
         return {"poolID": HUB_POOL, "poolName": self.config.pool_name, "model": catalog.short_name(hub.model),
-                "firstLayer": first, "lastLayer": end - 1, "layers": hub.layers(), "working": False, "network": False}
+                "firstLayer": first, "lastLayer": end - 1, "layers": hub.layers(), "working": bool(mine.get("serving")), "network": False}
 
     def note(self, state: dict) -> dict | None:
         """The weekly note: what this Mac did in the last seven days. None in a week it didn't lend."""

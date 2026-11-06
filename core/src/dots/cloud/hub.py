@@ -47,8 +47,9 @@ class HubClient:
     async def ledger(self) -> dict:
         return await self._get("/v1/credits")
 
-    async def models(self) -> list[str]:
-        return [m["id"] for m in (await self._get("/v1/models")).get("data", [])]
+    async def models(self) -> dict[str, float]:
+        """The models the hub serves, with each one's recent speed in tokens a second (0 before any turn)."""
+        return {m["id"]: float(m.get("tok_per_sec") or 0) for m in (await self._get("/v1/models")).get("data", [])}
 
     async def complete(self, body: dict, account: str) -> dict:
         """A whole answer, in OpenAI's chat completions format, charged to `account`."""

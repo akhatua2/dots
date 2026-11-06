@@ -26,7 +26,7 @@ struct ExploreView: View {
                     HStack(spacing: 14) {
                         HStack(spacing: 7) {
                             Circle().fill(D.t4).frame(width: 7, height: 7)
-                            Text("\(model.state.networkLendingNow.grouped) Macs lending right now")
+                            Text("\(model.state.networkLendingNow.counted("Mac")) lending right now")
                                 .font(D.ui(12.5, .medium)).foregroundStyle(D.t3)
                                 .contentTransition(.numericText())
                         }
@@ -73,9 +73,7 @@ struct ExploreView: View {
                         .help("Try another word, or start one yourself.")
                 }
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 34)
-            .padding(.bottom, 32)
+            .page()
         }
     }
 }
@@ -119,7 +117,7 @@ struct PoolCard: View {
                 MiniRings(pool: pool, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pool.name).font(D.ui(15, .bold)).foregroundStyle(D.t1).lineLimit(1)
-                    Text("\(pool.model?.name ?? "No model yet") · \(pool.totalMacs.grouped) Macs")
+                    Text("\(pool.model?.name ?? "No model yet") · \(pool.totalMacs.counted("Mac"))")
                         .font(D.ui(12)).foregroundStyle(D.t3).lineLimit(1)
                 }
             }
@@ -136,7 +134,7 @@ struct PoolCard: View {
             }
             .padding(.top, 10)
             IconLine(symbol: "smallcircle.filled.circle",
-                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.lending.limitGB))) credits an hour for your Mac", size: 12)
+                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.lending.limitGB)).counted("credit")) an hour for your Mac", size: 12)
                 .padding(.top, 7)
             Group {
                 if !friends.isEmpty {
@@ -204,7 +202,7 @@ struct InviteCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(invite.fromName ?? "A friend") invited you to \(invite.poolName)").font(D.ui(14, .semibold)).foregroundStyle(D.t1)
                 Text(invite.unlocks.map { "Your Mac would unlock \($0) for everyone in it." }
-                     ?? "\(invite.macs) Macs · runs \(invite.modelNow ?? "nothing yet")")
+                     ?? "\(invite.macs.counted("Mac")) · runs \(invite.modelNow ?? "nothing yet")")
                     .font(D.ui(12.5)).foregroundStyle(invite.unlocks == nil ? D.t3 : D.accentText)
             }
             Spacer()

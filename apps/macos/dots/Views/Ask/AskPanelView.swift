@@ -301,7 +301,7 @@ struct ReceiptView: View {
         var parts: [String] = []
         if !receipt.macs.isEmpty {
             let active = receipt.macs.filter { $0.id != receipt.asleepMacID }.count
-            parts.append("\(active) Macs")
+            parts.append(active.counted("Mac"))
         }
         if receipt.tokPerSec > 0 { parts.append("\(Int(receipt.tokPerSec.rounded())) tok/s") }
         if let i = receipt.inputTokens, let o = receipt.outputTokens { parts.append("\(i.grouped) in · \(o.grouped) out") }

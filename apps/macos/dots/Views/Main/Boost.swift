@@ -196,7 +196,7 @@ struct BoostSheet: View {
                     .padding(.top, 18)
 
                     VStack(alignment: .leading, spacing: 0) {
-                        CardHeader("Boosting", note: "\(boost.pledges.count) Macs")
+                        CardHeader("Boosting", note: boost.pledges.count.counted("Mac"))
                         HStack(spacing: 12) {
                             ForEach(boost.pledges, id: \.personID) { p in
                                 let isMe = p.personID == s.meID

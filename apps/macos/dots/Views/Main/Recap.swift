@@ -64,7 +64,7 @@ struct RecapSheet: View {
                                 Text(recap.night.date.formatted(.dateTime.month(.wide).day())).font(D.ui(12)).foregroundStyle(Color(hex: 0x6E6E6E))
                                 Spacer()
                                 IconButton(symbol: "arrow.down.to.line", help: "Download") {
-                                    ArtExport.save(pool: recap.pool, history: history, thisMacKind: s.thisMac.kind)
+                                    ArtExport.save(pool: recap.pool, history: history, served: s.served(in: recap.pool.id), thisMacKind: s.thisMac.kind)
                                 }
                                 .padding(.trailing, -6)
                             }
@@ -109,7 +109,7 @@ struct RecapSheet: View {
             }
             Rule().padding(.top, 22)
             StatRow(stats: [.init(value: recap.lent, label: "lent"), .init(value: n.runs.grouped, label: "runs"),
-                            .init(value: Runs.tokens(n.runs), label: "tokens")], size: 19)
+                            .init(value: Runs.short(n.tokenCount), label: "tokens")], size: 19)
                 .padding(.top, 16)
             Spacer(minLength: 16)
             if let hours = recap.boosted {

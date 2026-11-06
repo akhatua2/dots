@@ -121,7 +121,6 @@ struct PoolHistory {
     }
 
     /// Tonight's runs so far, ten a seed.
-    func runsTonight(now: Date) -> Int { max(0, visible(now: now) - (nights.last?.lowerBound ?? 0)) * 10 }
 }
 
 /// Rects on a pixel grid, gathered by colour and filled once each.

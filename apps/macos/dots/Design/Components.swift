@@ -20,6 +20,18 @@ extension View {
     }
 }
 
+// MARK: - Pages
+
+extension View {
+    /// A screen of the main window: the full width beside the sidebar, with the same margins on every screen.
+    func page() -> some View {
+        padding(.horizontal, 32)
+            .padding(.top, 34)
+            .padding(.bottom, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct Hairline: View {
     var body: some View { Rectangle().fill(D.line).frame(height: 1) }
 }
