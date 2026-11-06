@@ -43,3 +43,8 @@ core/scripts/sim_results/
 
 # vendored reference repos (read-only, never committed)
 _external/
+
+# SwiftUI app build output (generated from project.yml)
+apps/macos/build/
+apps/macos/dots.xcodeproj/
+apps/macos/mockups/

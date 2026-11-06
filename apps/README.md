@@ -6,6 +6,6 @@ these are the things people actually open.
 | App | Status | Notes |
 |-----|--------|-------|
 | [`web/`](web/) | live | Vite + React — chat, pool map, contribute panel. Deployed to Vercel. |
-| [`macos/`](macos/) | early stub | native macOS client (one-click contribute without the terminal). |
+| [`macos/`](macos/) | in progress | native SwiftUI app by Sourabh Daroji: menu bar lending, the ⌥ Space ask panel, pools, credits and the local API. Runs against a mock cloud until the real one exists. |
 
 Future: `windows/`, `linux/`.

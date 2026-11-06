@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}canvas{display:block}</style></head>
+<body><canvas id="c" width="1024" height="1024"></canvas>
+<script>
+// The dots app icon: a graphite tile, the dithered swirl in neutral grey, and one orange cell: you.
+const B8 = [0,32,8,40,2,34,10,42,48,16,56,24,50,18,58,26,12,44,4,36,14,46,6,38,60,28,52,20,62,30,54,22,3,35,11,43,1,33,9,41,51,19,59,27,49,17,57,25,15,47,7,39,13,45,5,37,63,31,55,23,61,29,53,21].map(v => (v + 0.5) / 64);
+const clamp01 = x => Math.min(1, Math.max(0, x));
+function density(u, v, ph) {
+  const l = Math.hypot(u, v) + 1e-6, a = Math.atan2(v, u);
+  const off = 0.55 / Math.pow(l, 1.2) + 2 * a / (2 * Math.PI) + ph;
+  const env = Math.pow(clamp01((l + 0.2) / 1.2), 1.3);
+  return Math.min(1, env * 1.25) * (off - Math.floor(off));
+}
+const c = document.getElementById('c'), g = c.getContext('2d');
+// macOS icon grid: an 824 px tile centred in 1024, continuous corners
+const X = 100, Y = 100, S = 824, R = 186;
+g.save();
+g.beginPath(); g.roundRect(X, Y, S, S, R); g.clip();
+const bg = g.createLinearGradient(0, Y, 0, Y + S);
+bg.addColorStop(0, '#242424'); bg.addColorStop(1, '#121212');
+g.fillStyle = bg; g.fillRect(X, Y, S, S);
+// the swirl: 18 cells across a circle inside the tile
+const n = 18, h = n / 2, cell = 36, ox = 512 - h * cell, oy = 512 - h * cell;
+g.fillStyle = '#BDBDBD';
+let you = null;
+for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+  const u = (i - h + 0.5) / h, v = (j - h + 0.5) / h;
+  if (Math.hypot(u, v) > 1.02) continue;
+  const on = density(u, v, 0.35) > B8[((j - h) & 7) * 8 + ((i - h) & 7)];
+  if (on) g.fillRect(ox + i * cell + 2, oy + j * cell + 2, cell - 4, cell - 4);
+  else if (!you && i === 13 && j === 12) you = [i, j];
+}
+// your Mac: one orange cell, lit
+const [yi, yj] = you || [13, 12];
+g.shadowColor = 'rgba(255,90,31,0.7)'; g.shadowBlur = 36;
+g.fillStyle = '#FF5A1F';
+g.fillRect(ox + yi * cell + 2, oy + yj * cell + 2, cell - 4, cell - 4);
+g.shadowBlur = 0;
+g.restore();
+// a hairline edge
+g.beginPath(); g.roundRect(X + 1, Y + 1, S - 2, S - 2, R - 1);
+g.strokeStyle = 'rgba(255,255,255,0.10)'; g.lineWidth = 2; g.stroke();
+window.READY = true;
+</script></body></html>
