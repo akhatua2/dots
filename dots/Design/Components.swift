@@ -3,19 +3,19 @@ import SwiftUI
 // MARK: - Surfaces
 
 struct CardBackground: ViewModifier {
-    var radius: CGFloat = 12
+    var radius: CGFloat = 16
     var fill: Color = D.card
-    var stroke: Color = D.edge
+    var stroke: Color = Color.white.opacity(0.08)
 
     func body(content: Content) -> some View {
         content
             .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(fill))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(stroke, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(stroke, lineWidth: 0.5))
     }
 }
 
 extension View {
-    func card(radius: CGFloat = 12, fill: Color = D.card, stroke: Color = D.edge) -> some View {
+    func card(radius: CGFloat = 16, fill: Color = D.card, stroke: Color = Color.white.opacity(0.08)) -> some View {
         modifier(CardBackground(radius: radius, fill: fill, stroke: stroke))
     }
 }

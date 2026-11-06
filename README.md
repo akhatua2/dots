@@ -1,19 +1,19 @@
 # dots
 
-Your Macs, pooled, pay for your AI. You lend a Mac to a pool, earn compute credits, and ask anything. dots sends each question to the best place for it: your own pools, the wider network, or a frontier model like Claude, at a discount paid in credits.
+Your Macs, pooled, pay for your AI. You lend a Mac to a pool, earn credits for the work it does, and spend them on Claude at a discount. dots also gives every app on your Mac one address and one key. Each request goes to the cheapest place that can answer it well: this Mac, your pools, the wider network or Claude.
 
-This is a native macOS app (SwiftUI, macOS 15+). The network is simulated on this Mac. Everything about this Mac is real, and answers are real once you point dots at a model.
+This is a native macOS app (SwiftUI, macOS 15+). The dots cloud doesn't exist yet, so a mock of it runs inside the app and speaks the same API the real one will ([API.md](API.md)). Everything about this Mac is real. Answers are real once you point dots at a model.
 
-## What's real and what's simulated
+## What's real and what's mocked
 
-| Real | Simulated |
+| Real | Mocked by the cloud on this Mac |
 | --- | --- |
-| This Mac: its model name, memory, power source and idle time | The other Macs, people and pools |
-| The lending rules: only when plugged in, pause while you're using it | Credits, badges and endorsements |
-| Answers, once an endpoint is set in Settings (LM Studio, Ollama, Anthropic or any OpenAI-compatible server) | Answers when no endpoint is set. The receipt says so. |
-| The local API on `localhost:8787`, with keys you create in the app | Macs falling asleep mid-answer |
+| This Mac: its model name, memory, power source and idle time | The other people, Macs and pools |
+| The lending rules, and the worker's heartbeat to the hub | When the hub has work, and the compute it measures |
+| The local API in OpenAI's and Anthropic's formats, keys and their rules, routing, fallback, receipts and savings | Credits, the ledger, badges, endorsements, invites and weekly notes |
+| Answers from a model on this Mac (LM Studio, Ollama) and from your own frontier key | Answers from pools and from the gateway. Receipts say so. |
 
-The simulation lives in `~/Library/Application Support/dots/network.json`, so it survives a relaunch. Settings live in the app's preferences, and endpoint keys live in your login Keychain.
+The mock cloud keeps its world in `~/Library/Application Support/dots/mock-cloud.json`. This Mac's own part (your API keys, request log and lending rules) is in `local.json` beside it. Settings live in the app's preferences, and endpoint keys live in your login Keychain.
 
 ## Three places
 
@@ -21,29 +21,33 @@ The simulation lives in `~/Library/Application Support/dots/network.json`, so it
 - **The window.** Explore public pools, open a pool to see who's lending and what it can run, join, endorse, invite friends. Your profile has your credits, badges and history. The API page has your endpoint, keys and code samples.
 - **The ask panel.** ⌥ Space from any app, or ⌘K in dots. Type or drop a file. Every answer carries a receipt: where it ran, on which Macs, why it went there, and what it cost.
 
-## The 16 stories, and where they live
+## The 18 stories, and where they live
 
-Pools
-1. Start a pool in one step: **Start a pool** in the sidebar, or ⌘N.
-2. Invite friends with a link that shows what their Mac would unlock: a friends' pool page, **Share link**.
-3. Browse public pools, with endorsements and the friends inside: **Explore**.
-4. Preview a pool, then join by adding your Mac: the card at the top of a pool page.
-5. Joining is a moment: "You're in.", with your Mac as the orange dot in the pool's swirl.
-6. The pool unlocks bigger models as Macs join: the ladder on the pool page, the unlock moment, and the banner naming the Mac that tipped it over.
-7. Endorse pools you trust, and be remembered as an early backer: **Endorse**, and the Early backer badge.
+`--selftest` checks each one end to end (see Checks).
 
-Lending
-8. Lend in one click from the menu bar, and see the dot fill while your Mac works.
-9. Lend on your terms: how much memory, only when plugged in, pause while you're using it, pause for an hour.
-10. Earn compute credits whenever your Mac works for the network. A friends' pool can offer its idle hours to the network, so lending only to friends earns too.
-11. A profile of what your Macs have done: badges, pools, endorsements and credit history. Click the pencil to change your name.
+The router and the endpoint
+1. One address and one key for every app, in OpenAI's format or Anthropic's: the **API** page.
+2. `auto` sends each request to the cheapest place that can answer it well: this Mac, your pools, a public pool or Claude. A model id still pins it.
+3. Every response says where it ran, why, and what it cost: the `dots` receipt, and the receipt in the ask panel.
+4. Savings each month, against the model you'd otherwise send everything to: **Saved this month** on the API page. Pick Opus or Sonnet in Settings.
+5. Rules for each key: private only, a cap in credits, a cap in dollars on your own key, and where it may go. **Create key**.
+6. When a place doesn't answer, the request goes to the next, and the receipt says so.
 
-Asking
-12. Ask from anywhere, and dots routes each question to your pools, the network or a frontier model, within your rules and credits. Pick a route yourself from **Auto**.
-13. Every answer carries a receipt, with a second opinion from Claude one click away.
-14. Your questions stay yours: a personal question or a document stays in pools you're in, and dots asks before sending it anywhere else.
-15. Answers keep going when a Mac sleeps: another Mac in the pool picks up.
-16. One endpoint and one key for your apps, with `auto` routing: the **API** page.
+Credits
+7. Lend on your terms: dots starts and stops the worker as your rules say, and tells the hub. The menu bar shows the layers your Mac holds.
+8. Credits for measured work, every entry visible: the ledger on your profile, with the time and the compute.
+9. Spend credits on Claude at a discount, with no key of your own: the dots gateway, 30% off list price.
+10. Credits in plain terms: "about 95 Opus prompts", on hover over your credits in the menu bar.
+11. A friends' pool can offer its idle hours to the network, so its Macs earn between its own prompts: **Offer Idle Hours to the Network** in the pool's ••• menu.
+
+Community
+12. Joining a pool is a moment: "You're in."
+13. An unlock names the Mac that tipped it: the Level moment, **Unlocked** on the pool's Level card, and the pool's activity.
+14. Badges for showing up: 100 hours, Unlocker, Early backer, Pool starter.
+15. A note each week: **This week** on your profile, and a notification.
+16. An invite link shows what your Mac would unlock, for the amount you choose to lend: **Invite Link** in Explore, or a `dots://invite/CODE` link.
+17. Explore shows which friends are in each pool and how many people back it, and you can endorse.
+18. Lending together: a boost to plan, any time of day, with **Count Me In** on the pool's banner, which keeps your Mac awake and lending through the window; the nights your Mac lent, as your contribution fingerprint and timeline on your profile; and a recap the morning after a night of lending.
 
 ## Build and run
 
@@ -67,14 +71,16 @@ Signing uses your Apple Development certificate (team 9P3ZR93NDF in `project.yml
 
 Open Settings (⌘, or Settings in the sidebar) and set an endpoint under **Real answers**:
 
-- **Local model**: a model on this Mac answers everyday questions, privately and for free. In LM Studio, load a model and start the server (it listens on `http://localhost:1234/v1`), or run Ollama (`http://localhost:11434/v1`). Press **Test** to list the models and pick one. A model on this Mac can answer any question, so it also covers your pools and the network.
-- **Frontier models**: hard questions and second opinions. Anthropic works at `https://api.anthropic.com/v1` with your Anthropic API key and a model such as `claude-opus-5-5` or `claude-sonnet-5`. A remote endpoint needs its key before it counts as set.
+- **This Mac**: a model on this Mac answers everyday questions, privately and for free. In LM Studio, load a model and start the server (it listens on `http://localhost:1234/v1`), or run Ollama (`http://localhost:11434/v1`). Press **Test** to list the models and pick one. The mock cloud also uses it for your pools' answers, so those become real too.
+- **Your frontier key**: Anthropic at `https://api.anthropic.com/v1` with your Anthropic API key, or any OpenAI-compatible provider. A key made for more than one Anthropic workspace also needs the workspace to act in: press **Test** and pick it, or paste its ID (`wrkspc_…`) from the Workspaces page in the Claude Console. dots sends it as `anthropic-workspace-id` on every request.
+
+**Pay for Claude with** picks what pays for Claude answers. **Credits first** goes through the dots gateway and uses your key once credits run short. **My key first** uses your key and falls back to credits.
 
 A route without an endpoint is simulated, and its receipt says so.
 
 ## The local API
 
-dots serves the OpenAI API on this Mac, and routes every request the way the ask panel does. Make a key on the API page. It's shown once.
+dots serves OpenAI's API and Anthropic's on this Mac, and routes every request the way the ask panel does. Make a key on the API page. It's shown once.
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
@@ -92,10 +98,21 @@ reply = client.chat.completions.create(model="auto", messages=[{"role": "user", 
 print(reply.choices[0].message.content)
 ```
 
-- `GET /v1/models` lists `auto`, the pool models and the frontier models.
-- `POST /v1/chat/completions` takes `model` (`auto`, or a model id to pick where it runs), `messages` and `stream`.
-- Each response carries a `dots` block with where it ran, why, what it cost, and whether it was private or simulated.
-- Errors: 401 without a valid key, 400 for a bad body or a model the key can't reach, 402 without enough credits, 409 when nothing it can reach is running, 429 past the key's monthly limit.
+```python
+import os
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://localhost:8787", api_key=os.environ["DOTS_KEY"])
+message = client.messages.create(model="auto", max_tokens=1024, messages=[{"role": "user", "content": "Hello"}])
+print(message.content[0].text)
+```
+
+- `GET /v1/models` lists `auto`, the model on this Mac, the pools' models and Claude.
+- `POST /v1/chat/completions` (OpenAI) and `POST /v1/messages` (Anthropic) take `model`: `auto`, or a model id to pin where it runs.
+- Each response carries a `dots` receipt: where it ran, why, what it cost and saved, whether it was private or simulated, and any fallback. Streams end with it.
+- Errors come in your format: 401 without a valid key, 400 for a bad body or a model the key can't reach, 402 without enough credits, 409 when nothing the key can reach can take it, 429 past the key's monthly credits, 503 when nothing answered.
+
+[API.md](API.md) has the routing order, the receipt's fields and the dots cloud's API.
 
 ## Checks
 
@@ -103,7 +120,7 @@ print(reply.choices[0].message.content)
 build/Build/Products/Debug/dots.app/Contents/MacOS/dots --selftest
 ```
 
-Starts the local API on a spare port against a fresh, in-memory network and checks it end to end: keys, routing, privacy, credits, streaming and limits. Set `DOTS_SELFTEST_ENDPOINT` to an OpenAI-compatible URL to check real answers too. Nothing is saved.
+Runs a fresh mock cloud of its own and the local API on spare ports, with stand-ins for LM Studio and for a provider behind your own key, and checks each of the 18 stories through the same HTTP calls other apps make (110 checks). A stand-in for Anthropic checks that a key made for more than one workspace names its workspace on every request. Set `DOTS_SELFTEST_ENDPOINT` to an OpenAI-compatible URL to check real answers too. Nothing is saved, and no real key is used.
 
 ```bash
 build/Build/Products/Debug/dots.app/Contents/MacOS/dots --ask "Is my lease fair on repairs?"
@@ -115,20 +132,32 @@ Launches the app, opens the ask panel and asks the question, so the whole ask fl
 build/Build/Products/Debug/dots.app/Contents/MacOS/dots --snapshot ~/Desktop/dots-shots
 ```
 
-Walks a fresh network through the main moments (Explore, joining, the unlock, the menu bar, an answer, the profile, the API, the sheets) and saves each screen as a PNG.
+Walks a fresh mock cloud through the main moments and saves each screen as a PNG: Explore with an invite, joining, the unlock, the menu bar while the Mac works, an answer, the profile with a weekly note, the API page, the sheets, an invite opened from a link, Settings, then Late Night Lab at 2 AM with its boost, your profile, the Level moment, and the morning recap.
 
-## Start over
+```bash
+build/Build/Products/Debug/dots.app/Contents/MacOS/dots --mock-cloud 8790
+```
 
-Settings, **Simulation**, **Reset…** puts back the sample network with your real Mac in it. The **Speed** chips there make credits and sleeping Macs move faster, for demos.
+Runs only a fresh mock cloud, to try [API.md](API.md) with curl.
+
+## The mock cloud
+
+Settings, **dots cloud**:
+
+- **Use the mock cloud** is on until there's a real cloud. Switch it off to give an address instead.
+- **Send one now** sends this week's note.
+- The **Speed** chips make lending time pass faster, for demos.
+- **Reset…** puts back the sample network with your real Mac in it.
 
 ## Code
 
 ```
 dots/
-  App/        the app, the menu bar icon, ⌥ Space, the ask panel window, this Mac's signals
+  App/        the app, the menu bar icon, ⌥ Space, the ask panel window, dots:// links, this Mac's signals
+  Cloud/      the cloud's API as the app calls it, the client, pricing, and the mock cloud
   Design/     colors and type, the swirl and pool emblems, shared controls
   Model/      pools, the model ladder, sample data, the app model
-  Service/    the simulated network, the router, endpoints and streaming, the local API, settings
+  Service/    the simulation, the router, both API formats, the local API, endpoints and streaming, settings
   Views/      Main (sidebar, Explore, pool, profile, API, sheets, moments), MenuBar, Ask, Settings
   Snapshot/   --snapshot and --selftest
 tools/        the app icon (icon.html, rendered by make-icon.mjs)

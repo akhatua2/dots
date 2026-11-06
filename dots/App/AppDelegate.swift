@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: GlobalHotKey?
+    private var mockCloud: MockCloud?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -13,8 +14,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
-            Snapshots.render(to: URL(fileURLWithPath: args[i + 1]))
-            exit(0)
+            NSApp.setActivationPolicy(.prohibited)
+            DispatchQueue.main.async { NSApp.windows.forEach { $0.orderOut(nil) } }
+            let dir = URL(fileURLWithPath: args[i + 1])
+            Task {
+                await Snapshots.render(to: dir)
+                exit(0)
+            }
+            return
+        }
+        // `dots --mock-cloud 8790` runs only a mock cloud, fresh and never saved, to try API.md with curl
+        if let i = args.firstIndex(of: "--mock-cloud") {
+            NSApp.setActivationPolicy(.prohibited)
+            DispatchQueue.main.async { NSApp.windows.forEach { $0.orderOut(nil) } }
+            let port = (i + 1 < args.count ? UInt16(args[i + 1]) : nil) ?? MockCloud.defaultPort
+            let cloud = MockCloud(port: port, fresh: true, persists: false)
+            do { try cloud.start() } catch { print("The mock cloud couldn't start: \(error)"); exit(1) }
+            mockCloud = cloud
+            print("A mock cloud on http://127.0.0.1:\(port), with the token \(AppModel.mockToken). Nothing is saved.")
+            return
         }
         if args.contains("--selftest") {
             NSApp.setActivationPolicy(.prohibited)
@@ -52,6 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// dots://invite/CODE, from a link a friend sent: shows the invite before you join
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first(where: { $0.scheme?.lowercased() == "dots" }) else { return }
+        AppModel.shared.openMainWindow()
+        AppModel.shared.openInviteLink(url.absoluteString)
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { AppModel.shared.openMainWindow() }

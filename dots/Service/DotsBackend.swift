@@ -16,6 +16,7 @@ protocol DotsBackend: AnyObject {
     func createInvite(poolID: String) -> Invite
     func revokeInvite(poolID: String)
     func setOffersIdle(poolID: String, _ on: Bool)
+    func pledgeBoost(poolID: String, gb: Int?)
 
     // Lending
     func updateLending(_ change: (inout LendingSettings) -> Void)

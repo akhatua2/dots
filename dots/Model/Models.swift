@@ -12,21 +12,23 @@ struct ModelTier: Codable, Hashable, Identifiable {
     var paramsLong: String      // "671 billion parameters"
     var tokPerSec: Double       // on a nearby pool
     var credits: Int            // what an answer costs on a public pool
+    var layers: Int             // transformer layers, shared out across the pool's Macs
+    var activeB: Double         // parameters used for each token, in billions (fewer than the total for mixture-of-experts models)
 }
 
 enum Ladder {
     static let tiers: [ModelTier] = [
-        ModelTier(id: "llama-3.1-8b", name: "Llama 3.1 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 62, credits: 1),
-        ModelTier(id: "gemma-3-27b", name: "Gemma 3 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 38, credits: 1),
-        ModelTier(id: "llama-3.3-70b", name: "Llama 3.3 70B", minGB: 40, params: "70B", paramsLong: "70 billion parameters", tokPerSec: 19, credits: 1),
-        ModelTier(id: "qwen3-235b", name: "Qwen3 235B", minGB: 136, params: "235B", paramsLong: "235 billion parameters", tokPerSec: 24, credits: 2),
-        ModelTier(id: "deepseek-v3.1", name: "DeepSeek V3.1", minGB: 396, params: "671B", paramsLong: "671 billion parameters", tokPerSec: 11, credits: 3),
-        ModelTier(id: "kimi-k2", name: "Kimi K2", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 9, credits: 4),
+        ModelTier(id: "llama-3.1-8b", name: "Llama 3.1 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 62, credits: 1, layers: 32, activeB: 8),
+        ModelTier(id: "gemma-3-27b", name: "Gemma 3 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 38, credits: 1, layers: 62, activeB: 27),
+        ModelTier(id: "llama-3.3-70b", name: "Llama 3.3 70B", minGB: 40, params: "70B", paramsLong: "70 billion parameters", tokPerSec: 19, credits: 1, layers: 80, activeB: 70),
+        ModelTier(id: "qwen3-235b", name: "Qwen3 235B", minGB: 136, params: "235B", paramsLong: "235 billion parameters", tokPerSec: 24, credits: 2, layers: 94, activeB: 22),
+        ModelTier(id: "deepseek-v3.1", name: "DeepSeek V3.1", minGB: 396, params: "671B", paramsLong: "671 billion parameters", tokPerSec: 11, credits: 3, layers: 61, activeB: 37),
+        ModelTier(id: "kimi-k2", name: "Kimi K2", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 9, credits: 4, layers: 61, activeB: 32),
     ]
 
     /// Coding pools can prefer a coding model when they have room for it.
     static let special: [ModelTier] = [
-        ModelTier(id: "qwen3-coder-480b", name: "Qwen3 Coder 480B", minGB: 270, params: "480B", paramsLong: "480 billion parameters", tokPerSec: 13, credits: 3),
+        ModelTier(id: "qwen3-coder-480b", name: "Qwen3 Coder 480B", minGB: 270, params: "480B", paramsLong: "480 billion parameters", tokPerSec: 13, credits: 3, layers: 62, activeB: 35),
     ]
 
     static func tier(_ id: String) -> ModelTier? { (tiers + special).first { $0.id == id } }
@@ -34,18 +36,35 @@ enum Ladder {
     static func next(after gb: Int) -> ModelTier? { tiers.first { $0.minGB > gb } }
 }
 
-/// Frontier models reached through the dots gateway, paid in credits at a discount.
-struct FrontierModel: Codable, Hashable, Identifiable {
+/// Frontier models reached through the dots gateway, paid in credits at a discount, or on your own key.
+struct FrontierModel: Hashable, Identifiable {
     var id: String
     var name: String
     var provider: String
-    var listCredits: Int
-    var credits: Int
     var tokPerSec: Double
 
-    static let opus = FrontierModel(id: "claude-opus-5-5", name: "Claude Opus 5.5", provider: "Anthropic", listCredits: 31, credits: 22, tokPerSec: 55)
-    static let sonnet = FrontierModel(id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "Anthropic", listCredits: 11, credits: 8, tokPerSec: 80)
+    /// What an everyday answer costs through the gateway, in credits, and what it would at list price.
+    var credits: Int { Pricing.typicalCredits(id) }
+    var listCredits: Int { Pricing.typicalListCredits(id) }
+
+    static let opus = FrontierModel(id: "claude-opus-5-5", name: "Claude Opus 5.5", provider: "Anthropic", tokPerSec: 55)
+    static let sonnet = FrontierModel(id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: "Anthropic", tokPerSec: 80)
     static let all = [opus, sonnet]
+    static func named(_ id: String) -> FrontierModel? { all.first { $0.id == id } }
+}
+
+/// What a run is in tokens, on average: a prompt and its answer.
+enum Runs {
+    static let tokensPerRun = 420
+    /// 160_000 -> "160K", 5_210_520 -> "5.2M"
+    static func tokens(_ runs: Int) -> String { Self.short(runs * tokensPerRun) }
+    static func short(_ n: Int) -> String {
+        switch n {
+        case 1_000_000...: let m = Double(n) / 1e6; return (m >= 10 ? String(format: "%.0fM", m) : String(format: "%.1fM", m)).replacingOccurrences(of: ".0M", with: "M")
+        case 1_000...: let k = Double(n) / 1e3; return (k >= 10 ? String(format: "%.0fK", k) : String(format: "%.1fK", k)).replacingOccurrences(of: ".0K", with: "K")
+        default: return "\(n)"
+        }
+    }
 }
 
 // MARK: - People, Macs, pools
@@ -119,6 +138,61 @@ struct Pool: Codable, Hashable, Identifiable {
     var speedFactor = 1.0
     /// How busy the pool is: scales what a lending Mac earns there.
     var demand = 0.8
+    /// A boost the pool plans: a window when its members commit their Macs, to reach a bigger model for a few hours
+    var boost: PoolBoost?
+    /// What happened in the pool lately: thanks, people stepping away, milestones
+    var activity: [PoolActivity]?
+}
+
+/// A boost: a window, at any time of day, when a pool's members commit their Macs at once, so the pool can run
+/// a bigger model for a few hours. Friends from outside the pool can boost as guests, just that once.
+struct PoolBoost: Codable, Hashable {
+    struct Pledge: Codable, Hashable {
+        var personID: String
+        var gb: Int
+        var guest: Bool
+    }
+    var title: String
+    var modelID: String
+    var starts: Date
+    var hours: Double
+    var plannedBy: String
+    var pledges: [Pledge]
+
+    var targetGB: Int { Ladder.tier(modelID)?.minGB ?? 0 }
+    var pledgedGB: Int { pledges.reduce(0) { $0 + $1.gb } }
+    var ends: Date { starts.addingTimeInterval(hours * 3_600) }
+    func pledge(of personID: String) -> Pledge? { pledges.first { $0.personID == personID } }
+}
+
+/// Something that happened in a pool, for its activity list. `kind` is "thanks" (to your Mac), "away"
+/// (a Mac stepped away), "boost" (a boost was planned) or "milestone", which carries its own `text`.
+struct PoolActivity: Codable, Hashable, Identifiable {
+    var id: String
+    var date: Date
+    var personID: String?
+    var kind: String
+    var gb: Int?
+    var text: String?
+}
+
+/// A night this Mac lent: where, for how long, and the runs it took part in. Nights run from noon to noon.
+struct NightLent: Codable, Hashable {
+    var date: Date
+    var poolID: String
+    var minutes: Double
+    var runs: Int
+    /// When this Mac began and last lent that night
+    var from: Date?
+    var to: Date?
+}
+
+extension Date {
+    /// The noon a night began: nights run from noon to noon, so 2 AM belongs to the evening before.
+    var nightStart: Date {
+        let shifted = addingTimeInterval(-12 * 3_600)
+        return Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: shifted) ?? shifted
+    }
 }
 
 extension Pool {
@@ -131,6 +205,8 @@ extension Pool {
         return Ladder.best(for: pooledGB)
     }
     var nextModel: ModelTier? { Ladder.next(after: pooledGB) }
+    /// Levels climb the model ladder: Level 1 runs the smallest model.
+    var level: Int { (Ladder.tiers.lastIndex { $0.minGB <= pooledGB } ?? -1) + 1 }
     var isNew: Bool { createdAt > Date().addingTimeInterval(-7 * 86_400) }
     var tokPerSec: Int { Int(((model?.tokPerSec ?? 0) * speedFactor).rounded()) }
 
@@ -153,6 +229,12 @@ struct CreditEvent: Codable, Hashable, Identifiable {
     var date: Date
     var amount: Int
     var note: String
+    /// "lend" (work for your pool), "network" (your pool's idle hours, offered to the network) or "spend"
+    var kind: String?
+    var poolID: String?
+    /// For work: how long, and the compute the hub measured, in petaFLOPs
+    var minutes: Double?
+    var computePF: Double?
 }
 
 struct Badge: Codable, Hashable, Identifiable {
@@ -193,9 +275,21 @@ struct APIKey: Codable, Hashable, Identifiable {
     var lastUsedAt: Date?
     var creditsThisMonth = 0
     var requestsThisMonth = 0
+    /// Everything this key sends stays on this Mac and in your own pools
+    var privateOnly: Bool?
+    /// The most this key may bill to your own frontier key in a month, in dollars
+    var monthlyCapUSD: Double?
+    var usdThisMonth: Double?
+
+    var rulesSummary: String {
+        var parts = [privateOnly == true ? "Private: this Mac and your pools" : reach.summary]
+        if let monthlyLimit { parts.append("\(monthlyLimit.grouped) credits a month") }
+        if let cap = monthlyCapUSD { parts.append("\(cap.dollars) a month on your key") }
+        return parts.joined(separator: ", ")
+    }
 }
 
-enum Destination: String, Codable, Hashable { case yourPool, publicPool, frontier }
+enum Destination: String, Codable, Hashable { case thisMac, yourPool, publicPool, frontier }
 
 struct RequestRecord: Codable, Hashable, Identifiable {
     var id = UUID()
@@ -206,6 +300,20 @@ struct RequestRecord: Codable, Hashable, Identifiable {
     var model: String
     var credits: Int
     var isPrivate: Bool
+    /// Tokens in and out, as the backend reported them (`measured`) or estimated from the text
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var measured: Bool?
+    /// Billed to your own frontier key, at list price
+    var usd: Double?
+    /// What the model you compare against would have cost for the same tokens, at list price
+    var baselineUSD: Double?
+    var fallback: String?
+    var format: String?
+
+    /// What this request cost, in dollars: your key's bill plus the credits, at what a credit is worth.
+    var costUSD: Double { (usd ?? 0) + Double(credits) * Pricing.terms.creditUSD }
+    var savedUSD: Double { max(0, (baselineUSD ?? 0) - costUSD) }
 }
 
 // MARK: - The whole simulated network, as stored on disk
@@ -230,6 +338,13 @@ struct NetworkState: Codable {
     var lendingSince: Date?
     /// Pools endorsed before this history starts (the sample profile has a past).
     var endorsedBefore = 0
+    /// Hours this Mac has lent, and the compute the hub measured for it, all time
+    var hoursLent: Double?
+    var computePF: Double?
+    /// Invite codes waiting for you (the cloud keeps these)
+    var invitesForMe: [String]?
+    /// The nights this Mac lent, oldest first (the cloud keeps these)
+    var nights: [NightLent]?
 
     var me: Person { people.first { $0.id == meID }! }
     var thisMac: MacDevice { devices.first { $0.id == thisMacID }! }
@@ -239,5 +354,7 @@ struct NetworkState: Codable {
     var myPools: [Pool] { pools.filter { $0.isMember(meID) } }
     var publicPools: [Pool] { pools.filter(\.isPublic) }
     var lendingPool: Pool? { pool(lendingPoolID) }
+    /// People you know in a pool, as Explore shows them
+    func friends(in pool: Pool) -> [Person] { pool.memberIDs.filter { $0 != meID }.compactMap { person($0) } }
     var poolsEndorsed: Int { endorsedBefore + pools.filter(\.endorsedByMe).count }
 }

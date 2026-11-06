@@ -23,12 +23,23 @@ struct ExploreView: View {
         LiveScroll {
             VStack(alignment: .leading, spacing: 0) {
                 PageHeader(title: "Explore", subtitle: "Public pools you can lend to. Your Mac earns credits in every one.") {
-                    HStack(spacing: 7) {
-                        Circle().fill(D.t4).frame(width: 7, height: 7)
-                        Text("\(model.state.networkLendingNow.grouped) Macs lending right now")
-                            .font(D.ui(12.5, .medium)).foregroundStyle(D.t3)
-                            .contentTransition(.numericText())
+                    HStack(spacing: 14) {
+                        HStack(spacing: 7) {
+                            Circle().fill(D.t4).frame(width: 7, height: 7)
+                            Text("\(model.state.networkLendingNow.grouped) Macs lending right now")
+                                .font(D.ui(12.5, .medium)).foregroundStyle(D.t3)
+                                .contentTransition(.numericText())
+                        }
+                        Button {
+                            model.openInvite = nil
+                            model.sheet = .openInvite
+                        } label: { Label("Invite Link", systemImage: "link") }
+                            .buttonStyle(DButtonStyle(kind: .grey))
                     }
+                }
+
+                ForEach(model.backend.invites) { invite in
+                    InviteCard(invite: invite).padding(.top, 18)
                 }
 
                 HStack(spacing: 8) {
@@ -57,8 +68,9 @@ struct ExploreView: View {
                     ForEach(pools) { pool in PoolCard(pool: pool) }
                 }
                 if pools.isEmpty {
-                    Text("No pools match that. Try another word, or start one yourself.")
+                    Text("No pools match that.")
                         .font(D.ui(13)).foregroundStyle(D.t4).padding(.top, 20)
+                        .help("Try another word, or start one yourself.")
                 }
             }
             .padding(.horizontal, 32)
@@ -77,8 +89,7 @@ struct PageHeader<Trailing: View>: View {
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(D.ui(26, .bold)).foregroundStyle(D.t1)
-                Text(subtitle).font(D.ui(13.5)).foregroundStyle(D.t3)
+                Text(title).font(D.ui(26, .bold)).foregroundStyle(D.t1).help(subtitle)
             }
             Spacer(minLength: 20)
             trailing.padding(.top, 8)
@@ -99,13 +110,13 @@ struct PoolCard: View {
 
     var body: some View {
         let s = model.state
-        let friends = pool.memberIDs.filter { $0 != s.meID }.compactMap { s.person($0) }
+        let friends = s.friends(in: pool)
         let lendingHere = s.lendingPoolID == pool.id
         let isMember = pool.isMember(s.meID)
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
-                EmblemView(macs: pool.totalMacs, phase: pool.phase, size: 40)
+                MiniRings(pool: pool, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pool.name).font(D.ui(15, .bold)).foregroundStyle(D.t1).lineLimit(1)
                     Text("\(pool.model?.name ?? "No model yet") · \(pool.totalMacs.grouped) Macs")
@@ -160,7 +171,7 @@ struct PoolCard: View {
                     .padding(.horizontal, 12).frame(height: 28)
                     .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
                 } else {
-                    HoverAccentButton(title: isMember ? "Lend here" : "Add my Mac", alwaysAccent: hovering && !isMember) {
+                    HoverAccentButton(title: isMember ? "Lend Here" : "Add My Mac", alwaysAccent: hovering && !isMember) {
                         model.join(pool)
                     }
                 }
@@ -175,5 +186,31 @@ struct PoolCard: View {
         .onTapGesture { model.open(.pool(pool.id)) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// An invite waiting for you, with what your Mac would do for that pool.
+struct InviteCard: View {
+    @Environment(AppModel.self) private var model
+    var invite: InviteDetails
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if let pool = model.state.pool(invite.poolID) {
+                MiniRings(pool: pool, size: 40)
+            } else {
+                EmblemView(macs: invite.macs, phase: 0.7, size: 40)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(invite.fromName ?? "A friend") invited you to \(invite.poolName)").font(D.ui(14, .semibold)).foregroundStyle(D.t1)
+                Text(invite.unlocks.map { "Your Mac would unlock \($0) for everyone in it." }
+                     ?? "\(invite.macs) Macs · runs \(invite.modelNow ?? "nothing yet")")
+                    .font(D.ui(12.5)).foregroundStyle(invite.unlocks == nil ? D.t3 : D.accentText)
+            }
+            Spacer()
+            Button("Open") { model.openInviteLink(invite.code) }.buttonStyle(DButtonStyle(kind: .primary))
+        }
+        .padding(16)
+        .card()
     }
 }

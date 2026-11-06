@@ -33,13 +33,13 @@ struct AskPanelView: View {
             HStack(spacing: 14) {
                 hint("return", "ask")
                 hint("esc", "close")
-                Text("Drop a file on the panel to ask about it").font(D.ui(11.5)).foregroundStyle(D.t5)
                 Spacer()
                 Button { model.showSettings(openSettings) } label: { Image(systemName: "gearshape").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(D.t5)
                     .help("Settings")
             }
             .padding(.horizontal, 18)
+            .help("Drop a file on the panel to ask about it")
             .frame(height: 34)
         }
         .frame(width: 720)
@@ -265,7 +265,9 @@ struct ReceiptView: View {
                 }
                 Spacer()
                 HStack(spacing: 6) {
-                    if receipt.credits == 0 {
+                    if receipt.paidWithKey {
+                        Tag(text: receipt.finished ? "\(receipt.usd.dollars) on your key" : "On your key", symbol: "key")
+                    } else if receipt.credits == 0 {
                         Tag(text: "Free for you")
                     } else {
                         Tag(text: "\(receipt.credits) credits", symbol: "smallcircle.filled.circle")
@@ -281,11 +283,14 @@ struct ReceiptView: View {
                 ForEach(receipt.reasons, id: \.self) { r in
                     IconLine(symbol: r.symbol, text: r.text, color: D.t3, size: 13)
                 }
+                if let note = receipt.fallbackNote {
+                    IconLine(symbol: "arrow.uturn.right", text: note, color: D.t1, size: 13)
+                }
                 if let note = receipt.handoffNote {
                     IconLine(symbol: "arrow.left.arrow.right", text: note, color: D.t1, size: 13)
                 }
                 if receipt.isSimulated {
-                    IconLine(symbol: "circle.dashed", text: "Simulated: no endpoint is set for this route. Add one in Settings.", color: D.t4, size: 12.5)
+                    IconLine(symbol: "circle.dashed", text: "Simulated by the mock cloud: the pool and the words are stand-ins.", color: D.t4, size: 12.5)
                 }
             }
             .padding(14)
@@ -295,6 +300,7 @@ struct ReceiptView: View {
 
     private var icon: String {
         switch receipt.destination {
+        case .thisMac: "desktopcomputer"
         case .frontier: "sparkle"
         case .publicPool: "globe"
         case .yourPool: "network"
@@ -308,7 +314,8 @@ struct ReceiptView: View {
             parts.append("\(active) Macs")
         }
         if receipt.tokPerSec > 0 { parts.append("\(Int(receipt.tokPerSec.rounded())) tok/s") }
-        if receipt.saved > 0 { parts.append("saved \(receipt.saved) credits") }
+        if let i = receipt.inputTokens, let o = receipt.outputTokens { parts.append("\(i.grouped) in · \(o.grouped) out") }
+        if receipt.saved > 0, !receipt.paidWithKey { parts.append("saved \(receipt.saved) credits") }
         return parts.joined(separator: " · ")
     }
 }
@@ -357,7 +364,7 @@ struct SecondOpinionView: View {
                             Text(c.model).font(D.ui(14, .semibold)).foregroundStyle(D.t1)
                             IconLine(symbol: "smallcircle.filled.circle", text: "\(c.credits) credits", color: D.t2, size: 12.5)
                             if c.listCredits > c.credits {
-                                Text("\(Int((1 - Double(c.credits) / Double(c.listCredits)) * 100))% off with credits")
+                                Text("\(Int((Pricing.terms.discount * 100).rounded()))% off with credits")
                                     .font(D.ui(12)).foregroundStyle(D.t4)
                             }
                         }
@@ -385,7 +392,9 @@ struct SecondOpinionView: View {
                 if let receipt = second.receipt, second.phase == .done {
                     HStack(spacing: 14) {
                         IconLine(symbol: "arrow.up.right.square", text: "Ran at \(receipt.place) · \(receipt.model)", color: D.t1, size: 12.5, weight: .semibold)
-                        IconLine(symbol: "smallcircle.filled.circle", text: "\(receipt.credits) credits · saved \(receipt.saved)", color: D.t3, size: 12.5)
+                        IconLine(symbol: receipt.paidWithKey ? "key" : "smallcircle.filled.circle",
+                                 text: receipt.paidWithKey ? "\(receipt.usd.dollars) on your key" : "\(receipt.credits) credits · saved \(receipt.saved)",
+                                 color: D.t3, size: 12.5)
                         if receipt.isSimulated { Tag(text: "Simulated") }
                         Spacer()
                         Text("Balance \(Int(model.state.credits).grouped)").font(D.ui(12.5, .semibold)).foregroundStyle(D.t2)

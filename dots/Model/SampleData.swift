@@ -70,7 +70,7 @@ enum SampleData {
 
         let badges = [
             Badge(id: "nights-30", symbol: "moon.fill", title: "30 nights", detail: "Lent 30 nights in a row", date: now.addingTimeInterval(-20 * day)),
-            Badge(id: "answers-1000", symbol: "bubble.left.fill", title: "1,000 answers", detail: "Helped answer 1,000 questions", date: now.addingTimeInterval(-45 * day)),
+            Badge(id: "answers-1000", symbol: "bubble.left.fill", title: "1,000 runs", detail: "Took part in 1,000 runs", date: now.addingTimeInterval(-45 * day)),
         ]
 
         let keys = [
@@ -84,27 +84,34 @@ enum SampleData {
         var requests: [RequestRecord] = []
         let monthStart = Calendar.current.dateInterval(of: .month, for: now)?.start ?? now.addingTimeInterval(-20 * day)
         let span = max(3_600, now.timeIntervalSince(monthStart))
+        // Each with its tokens, and what Claude Opus 5.5 would have cost for them, so the month's savings add up
         for i in 0..<141 {
             let date = monthStart.addingTimeInterval(span * Double(i) / 141)
+            let input = 600 + (i * 373) % 2_400, output = 180 + (i * 211) % 700
+            let baseline = Pricing.usd(FrontierModel.opus.id, input: input, output: output)
             if i % 10 == 3 {
-                let opus = i % 20 == 3
+                let f = i % 20 == 3 ? FrontierModel.opus : FrontierModel.sonnet
                 requests.append(RequestRecord(date: date, source: i % 3 == 0 ? "Ask" : "\(me.name)'s laptop", destination: .frontier,
-                                              place: "Anthropic", model: opus ? "Claude Opus 5.5" : "Claude Sonnet 5",
-                                              credits: opus ? 22 : 8, isPrivate: false))
+                                              place: "Anthropic", model: f.name, credits: Pricing.credits(f.id, input: input, output: output),
+                                              isPrivate: false, inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             } else if i % 5 == 1 || (i % 10 == 7 && i % 20 != 7) {
                 requests.append(RequestRecord(date: date, source: "Ask", destination: .publicPool, place: "Open Science",
-                                              model: "Kimi K2", credits: 3, isPrivate: false))
+                                              model: "Kimi K2", credits: Ladder.tier("kimi-k2")?.credits ?? 4, isPrivate: false,
+                                              inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             } else {
                 requests.append(RequestRecord(date: date, source: i % 4 == 0 ? "Raycast" : "Ask", destination: .yourPool,
-                                              place: "Studio 9", model: "Qwen3 235B", credits: 0, isPrivate: i % 3 == 0))
+                                              place: "Studio 9", model: "Qwen3 235B", credits: 0, isPrivate: i % 3 == 0,
+                                              inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             }
         }
 
         let log = [
-            CreditEvent(date: now.addingTimeInterval(-2 * 3_600), amount: -22, note: "Claude Opus 5.5, a second opinion"),
-            CreditEvent(date: now.addingTimeInterval(-9 * 3_600), amount: 96, note: "Your Mac lent 8 hours overnight"),
-            CreditEvent(date: now.addingTimeInterval(-26 * 3_600), amount: -3, note: "Kimi K2 in Open Science"),
-            CreditEvent(date: now.addingTimeInterval(-33 * 3_600), amount: 88, note: "Your Mac lent 7 hours overnight"),
+            CreditEvent(date: now.addingTimeInterval(-2 * 3_600), amount: -FrontierModel.opus.credits, note: "Claude Opus 5.5, a second opinion", kind: "spend"),
+            CreditEvent(date: now.addingTimeInterval(-9 * 3_600), amount: 96, note: "Your Mac lent to Studio 9", kind: "lend",
+                        poolID: "studio-9", minutes: 480, computePF: 3.6),
+            CreditEvent(date: now.addingTimeInterval(-26 * 3_600), amount: -(Ladder.tier("kimi-k2")?.credits ?? 4), note: "Kimi K2 in Open Science", kind: "spend"),
+            CreditEvent(date: now.addingTimeInterval(-33 * 3_600), amount: 88, note: "Your Mac lent to Studio 9", kind: "lend",
+                        poolID: "studio-9", minutes: 420, computePF: 3.1),
         ]
 
         return NetworkState(

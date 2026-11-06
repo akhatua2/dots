@@ -15,21 +15,27 @@ struct LiveScroll<Content: View>: View {
     }
 }
 
-/// `dots --snapshot <folder>` walks a fresh simulation through the main moments and saves each screen as a PNG.
+/// `dots --snapshot <folder>` walks a fresh network through the main moments and saves each screen as a PNG.
+/// It runs a mock cloud of its own, fresh and never saved, so it never touches your network.
 @MainActor
 enum Snapshots {
-    static func render(to dir: URL) {
+    static func render(to dir: URL) async {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let model = AppModel(backend: Simulation(fresh: true, persists: false), settings: AppSettings())
+        let cloud = MockCloud(port: UInt16.random(in: 19_300..<19_500), fresh: true, persists: false)
+        try? cloud.start()
+        let client = CloudClient(baseURL: URL(string: "http://127.0.0.1:\(cloud.port)")!, token: AppModel.mockToken)
+        let model = AppModel(backend: CloudBackend(client: client, persists: false), settings: AppSettings())
+        model.useMock(cloud)
         model.isSnapshot = true
         model.persistsSettings = false
         // The API server doesn't run for snapshots; draw it the way it looks in the app
         model.gatewayState = "Running on port \(model.settings.gatewayPort)"
         model.signals.onPower = true
         model.signals.idleSeconds = 999
-        let window = CGSize(width: 1_180, height: 780)
+        await model.backend.syncNow()
+        let window = CGSize(width: 1_180, height: 860)
 
-        // 1. Explore, before your Mac lends anywhere
+        // 1. Explore, before your Mac lends anywhere, with Sam's invite at the top
         save(Shell(route: .explore), model, window, dir, "01-explore")
 
         // 2. Join Student Union: your Mac tips it over DeepSeek V3.1's line
@@ -42,11 +48,13 @@ enum Snapshots {
         }
         model.moment = nil
         model.endorse(model.state.pool(union.id)!)
+        try? await Task.sleep(for: .milliseconds(300))
         save(Shell(route: .pool(union.id)), model, window, dir, "05-pool-after")
 
-        // 3. The menu bar
-        model.working = true
-        save(MenuBarPanel(), model, CGSize(width: 320, height: 520), dir, "06-menubar", fitHeight: true)
+        // 3. The menu bar, while the hub has work for this Mac
+        cloud.forcedWorking = true
+        await model.backend.beatNow(active: true)
+        save(MenuBarPanel(), model, CGSize(width: 320, height: 560), dir, "06-menubar", fitHeight: true)
 
         // 4. Ask: a lease, private, answered in Studio 9 while Priya's Mac sleeps
         let ask = model.ask
@@ -56,13 +64,19 @@ enum Snapshots {
         ask.decision = decision
         ask.asked = ask.input
         ask.answer = SimulatedAnswers.lease
-        if let chosen = decision.chosen {
-            let plan = AnswerRunner.Plan(events: AsyncThrowingStream { $0.finish() }, isSimulated: true, endpoint: nil)
-            var receipt = AnswerRunner.receipt(for: chosen, decision: decision, plan: plan, state: model.state)
+        if let chosen = decision.chosen, let pool = model.state.pool(chosen.poolID) {
+            var receipt = AnswerRunner.receipt(for: chosen, decision: decision, via: "the dots hub", paidWithKey: false)
+            receipt.macs = pool.macs.filter { $0.state == .lending }.compactMap { m in
+                guard let d = model.state.device(m.macID), let p = model.state.person(d.ownerID) else { return nil }
+                return ReceiptMac(id: m.macID, initial: d.id == model.state.thisMacID ? "You" : p.initial, name: p.name)
+            }
             if let priya = receipt.macs.first(where: { $0.name == "Priya" }) {
                 receipt.asleepMacID = priya.id
                 receipt.handoffNote = "Priya's Mac went to sleep. The other three took over."
             }
+            receipt.inputTokens = 1_420
+            receipt.outputTokens = 96
+            receipt.isSimulated = true
             receipt.finished = true
             ask.receipt = receipt
             ask.phase = .done
@@ -70,24 +84,83 @@ enum Snapshots {
         }
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask", fitHeight: true)
 
-        // 5. Your profile, and the API page with a new key
+        // 5. A week of work, and your profile with this week's note
+        await model.backend.beatNow(active: true, adding: 31 * 3_600)
+        cloud.issueNote()
+        await model.backend.syncNow()
         save(Shell(route: .profile), model, window, dir, "08-profile")
-        model.createKey(name: "My scripts", reach: .all, monthlyLimit: 500)
+
+        // 6. The API page, after a few requests went through dots, and a new key
+        let baseline = model.settings.savingsBaseline
+        for (dest, place, mdl, credits, usd, i, o) in [
+            (Destination.thisMac, "This Mac", "qwen3-8b", 0, 0.0, 820, 240),
+            (.yourPool, "Studio 9", "Qwen3 235B", 0, 0.0, 2_400, 610),
+            (.publicPool, "Open Science", "Kimi K2", 4, 0.0, 6_100, 900),
+            (.frontier, "Anthropic", "Claude Opus 5.5", 13, 0.0, 1_500, 600),
+            (.frontier, "Anthropic", "Claude Opus 5.5", 0, Pricing.usd(baseline, input: 3_200, output: 800), 3_200, 800),
+        ] {
+            model.recordAnswer(destination: dest, place: place, model: mdl, source: "My scripts", credits: credits, usd: usd,
+                               isPrivate: dest == .thisMac || dest == .yourPool, input: i, output: o, measured: true,
+                               fallback: place == "Studio 9" ? "This Mac didn't answer, so it went to Studio 9." : nil, format: .openai)
+        }
+        model.createKey(name: "My scripts", reach: .all, monthlyLimit: 500, monthlyCapUSD: 20)
         save(Shell(route: .api), model, window, dir, "09-api")
         save(CreateKeySheet(), model, CGSize(width: 440, height: 400), dir, "10-key-sheet", fitHeight: true)
 
-        // 6. Starting a pool, and inviting friends to Studio 9
+        // 7. Starting a pool, inviting friends to Studio 9, and opening Sam's invite
         save(StartPoolSheet(), model, CGSize(width: 440, height: 420), dir, "11-start-sheet", fitHeight: true)
         _ = model.backend.createInvite(poolID: "studio-9")
         save(InviteSheet(poolID: "studio-9"), model, CGSize(width: 480, height: 520), dir, "12-invite-sheet", fitHeight: true)
         save(Shell(route: .pool("studio-9")), model, window, dir, "13-studio-9")
+        model.setLimit(10)
+        await model.backend.beatNow(active: model.lendingStatus.isActive)
+        if let invite = model.backend.invites.first {
+            model.openInvite = OpenInvite(code: invite.code, preview: invite)
+            save(OpenInviteSheet(), model, CGSize(width: 480, height: 420), dir, "15-open-invite", fitHeight: true)
+        }
+
+        // 8. Settings, with Anthropic set up for a key that works in more than one workspace
+        model.settings.frontierEndpoint = EndpointConfig(enabled: true, label: "Anthropic", baseURL: "https://api.anthropic.com/v1",
+                                                        model: "claude-opus-5-5", keychainAccount: "dots-snapshot-none",
+                                                        workspaceID: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")
+        save(SettingsView(), model, CGSize(width: 560, height: 640), dir, "14-settings", fitHeight: true)
+
+        // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with DeepSeek Boost coming
+        let lateNight = Date().nightStart.addingTimeInterval(14.1 * 3_600)
+        if let invite = model.backend.invites.first(where: { $0.code == "LATE7Q" }) {
+            model.acceptInvite(invite, lendGB: 10)
+            await model.backend.settled()
+            try? await Task.sleep(for: .milliseconds(300))
+            model.moment = nil
+            cloud.forcedWorking = true
+            await model.backend.beatNow(active: true, adding: 2 * 3_600)
+            await model.backend.syncNow()
+            save(Shell(route: .pool("late-night-lab")), model, window, dir, "16-late-night-lab", clock: lateNight)
+            save(BoostSheet(poolID: "late-night-lab"), model, CGSize(width: 560, height: 720), dir, "17-boost", fitHeight: true, clock: lateNight)
+            save(MenuBarPanel(), model, CGSize(width: 320, height: 600), dir, "21-menubar-lab", fitHeight: true, clock: lateNight)
+            save(Shell(route: .profile), model, window, dir, "18-profile-lab", clock: lateNight)
+            // Lending 6 GB more takes it to Level 2
+            model.setLimit(16)
+            await model.backend.beatNow(active: true)
+            if let moment = model.moment {
+                save(Shell(route: .pool("late-night-lab")).overlay(MomentView(moment: moment, frozenAt: 3.2)), model, window, dir, "19-level-up", clock: lateNight)
+                model.moment = nil
+            }
+            save(Shell(route: .pool("late-night-lab")), model, window, dir, "20-lab-level-2", clock: lateNight)
+            // The morning after
+            save(RecapSheet(), model, CGSize(width: 720, height: 800), dir, "22-recap", fitHeight: true,
+                 clock: Date().nightStart.addingTimeInterval(19.03 * 3_600))
+        }
+        cloud.stop()
         print("snapshots written to \(dir.path)")
     }
 
-    private static func save<V: View>(_ view: V, _ model: AppModel, _ size: CGSize, _ dir: URL, _ name: String, fitHeight: Bool = false) {
+    private static func save<V: View>(_ view: V, _ model: AppModel, _ size: CGSize, _ dir: URL, _ name: String, fitHeight: Bool = false,
+                                      clock: Date? = nil) {
         let content = view
             .environment(model)
             .environment(\.isSnapshot, true)
+            .environment(\.artClock, clock ?? Date())
             .environment(\.colorScheme, .dark)
             .frame(width: size.width, height: fitHeight ? nil : size.height)
         let renderer = ImageRenderer(content: content)

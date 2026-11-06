@@ -18,6 +18,12 @@ targets:
     platform: macOS
     sources:
       - path: dots
+    info:
+      path: dots/Info.plist
+      properties:
+        CFBundleURLTypes:
+          - CFBundleURLName: com.sourabhdaroji.dots.invite
+            CFBundleURLSchemes: [dots]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sourabhdaroji.dots

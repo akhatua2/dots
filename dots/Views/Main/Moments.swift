@@ -27,10 +27,19 @@ struct MomentView: View {
             let open = ease(t / 0.9) * (1 - ease(closeT / 0.6))
             let fade = 1 - ease(closeT / 0.35)
             ZStack {
-                SwirlCanvas(phase: 0.35 + t * 0.05, reveal: open)
+                SwirlCanvas(phase: 0.35 + t * 0.05, reveal: open, quiet: CGSize(width: 0.38, height: 0.28))
                 if open > 0.02 {
                     content(t: t, fade: fade)
                     if !(hasUnlock && t >= unlockAt) { youMarker(t: t, fade: fade) }
+                    if hasUnlock && t >= unlockAt, let info = unlockInfo {
+                        VStack {
+                            Spacer()
+                            Button("Back to \(info.pool.name)") { if closing == nil { closing = .now } }
+                                .buttonStyle(DButtonStyle(kind: .grey, large: true))
+                                .padding(.bottom, 44)
+                        }
+                        .opacity(ease((t - unlockAt - 0.3) / 0.5) * fade)
+                    }
                 }
             }
             .onChange(of: closeT >= 0.62) { _, done in if done { model.moment = nil } }
@@ -49,16 +58,26 @@ struct MomentView: View {
         let a = showUnlock ? ease((t - unlockAt) / 0.5) : ease((t - 0.45) / 0.5) * (hasUnlock ? 1 - ease((t - unlockAt + 0.35) / 0.3) : 1)
         VStack(spacing: 14) {
             if showUnlock, let info = unlockInfo {
-                Text("UNLOCKED").font(D.ui(14, .bold)).tracking(4).foregroundStyle(D.t3)
-                Text(info.tier.name).font(D.display(96)).foregroundStyle(D.t1).minimumScaleFactor(0.5).lineLimit(1)
-                Text("\(info.tier.paramsLong.capitalizedFirst). Your Mac took \(info.pool.name) to \(info.event.toGB.grouped) GB.")
-                    .font(D.ui(19)).foregroundStyle(D.t2)
-                    .shadow(color: D.bg0, radius: 6).shadow(color: D.bg0, radius: 14)
+                let level = (Ladder.tiers.firstIndex { $0.id == info.tier.id } ?? 0) + 1
+                Text("LEVEL \(level)").font(D.ui(13, .bold)).tracking(4.5).foregroundStyle(D.t3)
+                Text(info.tier.name).font(D.display(108)).foregroundStyle(D.t1).minimumScaleFactor(0.5).lineLimit(1)
+                Text("\(info.tier.paramsLong.capitalizedFirst). Your \(s.thisMac.kind) took \(info.pool.name) to \(info.event.toGB.grouped) GB.")
+                    .font(D.ui(17)).foregroundStyle(D.t2).padding(.top, 6)
+                Text(info.pool.isPublic ? "Everyone here can ask it now." : "Hard prompts now stay in the pool, free.")
+                    .font(D.ui(15)).foregroundStyle(D.t3)
+                HStack(spacing: 8) {
+                    DotGlyph(rows: DotGlyph.padlock, size: 13)
+                    Text("You're the Unlocker").font(D.ui(13, .semibold))
+                }
+                .foregroundStyle(D.accentText)
+                .padding(.horizontal, 13).frame(height: 30)
+                .background(Capsule().fill(D.accent.opacity(0.16)))
+                .overlay(Capsule().strokeBorder(D.accent.opacity(0.45), lineWidth: 1))
+                .padding(.top, 10)
             } else if case let .joined(poolID, number, _, waiting) = moment, let pool = s.pool(poolID) {
                 Text("You're in.").font(D.display(96)).foregroundStyle(D.t1)
                 Text("Your \(s.thisMac.kind) is Mac \(number.grouped) in \(pool.name).")
                     .font(D.ui(19)).foregroundStyle(D.t2)
-                    .shadow(color: D.bg0, radius: 6).shadow(color: D.bg0, radius: 14)
                 if let waiting {
                     Text("\(waiting). It starts lending as soon as it can.").font(D.ui(15)).foregroundStyle(D.t4)
                 }

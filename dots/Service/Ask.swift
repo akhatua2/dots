@@ -16,6 +16,13 @@ struct Receipt: Equatable {
     var isSimulated: Bool
     var reasons: [RouteReason]
     var finished = false
+    /// Billed to your own frontier key instead of paid in credits
+    var paidWithKey = false
+    var usd: Double = 0
+    var inputTokens: Int?
+    var outputTokens: Int?
+    /// Set when the first place didn't answer and it went to the next
+    var fallbackNote: String?
 }
 
 struct ReceiptMac: Equatable, Identifiable {
@@ -24,69 +31,54 @@ struct ReceiptMac: Equatable, Identifiable {
     var name: String
 }
 
-/// Turns a route into an answer stream: a real endpoint when one is set for that route, the simulation otherwise.
+/// Turns a route into an answer stream from where it really runs: the model on this Mac, a pool through the
+/// dots hub, or a frontier model through the dots gateway (paid in credits) or your own key.
 @MainActor
 enum AnswerRunner {
     struct Plan {
         var events: AsyncThrowingStream<AnswerEvent, Error>
-        var isSimulated: Bool
-        var endpoint: EndpointConfig?
+        var endpoint: EndpointConfig
+        var paidWithKey: Bool
+        var via: String
     }
 
-    /// The endpoint that really answers a route, if any. Frontier routes use the frontier endpoint. Your pools
-    /// and the network use the pools endpoint, or a model on this Mac set up under frontier models: it's
-    /// private and free, so it can take any question.
-    static func endpoint(for c: RouteCandidate, settings: AppSettings) -> EndpointConfig? {
-        let pool = settings.poolEndpoint, frontier = settings.frontierEndpoint
+    static func target(for c: RouteCandidate, model app: AppModel) -> (endpoint: EndpointConfig, paidWithKey: Bool, via: String)? {
+        let settings = app.settings
         switch c.destination {
-        case .frontier: return frontier.isReady ? frontier : nil
+        case .thisMac:
+            let e = settings.poolEndpoint
+            return e.isReady ? (e, false, e.serverName.map { "\($0) on this Mac" } ?? "the model on this Mac") : nil
         case .yourPool, .publicPool:
-            if pool.isReady { return pool }
-            return frontier.isReady && frontier.isLocal ? frontier : nil
+            guard let pool = c.poolID else { return nil }
+            return (app.backend.client.hub(poolID: pool, model: c.modelID), false, "the dots hub")
+        case .frontier:
+            var own = settings.frontierEndpoint
+            let ownReady = own.isReady
+            if own.isAnthropic { own.model = c.modelID }
+            let gateway = (app.backend.client.gateway(model: c.modelID), false, "the dots gateway, in credits")
+            let key = (own, true, "your \(own.placeName) key")
+            switch settings.payFrontierWith {
+            case .credits: return Int(app.state.credits) >= c.credits || !ownReady ? gateway : key
+            case .key: return ownReady ? key : gateway
+            }
         }
     }
 
-    static func plan(for c: RouteCandidate, messages: [ChatMessage], question: String, documentName: String?,
-                     second: Bool = false, settings: AppSettings, state: NetworkState, allowSleep: Bool) -> Plan {
-        if let endpoint = endpoint(for: c, settings: settings) {
-            return Plan(events: OpenAIClient.stream(endpoint, messages: messages), isSimulated: false, endpoint: endpoint)
-        }
-        do {
-            let text = second
-                ? SimulatedAnswers.secondOpinion(for: question, documentName: documentName)
-                : SimulatedAnswers.answer(for: question, documentName: documentName)
-            var sleeper: (macID: String, name: String)?
-            if allowSleep, c.destination == .yourPool, let pool = state.pool(c.poolID) {
-                let others = pool.macs.filter { $0.state == .lending && $0.macID != state.thisMacID }
-                if others.count >= 3, Double.random(in: 0...1) < 0.6, let mac = others.last,
-                   let owner = state.device(mac.macID).flatMap({ state.person($0.ownerID) }) {
-                    sleeper = (mac.macID, owner.name)
-                }
-            }
-            return Plan(events: SimulatedAnswers.stream(text, tokPerSec: c.tokPerSec, sleeper: sleeper), isSimulated: true, endpoint: nil)
-        }
+    static func plan(for c: RouteCandidate, messages: [ChatMessage], model app: AppModel) -> Plan? {
+        guard let t = target(for: c, model: app) else { return nil }
+        return Plan(events: OpenAIClient.stream(t.endpoint, messages: messages), endpoint: t.endpoint, paidWithKey: t.paidWithKey, via: t.via)
     }
 
-    static func receipt(for c: RouteCandidate, decision: RouteDecision, plan: Plan, state: NetworkState) -> Receipt {
-        var macs: [ReceiptMac] = []
-        if plan.isSimulated, c.destination == .yourPool, let pool = state.pool(c.poolID) {
-            macs = pool.macs.filter { $0.state == .lending }.compactMap { m in
-                guard let d = state.device(m.macID), let p = state.person(d.ownerID) else { return nil }
-                return ReceiptMac(id: m.macID, initial: d.id == state.thisMacID ? "You" : p.initial, name: p.name)
-            }
-        }
+    static func receipt(for c: RouteCandidate, decision: RouteDecision, plan: Plan) -> Receipt {
+        receipt(for: c, decision: decision, via: plan.via, paidWithKey: plan.paidWithKey)
+    }
+
+    static func receipt(for c: RouteCandidate, decision: RouteDecision, via: String, paidWithKey: Bool) -> Receipt {
         var reasons = decision.reasons
-        guard let e = plan.endpoint else {
-            return Receipt(destination: c.destination, model: c.model, place: c.place, macs: macs,
-                           tokPerSec: c.tokPerSec, credits: c.credits, saved: max(0, c.listCredits - c.credits),
-                           isPrivate: decision.isPrivate && c.isPrivate, isSimulated: true, reasons: reasons)
-        }
-        // A real answer says what really answered it. On this Mac, nothing left it and nothing is charged.
-        let via = e.serverName.map { "\($0) on this Mac" } ?? e.placeName
-        reasons.append(RouteReason(symbol: e.isLocal ? "desktopcomputer" : "network", text: "Answered by \(e.model) through \(via)."))
-        return Receipt(destination: c.destination, model: e.model, place: e.placeName, macs: [],
-                       tokPerSec: 0, credits: e.isLocal ? 0 : c.credits, saved: e.isLocal ? 0 : max(0, c.listCredits - c.credits),
-                       isPrivate: e.isLocal || (decision.isPrivate && c.isPrivate), isSimulated: false, reasons: reasons)
+        reasons.append(RouteReason(symbol: c.destination == .thisMac ? "desktopcomputer" : "network", text: "Answered through \(via)."))
+        return Receipt(destination: c.destination, model: c.model, place: c.place, macs: [], tokPerSec: c.tokPerSec,
+                       credits: paidWithKey ? 0 : c.credits, saved: paidWithKey ? 0 : max(0, c.listCredits - c.credits),
+                       isPrivate: decision.isPrivate && c.isPrivate, isSimulated: false, reasons: reasons, paidWithKey: paidWithKey)
     }
 
     static func messages(question: String, attachment: AskController.Attachment?) -> [ChatMessage] {
@@ -147,8 +139,10 @@ final class AskController {
     func submit(model: AppModel) {
         let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
+        let messages = AnswerRunner.messages(question: question, attachment: attachment)
+        let facts = RequestFacts(inputTokens: messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 })
         let decision = Router.decide(question: question, hasDocument: attachment != nil, state: model.state,
-                                     rules: model.settings.rules, forcedID: forcedID)
+                                     rules: model.settings.rules, forcedID: forcedID, facts: facts, thisMac: model.thisMacRoute)
         run(question: question, decision: decision, model: model)
     }
 
@@ -177,56 +171,86 @@ final class AskController {
                 return
             }
             let messages = AnswerRunner.messages(question: question, attachment: attachment)
-            let plan = AnswerRunner.plan(for: chosen, messages: messages, question: question, documentName: attachment?.name,
-                                         settings: model.settings, state: model.state, allowSleep: true)
-            var receipt = AnswerRunner.receipt(for: chosen, decision: decision, plan: plan, state: model.state)
-            self.receipt = receipt
-            self.phase = .streaming
-            let started = Date()
-            var chars = 0
-            do {
-                for try await event in plan.events {
-                    if Task.isCancelled { return }
-                    switch event {
-                    case .text(let t):
-                        self.answer += t
-                        chars += t.count
-                        let elapsed = Date().timeIntervalSince(started)
-                        if !plan.isSimulated, elapsed > 0.5 { receipt.tokPerSec = Double(chars) / 4 / elapsed }
-                    case let .macAsleep(macID, name):
-                        receipt.asleepMacID = macID
-                        receipt.handoffNote = "\(name)'s Mac went to sleep. Moving its layers to the others…"
-                        if let pool = chosen.poolID { model.backend.setMemberAsleep(macID: macID, poolID: pool, asleep: true) }
-                    case .resumed:
-                        let others = receipt.macs.filter { $0.id != receipt.asleepMacID }.count
-                        let name = receipt.macs.first { $0.id == receipt.asleepMacID }?.name ?? "A Mac"
-                        receipt.handoffNote = "\(name)'s Mac went to sleep. The other \(others == 3 ? "three" : "\(others)") took over."
-                    case .model(let m):
-                        receipt.model = m
-                    }
-                    self.receipt = receipt
+            var missed: [String] = []
+            for candidate in [chosen] + decision.fallbacks {
+                guard let plan = AnswerRunner.plan(for: candidate, messages: messages, model: model) else { continue }
+                var receipt = AnswerRunner.receipt(for: candidate, decision: decision, plan: plan)
+                if !missed.isEmpty {
+                    receipt.fallbackNote = "\(missed.joined(separator: " and ")) didn't answer, so it went to \(candidate.place)."
                 }
+                self.answer = ""
+                self.receipt = receipt
+                self.phase = .streaming
+                let started = Date()
+                var usage: (input: Int, output: Int)?
+                var charged: Int?
+                do {
+                    for try await event in plan.events {
+                        if Task.isCancelled { return }
+                        switch event {
+                        case .text(let t):
+                            self.answer += t
+                            let elapsed = Date().timeIntervalSince(started)
+                            if elapsed > 0.5 { receipt.tokPerSec = Double(Pricing.tokens(self.answer)) / elapsed }
+                        case let .macAsleep(macID, name):
+                            receipt.asleepMacID = macID
+                            receipt.handoffNote = "\(name)'s Mac went to sleep. Moving its layers to the others…"
+                            if let pool = candidate.poolID { model.backend.setMemberAsleep(macID: macID, poolID: pool, asleep: true) }
+                        case .resumed:
+                            let others = receipt.macs.filter { $0.id != receipt.asleepMacID }.count
+                            let name = receipt.macs.first { $0.id == receipt.asleepMacID }?.name ?? "A Mac"
+                            receipt.handoffNote = "\(name)'s Mac went to sleep. The other \(others == 3 ? "three" : "\(others)") took over."
+                        case .model(let m):
+                            if candidate.destination == .thisMac { receipt.model = m }
+                        case let .macs(macs, simulated):
+                            receipt.macs = macs
+                            receipt.isSimulated = simulated
+                        case let .usage(input, output):
+                            usage = (input, output)
+                        case .charged(let c):
+                            charged = c
+                            receipt.credits = c
+                        case .simulated(let s):
+                            receipt.isSimulated = s
+                        }
+                        self.receipt = receipt
+                    }
+                } catch {
+                    // Nothing came back yet: try the next place, within the same rules
+                    if self.answer.isEmpty {
+                        if candidate.destination == .thisMac { model.noteLocalDown() }
+                        missed.append(candidate.place)
+                        continue
+                    }
+                    self.phase = .failed(error.localizedDescription)
+                    return
+                }
+                let input = usage?.input ?? messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 }
+                let output = usage?.output ?? Pricing.tokens(self.answer)
+                receipt.inputTokens = input
+                receipt.outputTokens = output
+                receipt.usd = plan.paidWithKey ? Pricing.usd(candidate.modelID, input: input, output: output) : 0
+                // Credits are what the hub or gateway actually charged; your key's bill is in dollars instead
+                receipt.credits = plan.paidWithKey ? 0 : (charged ?? 0)
                 receipt.finished = true
                 self.receipt = receipt
                 self.phase = .done
-                model.finishAnswer(receipt: receipt, source: "Ask")
-                if let f = decision.candidates.first(where: { $0.destination == .frontier }), chosen.destination != .frontier {
+                if candidate.destination == .thisMac, receipt.tokPerSec > 0 { model.noteLocalSpeed(receipt.tokPerSec) }
+                model.recordAnswer(destination: candidate.destination, place: candidate.place, model: candidate.model, source: "Ask",
+                                   credits: receipt.credits, usd: receipt.usd, isPrivate: receipt.isPrivate, input: input, output: output,
+                                   measured: usage != nil, fallback: receipt.fallbackNote, format: .openai)
+                if let f = decision.candidates.first(where: { $0.destination == .frontier }), candidate.destination != .frontier {
                     self.second = SecondOpinion(candidate: f)
                 }
-            } catch {
-                self.phase = .failed(error.localizedDescription)
+                return
             }
+            self.phase = .failed(missed.isEmpty ? "Nothing that can take this is set up." : "\(missed.joined(separator: " and ")) didn't answer.")
         }
     }
 
     func askSecondOpinion(model: AppModel) {
         guard var second, second.phase == .idle else { return }
         let c = second.candidate
-        guard Int(model.state.credits) >= c.credits else {
-            second.phase = .failed("You need \(c.credits) credits for this, and have \(Int(model.state.credits)). Lend a little longer.")
-            self.second = second
-            return
-        }
         let decision = RouteDecision(chosen: c, candidates: [c], reasons: [
             RouteReason(symbol: "hand.point.up.left", text: "You asked \(c.model) for a second opinion."),
             RouteReason(symbol: "arrow.up.right.square", text: "It left your pools and went to \(c.place)."),
@@ -234,24 +258,40 @@ final class AskController {
         var messages = AnswerRunner.messages(question: asked, attachment: attachment)
         messages.append(ChatMessage(role: "assistant", content: answer))
         messages.append(ChatMessage(role: "user", content: "Give a short second opinion on that answer. What would you add or change?"))
-        let plan = AnswerRunner.plan(for: c, messages: messages, question: asked, documentName: attachment?.name, second: true,
-                                     settings: model.settings, state: model.state, allowSleep: false)
-        var receipt = AnswerRunner.receipt(for: c, decision: decision, plan: plan, state: model.state)
+        guard let plan = AnswerRunner.plan(for: c, messages: messages, model: model) else { return }
+        if !plan.paidWithKey, Int(model.state.credits) < c.credits {
+            second.phase = .failed("You need about \(c.credits) credits for this, and have \(Int(model.state.credits)). Lend a little longer.")
+            self.second = second
+            return
+        }
+        var receipt = AnswerRunner.receipt(for: c, decision: decision, plan: plan)
         second.phase = .streaming
         second.receipt = receipt
         self.second = second
         secondTask = Task { [weak self] in
+            var usage: (input: Int, output: Int)?
             do {
                 for try await event in plan.events {
                     guard let self else { return }
-                    if case .text(let t) = event { self.second?.text += t }
-                    if case .model(let m) = event { receipt.model = m; self.second?.receipt = receipt }
+                    switch event {
+                    case .text(let t): self.second?.text += t
+                    case let .usage(i, o): usage = (i, o)
+                    case .charged(let n): receipt.credits = n
+                    case .simulated(let s): receipt.isSimulated = s
+                    default: break
+                    }
+                    self.second?.receipt = receipt
                 }
                 guard let self else { return }
+                let input = usage?.input ?? messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 }
+                let output = usage?.output ?? Pricing.tokens(self.second?.text ?? "")
+                receipt.usd = plan.paidWithKey ? Pricing.usd(c.modelID, input: input, output: output) : 0
                 receipt.finished = true
                 self.second?.receipt = receipt
                 self.second?.phase = .done
-                model.finishAnswer(receipt: receipt, source: "Ask")
+                model.recordAnswer(destination: c.destination, place: c.place, model: c.model, source: "Ask", credits: receipt.credits,
+                                   usd: receipt.usd, isPrivate: false, input: input, output: output, measured: usage != nil,
+                                   fallback: nil, format: .openai)
             } catch {
                 self?.second?.phase = .failed(error.localizedDescription)
             }

@@ -13,7 +13,7 @@ struct DotsApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 1_180, height: 780)
+        .defaultSize(width: 1_180, height: 860)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("Pools") {

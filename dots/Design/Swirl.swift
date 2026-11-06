@@ -66,6 +66,8 @@ struct SwirlCanvas: View {
     var reveal: Double
     var origin: UnitPoint = .center
     var cell: CGFloat = 7
+    /// Around the words: an ellipse, as a share of the width and height, where the dots thin out to nothing
+    var quiet: CGSize? = nil
 
     var body: some View {
         Canvas { ctx, sz in
@@ -86,7 +88,13 @@ struct SwirlCanvas: View {
                 for i in i0..<i1 {
                     let u = (Double(i) + 0.5) * Double(cell) / R
                     let v = (Double(j) + 0.5) * Double(cell) / R
-                    if SwirlField.density(u, v, phase: phase) > Dither.threshold(i, j) {
+                    var calm = 1.0
+                    if let quiet {
+                        let mx = (Double(i) + 0.5) * Double(cell) / (Double(quiet.width) * Double(sz.width))
+                        let my = ((Double(j) + 0.5) * Double(cell) + Double(cy) - Double(sz.height) * 0.46) / (Double(quiet.height) * Double(sz.height))
+                        calm = min(1, max(0, ((mx * mx + my * my).squareRoot() - 0.6) / 0.45))
+                    }
+                    if SwirlField.density(u, v, phase: phase) * calm > Dither.threshold(i, j) {
                         path.addRect(CGRect(x: cx + CGFloat(i) * cell, y: cy + CGFloat(j) * cell, width: cell, height: cell))
                     }
                 }

@@ -69,6 +69,7 @@ struct HTTPRequest: Sendable {
     var path: String
     var headers: [String: String]
     var body: Data
+    var query: [String: String] = [:]
 
     static func parse(_ data: Data) -> HTTPRequest? {
         guard let end = data.range(of: Data("\r\n\r\n".utf8)) else { return nil }
@@ -86,8 +87,10 @@ struct HTTPRequest: Sendable {
         let bodyStart = end.upperBound
         guard data.distance(from: bodyStart, to: data.endIndex) >= length else { return nil }
         let bodyEnd = data.index(bodyStart, offsetBy: length)
-        let path = String(first[1]).components(separatedBy: "?").first ?? String(first[1])
-        return HTTPRequest(method: String(first[0]), path: path, headers: headers, body: Data(data[bodyStart..<bodyEnd]))
+        let target = String(first[1])
+        let path = target.components(separatedBy: "?").first ?? target
+        let query = URLComponents(string: target)?.queryItems?.reduce(into: [String: String]()) { $0[$1.name] = $1.value ?? "" } ?? [:]
+        return HTTPRequest(method: String(first[0]), path: path, headers: headers, body: Data(data[bodyStart..<bodyEnd]), query: query)
     }
 
     var bearer: String? {
@@ -98,13 +101,18 @@ struct HTTPRequest: Sendable {
 
 final class HTTPResponder: @unchecked Sendable {
     private let connection: NWConnection
-    private let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+    private let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n"
 
     init(_ connection: NWConnection) { self.connection = connection }
 
-    func json(_ status: Int, _ object: Any) {
+    func json(_ status: Int, _ object: Any, headers: [String: String] = [:]) {
         let body = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
-        let head = "HTTP/1.1 \(status) \(Self.reason(status))\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\n\(cors)Connection: close\r\n\r\n"
+        raw(status, contentType: "application/json", body, headers: headers)
+    }
+
+    /// A whole response, as is: for answers passed through from wherever a request ran.
+    func raw(_ status: Int, contentType: String, _ body: Data, headers: [String: String] = [:]) {
+        let head = "HTTP/1.1 \(status) \(Self.reason(status))\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\n\(Self.lines(headers))\(cors)Connection: close\r\n\r\n"
         connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { [connection] _ in connection.cancel() })
     }
 
@@ -117,8 +125,8 @@ final class HTTPResponder: @unchecked Sendable {
         json(status, ["error": ["message": message, "type": type]])
     }
 
-    func startStream() {
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\(cors)Connection: close\r\n\r\n"
+    func startStream(headers: [String: String] = [:]) {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\(Self.lines(headers))\(cors)Connection: close\r\n\r\n"
         connection.send(content: Data(head.utf8), completion: .idempotent)
     }
 
@@ -127,8 +135,28 @@ final class HTTPResponder: @unchecked Sendable {
         connection.send(content: Data("data: ".utf8) + data + Data("\n\n".utf8), completion: .idempotent)
     }
 
+    /// A named server-sent event, the way Anthropic's Messages API streams.
+    func namedEvent(_ name: String, _ object: Any) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
+        connection.send(content: Data("event: \(name)\ndata: ".utf8) + data + Data("\n\n".utf8), completion: .idempotent)
+    }
+
+    /// Stream text written as is, for events passed through from wherever a request ran.
+    func write(_ text: String) {
+        connection.send(content: Data(text.utf8), completion: .idempotent)
+    }
+
     func finishStream() {
         connection.send(content: Data("data: [DONE]\n\n".utf8), completion: .contentProcessed { [connection] _ in connection.cancel() })
+    }
+
+    /// Closes a stream that has already said it's done.
+    func end() {
+        connection.send(content: Data(), completion: .contentProcessed { [connection] _ in connection.cancel() })
+    }
+
+    private static func lines(_ headers: [String: String]) -> String {
+        headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " "))\r\n" }.joined()
     }
 
     private static func reason(_ status: Int) -> String {
@@ -139,133 +167,12 @@ final class HTTPResponder: @unchecked Sendable {
         case 401: "Unauthorized"
         case 402: "Payment Required"
         case 404: "Not Found"
+        case 403: "Forbidden"
         case 409: "Conflict"
+        case 502: "Bad Gateway"
+        case 503: "Service Unavailable"
         case 429: "Too Many Requests"
         default: "Error"
         }
-    }
-}
-
-// MARK: - The API, answered by the same router the ask panel uses
-
-extension AppModel {
-    func handleGateway(_ request: HTTPRequest, _ res: HTTPResponder) async {
-        if request.method == "OPTIONS" { res.empty(204); return }
-        switch (request.method, request.path) {
-        case ("GET", "/v1/models"), ("GET", "/models"):
-            res.json(200, ["object": "list", "data": gatewayModelIDs.map { ["id": $0, "object": "model", "owned_by": "dots"] }])
-        case ("POST", "/v1/chat/completions"), ("POST", "/chat/completions"):
-            await chatCompletion(request, res)
-        default:
-            res.error(404, "dots serves /v1/models and /v1/chat/completions.")
-        }
-    }
-
-    private var gatewayModelIDs: [String] {
-        ["auto"] + Ladder.tiers.map(\.id) + Ladder.special.map(\.id) + FrontierModel.all.map(\.id)
-    }
-
-    private struct CompletionBody: Decodable {
-        var model: String?
-        var messages: [ChatMessage]
-        var stream: Bool?
-    }
-
-    private func chatCompletion(_ request: HTTPRequest, _ res: HTTPResponder) async {
-        guard let secret = request.bearer, let key = backend.key(forSecret: secret) else {
-            res.error(401, "Pass a dots API key as a Bearer token. Make one on the API page in dots.", type: "authentication_error")
-            return
-        }
-        guard let body = try? JSONDecoder().decode(CompletionBody.self, from: request.body), !body.messages.isEmpty else {
-            res.error(400, "Send a JSON body with a messages array.")
-            return
-        }
-        let question = body.messages.last(where: { $0.role == "user" })?.content ?? ""
-        let requested = body.model ?? "auto"
-        let forced = forcedRoute(for: requested, reach: key.reach)
-        if requested != "auto", forced == nil {
-            res.error(400, "This key can't reach \(requested), or nothing is running it right now.")
-            return
-        }
-        let decision = Router.decide(question: question, hasDocument: false, state: state, rules: settings.rules,
-                                     reach: key.reach, forcedID: forced)
-        guard let chosen = decision.chosen else {
-            res.error(409, decision.needsConsent ?? "Nothing this key can reach is running right now.")
-            return
-        }
-        if let limit = key.monthlyLimit, key.creditsThisMonth + chosen.credits > limit {
-            res.error(429, "This key has used \(key.creditsThisMonth) of its \(limit) credits this month.")
-            return
-        }
-        if chosen.credits > Int(state.credits) {
-            res.error(402, "This needs \(chosen.credits) credits and you have \(Int(state.credits)). Lend your Mac to earn more.")
-            return
-        }
-
-        let plan = AnswerRunner.plan(for: chosen, messages: body.messages, question: question, documentName: nil,
-                                     settings: settings, state: state, allowSleep: false)
-        let receipt = AnswerRunner.receipt(for: chosen, decision: decision, plan: plan, state: state)
-        let id = "chatcmpl-dots-" + Simulation.randomCode(12)
-        let created = Int(Date().timeIntervalSince1970)
-        var modelName = chosen.modelID
-        let dots: [String: Any] = [
-            "ran_on": receipt.macs.isEmpty ? receipt.place : "\(receipt.place) · \(receipt.macs.count) Macs",
-            "why": receipt.reasons.map(\.text),
-            "credits": receipt.credits,
-            "private": receipt.isPrivate,
-            "simulated": receipt.isSimulated,
-        ]
-
-        if body.stream == true {
-            res.startStream()
-            do {
-                for try await event in plan.events {
-                    switch event {
-                    case .text(let t):
-                        res.event(["id": id, "object": "chat.completion.chunk", "created": created, "model": modelName,
-                                   "choices": [["index": 0, "delta": ["content": t], "finish_reason": NSNull()]]])
-                    case .model(let m): modelName = m
-                    default: break
-                    }
-                }
-                res.event(["id": id, "object": "chat.completion.chunk", "created": created, "model": modelName,
-                           "choices": [["index": 0, "delta": [String: String](), "finish_reason": "stop"]], "dots": dots])
-            } catch {
-                res.event(["error": ["message": error.localizedDescription]])
-            }
-            res.finishStream()
-        } else {
-            var text = ""
-            do {
-                for try await event in plan.events {
-                    if case .text(let t) = event { text += t }
-                    if case .model(let m) = event { modelName = m }
-                }
-            } catch {
-                res.error(502, error.localizedDescription, type: "upstream_error")
-                return
-            }
-            res.json(200, ["id": id, "object": "chat.completion", "created": created, "model": modelName,
-                           "choices": [["index": 0, "message": ["role": "assistant", "content": text], "finish_reason": "stop"]],
-                           "dots": dots])
-        }
-        finishAnswer(receipt: receipt, source: key.name)
-        backend.noteKeyUse(id: key.id, credits: receipt.credits)
-    }
-
-    /// "auto" lets the router choose; a model id picks the place that runs it, within the key's reach.
-    private func forcedRoute(for model: String, reach: Reach) -> String? {
-        if model == "auto" { return nil }
-        if let f = FrontierModel.all.first(where: { $0.id == model }) {
-            return reach.contains(.frontier) ? "frontier:\(f.id)" : nil
-        }
-        let pools = state.pools.filter { $0.model?.id == model && $0.lendingMacs > 0 }
-        if reach.contains(.yourPools), let own = pools.first(where: { !$0.isPublic && $0.isMember(state.meID) }) {
-            return "pool:\(own.id)"
-        }
-        if reach.contains(.publicPools), let pub = pools.filter(\.isPublic).max(by: { $0.tokPerSec < $1.tokPerSec }) {
-            return "pool:\(pub.id)"
-        }
-        return nil
     }
 }
