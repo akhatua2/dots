@@ -92,6 +92,20 @@ asyncio handoffs). Hidden states already go as raw bytes.
   1.25 s, with the same words. Prompts gain the most: a 1,000-token prompt's hidden states are 3 MB,
   which used to cost about a second a hop just to hand to iroh.
 
+- **Adaptive draft length**, on by default (`DOTS_DRAFT_ADAPTIVE=0` turns it off). After a check that
+  threw guesses away the draft guesses fewer (as many as were kept, plus one), and after one that kept
+  them all it guesses one more, up to `DOTS_DRAFT_TOKENS`. A check costs more the more it checks, so
+  doomed guesses are expensive. Same words either way; on the simulated pool, up to four guesses:
+
+  | Round trip | Fixed | Adaptive |
+  |---|---|---|
+  | 0 ms | 0.59× | 0.81× |
+  | 25 ms | 1.14× | 1.20× |
+  | 50 ms | 1.39× | 1.34× |
+
+- **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
+  plain speed per chain length and reports a drafted answer's speedup against it, slower included.
+
 ## Next
 
 1. **Measure over a real WAN** (with three or more Macs, star against ring) with two Macs on different networks, with and without a draft model.

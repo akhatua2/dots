@@ -68,6 +68,7 @@ async def main() -> None:
     p.add_argument("--rtt", type=float, nargs="+", default=[0, 20, 50, 100], help="round trips to simulate, in ms")
     p.add_argument("--k", type=int, nargs="+", default=[2, 4, 6], help="draft lengths to try")
     p.add_argument("--max-tokens", type=int, default=96)
+    p.add_argument("--adaptive", action="store_true", help="also try adaptive draft lengths, up to each k")
     args = p.parse_args()
 
     from dots.generation.autoregressive import AutoregressiveGeneration
@@ -88,19 +89,20 @@ async def main() -> None:
             base_seconds += seconds
         base_rate = base_tokens / base_seconds
         print(f"{rtt:>6.0f}  {'one at a time':<14} {base_rate:>7.1f} {'1.00x':>8} {'':>9}")
-        for k in args.k:
+        for k, adaptive in [(k, a) for k in args.k for a in ([False, True] if args.adaptive else [False])]:
             tokens = seconds_total = proposed = accepted = 0.0
             same = True
             for i, prompt in enumerate(PROMPTS):
-                result, seconds = await run(SpeculativeGeneration(draft, draft_tokens=k), target, host, prompt, rtt,
-                                            args.max_tokens, f"s{i}")
+                result, seconds = await run(SpeculativeGeneration(draft, draft_tokens=k, adaptive=adaptive), target,
+                                            host, prompt, rtt, args.max_tokens, f"s{i}")
                 same &= result.text == baseline_text[i]
                 tokens += result.stats["decode_tokens"]
                 seconds_total += seconds
                 proposed += result.stats["draft_proposed"]
                 accepted += result.stats["draft_accepted"]
             rate = tokens / seconds_total
-            print(f"{rtt:>6.0f}  {f'draft k={k}':<14} {rate:>7.1f} {rate / base_rate:>7.2f}x "
+            label = f"draft k<={k}" if adaptive else f"draft k={k}"
+            print(f"{rtt:>6.0f}  {label:<14} {rate:>7.1f} {rate / base_rate:>7.2f}x "
                   f"{accepted / proposed:>8.0%}  {'yes' if same else 'NO'}")
 
 

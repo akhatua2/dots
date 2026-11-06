@@ -106,12 +106,13 @@ async def autoregressive(max_tokens=100):
     return result, target
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
 @pytest.mark.parametrize("k", [1, 2, 4, 7])
 @pytest.mark.parametrize("draft_rule", [target_rule, draft_rule_every_third_wrong, lambda fed: 3])
-async def test_same_tokens_as_one_at_a_time(k, draft_rule):
+async def test_same_tokens_as_one_at_a_time(k, draft_rule, adaptive):
     expected, ar_target = await autoregressive()
     target, draft = FakeModel(target_rule), FakeModel(draft_rule)
-    result = await SpeculativeGeneration(draft, draft_tokens=k).generate(request(target, max_tokens=100))
+    result = await SpeculativeGeneration(draft, draft_tokens=k, adaptive=adaptive).generate(request(target, max_tokens=100))
     assert result.text == expected.text
     assert target.caches["c"] == ar_target.caches["c"], "the cache holds exactly the emitted tokens"
 
@@ -182,3 +183,15 @@ def test_a_draft_is_not_shown_past_a_stop_token():
     assert _until_stop([5, 6, 2, 7], {2}) == [5, 6]
     assert _until_stop([2, 7], {2}) == []
     assert _until_stop([5, 6], {2}) == [5, 6]
+
+
+async def test_adaptive_guesses_fewer_after_misses():
+    sizes: list[int] = []
+
+    async def on_verified(kept: int, proposed: int) -> None:
+        sizes.append(proposed)
+
+    target, draft = FakeModel(target_rule), FakeModel(lambda fed: 3)  # a draft that is always wrong
+    await SpeculativeGeneration(draft, draft_tokens=6, adaptive=True).generate(
+        request(target, max_tokens=20, on_verified=on_verified))
+    assert sizes[0] == 6 and set(sizes[1:]) == {1}, "after a miss it guesses one token at a time"

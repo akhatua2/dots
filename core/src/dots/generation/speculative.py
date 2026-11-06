@@ -29,11 +29,14 @@ if TYPE_CHECKING:
 class SpeculativeGeneration(GenerationStrategy):
     name = "speculative"
 
-    def __init__(self, draft: "BackendRuntime", draft_tokens: int = 4) -> None:
+    def __init__(self, draft: "BackendRuntime", draft_tokens: int = 4, adaptive: bool = False) -> None:
         if draft_tokens < 1:
             raise ValueError("draft_tokens must be at least 1")
         self.draft = draft
         self.k = draft_tokens
+        # Adaptive: guess up to `draft_tokens`, fewer after a check that threw guesses away (a check
+        # costs more the more it checks), more again after one that kept them all.
+        self.adaptive = adaptive
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         target, draft = request.runtime, self.draft
@@ -67,15 +70,16 @@ class SpeculativeGeneration(GenerationStrategy):
                 await request.on_token(text)
             out.append(t)
 
+        k = self.k
         while len(out) < request.max_tokens and token not in stop_ids:
             rounds += 1
             # The draft proposes k tokens after `token`, feeding `token` and its own proposals as it goes.
             proposal: list[int] = []
             fed = token
-            for _ in range(self.k):
+            for _ in range(k):
                 proposal.append(sample(draft, await draft.decode_one(conv, fed), out + [token] + proposal))
                 fed = proposal[-1]
-            proposed += self.k
+            proposed += k
             if request.on_draft is not None:
                 # `token` isn't shown yet either: it is emitted once the pool has checked the proposal
                 await request.on_draft(_pending_text(target, out, _until_stop([token, *proposal], stop_ids)))
@@ -91,7 +95,7 @@ class SpeculativeGeneration(GenerationStrategy):
                     break
                 matched.append(guess)
             if next_token is None:  # every proposal matched: the last row gives one more token for free
-                next_token = sample(target, rows[self.k], out + [token] + matched)
+                next_token = sample(target, rows[k], out + [token] + matched)
 
             # Emit `token`, then the matched proposals, until a stop token or the length limit.
             await emit(token)
@@ -104,14 +108,16 @@ class SpeculativeGeneration(GenerationStrategy):
                 emitted += 1
             accepted_total += emitted - 1
             if request.on_verified is not None:
-                await request.on_verified(emitted - 1, self.k)
+                await request.on_verified(emitted - 1, k)
 
             # Keep exactly what was emitted. The big model was fed 1 + k tokens; the draft was fed k.
-            await _trim(target, request, conv, (1 + self.k) - emitted)
-            if emitted <= self.k:
-                draft.trim(conv, self.k - emitted)
+            await _trim(target, request, conv, (1 + k) - emitted)
+            if emitted <= k:
+                draft.trim(conv, k - emitted)
             else:  # all k proposals kept: the draft never fed its last one, so it catches up
                 await draft.decode_one(conv, proposal[-1])
+            if self.adaptive:
+                k = min(self.k, k + 1) if emitted > k else max(1, emitted)
 
             if stopped:
                 break
