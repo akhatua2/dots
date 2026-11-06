@@ -516,7 +516,7 @@ def _frontier_call(prompt: str, context: dict | None) -> dict:
         }
     ).encode()
     req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
+        _conf("frontier_url", "DOTS_FRONTIER_URL"),
         data=body,
         headers={
             "x-api-key": key,
