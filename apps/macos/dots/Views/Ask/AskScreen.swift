@@ -183,15 +183,17 @@ struct AskComposer: View {
     }
 }
 
-/// Lets a pool's draft model guess ahead. It only means something for answers from a pool, so it hides
-/// when the route is a frontier model.
+/// Lets a pool's draft model guess ahead. It only means something for written answers from a pool, so it
+/// hides when the route is a frontier model or the question asks for a picture.
 private struct DraftAheadToggle: View {
     @Environment(AppModel.self) private var model
     @State private var hovered = false
 
     var body: some View {
         let on = model.settings.draftAhead
-        if !(model.ask.forcedID?.hasPrefix("frontier:") ?? false) {
+        let ask = model.ask
+        if !(ask.forcedID?.hasPrefix("frontier:") ?? false),
+           !Drawing.wantsPicture(ask.input, hasPicture: ask.attachment?.picture != nil) {
             Button { model.settings.draftAhead.toggle() } label: {
                 HStack(spacing: 5) {
                     Circle().fill(on ? D.accent : D.btn).frame(width: 6, height: 6)

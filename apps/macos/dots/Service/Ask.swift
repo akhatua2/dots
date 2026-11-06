@@ -249,7 +249,7 @@ final class AskController {
             + (decision.isPrivate ? [] : model.state.publicPools.filter { $0.drawsWith != nil })
         let places = pools.map { p in
             RouteCandidate(id: "pool:\(p.id)", destination: p.isPublic ? .publicPool : .yourPool, place: p.name,
-                           model: p.drawsWith ?? "", modelID: p.drawsWith ?? "", credits: 0, listCredits: 0, tokPerSec: 0,
+                           model: Drawing.modelLabel, modelID: p.drawsWith ?? "", credits: 0, listCredits: 0, tokPerSec: 0,
                            isPrivate: !p.isPublic, poolID: p.id, minGB: 0)
         }
         task = Task { [weak self] in

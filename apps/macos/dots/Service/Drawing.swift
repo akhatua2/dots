@@ -12,6 +12,9 @@ enum Drawing {
         case done(Data)
     }
 
+    /// What a picture's receipt calls the model that drew it. Which image model a pool runs is its own business.
+    static let modelLabel = "Image model"
+
     /// The sizes a picture can be drawn at, as the longer side in pixels. Bigger is sharper and slower.
     static let sides = [512, 1024, 1536]
 
