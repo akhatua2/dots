@@ -13,7 +13,7 @@ struct MenuBarPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             header(s, status)
             if s.thisMac.maxLendGB > 0 { lendModule(s) }
-            if let pool = s.lendingPool { tonightModule(s, pool) }
+            if let pool = s.lendingPool { servedModule(s, pool) }
             VStack(spacing: 0) {
                 toggleRow("Only when plugged in", on: s.lending.onlyWhenPluggedIn,
                           note: model.signals.onPower ? nil : "On battery now") { model.setOnlyWhenPluggedIn($0) }
@@ -117,14 +117,17 @@ struct MenuBarPanel: View {
     }
 
     /// Tonight so far, in the pool this Mac lends to.
-    private func tonightModule(_ s: NetworkState, _ pool: Pool) -> some View {
+    /// What this Mac has done in the pool it lends to, and what it earned lately: the ledger's last hour from a
+    /// real cloud, tonight's lending from the mock.
+    private func servedModule(_ s: NetworkState, _ pool: Pool) -> some View {
+        let served = s.served(in: pool.id)
         let night = Date().nightStart
-        let tonight = (s.nights ?? []).filter { $0.date == night && $0.poolID == pool.id }
-        let runs = tonight.reduce(0) { $0 + $1.runs }
-        let tokens = tonight.reduce(0) { $0 + $1.tokenCount }
-        let earned = s.creditLog.filter { $0.date >= night && $0.amount > 0 && $0.poolID == pool.id && ($0.kind == "lend" || $0.kind == "network") }.reduce(0) { $0 + $1.amount }
-        return StatRow(stats: [.init(value: runs.grouped, label: "runs tonight"), .init(value: Runs.short(tokens), label: "tokens"),
-                               .init(value: "+\(earned.grouped)", label: "credits", accent: true)], size: 18)
+        let tonight = s.creditLog.filter { $0.date >= night && $0.amount > 0 && $0.poolID == pool.id && ($0.kind == "lend" || $0.kind == "network") }
+            .reduce(0) { $0 + $1.amount }
+        let earning = model.backend.earning
+        return StatRow(stats: [.init(value: served.runs.grouped, label: "answered"), .init(value: Runs.short(served.tokens), label: "tokens"),
+                               .init(value: "+\((earning?.lastHour ?? tonight).grouped)", label: earning == nil ? "tonight" : "this hour",
+                                     accent: true)], size: 18)
             .module()
     }
 
