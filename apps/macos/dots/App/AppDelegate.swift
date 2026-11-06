@@ -47,15 +47,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let question = args[i + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 MainActor.assumeIsolated {
-                    AskPanelController.shared.show()
+                    AppModel.shared.showAsk()
                     AppModel.shared.ask.input = question
                     AppModel.shared.ask.submit(model: AppModel.shared)
                 }
             }
         }
-        // ⌥ Space opens the ask panel over whatever you're doing
+        // ⌥ Space brings dots forward on the Ask screen, from any app
         hotKey = GlobalHotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) {
-            AskPanelController.shared.toggle()
+            AppModel.shared.showAsk()
         }
 
         // The app lives in the menu bar: it shows in the Dock only while its window is open

@@ -4,7 +4,7 @@ import SwiftUI
 import UserNotifications
 
 enum Route: Hashable {
-    case explore, api, profile
+    case explore, api, profile, ask, settings
     case pool(String)
 }
 
@@ -498,13 +498,17 @@ final class AppModel {
         NSApp.activate()
     }
 
-    /// Opens Settings in front of everything. dots is a menu bar app, so it becomes a regular, active app
-    /// first; otherwise the Settings window can open behind whatever you're using.
-    func showSettings(_ open: OpenSettingsAction) {
-        AskPanelController.shared.hide()
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
-        open()
+    /// Settings is a screen of the main window. dots is a menu bar app, so the window is brought forward first.
+    func showSettings() {
+        openMainWindow()
+        open(.settings)
+    }
+
+    /// Ask is a screen of the main window too, with the question box focused and ready.
+    func showAsk() {
+        openMainWindow()
+        open(.ask)
+        ask.focusToken += 1
     }
 
     // MARK: Gateway

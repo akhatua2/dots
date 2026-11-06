@@ -21,9 +21,10 @@ Mockups and the case study: https://sourabhdaroji.com/work/dots-decentralized-in
   came from the OS, it is unfinished.
 - No bento grids of identical cards. Use hairlines, lists and one level of cards, and let
   the content decide the structure.
-- Flows (join, invite, boost, create a key) happen inside the window as screens or inline forms.
-  Nothing opens a separate popup window. The only floating surfaces are the OS-level ones:
-  the menu bar and the ⌥ Space panel used from other apps.
+- Flows (join, invite, boost, create a key), Settings and Ask all live inside the main window as
+  screens or inline forms. Nothing opens a separate window, popup, sheet or floating panel. The one
+  floating surface is the menu bar dropdown, because the OS owns it. ⌥ Space brings the window
+  forward on the Ask screen.
 
 ## Copy
 

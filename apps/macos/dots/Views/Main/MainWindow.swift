@@ -43,6 +43,7 @@ struct MainWindow: View {
         .onChange(of: model.recapReady) { _, _ in showRecapIfReady() }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+        .background(WindowChrome(route: model.route))
     }
 
     private func showRecapIfReady() {
@@ -56,6 +57,8 @@ struct MainWindow: View {
         case .explore: ExploreView()
         case .api: APIView()
         case .profile: ProfileView()
+        case .ask: AskScreen()
+        case .settings: SettingsView(inline: true)
         case .pool(let id):
             if let pool = model.state.pool(id) { PoolView(pool: pool) } else { ExploreView() }
         }
@@ -66,7 +69,6 @@ struct MainWindow: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -77,7 +79,7 @@ struct Sidebar: View {
 
             VStack(spacing: 2) {
                 NavRow(symbol: "safari", title: "Explore", selected: model.route == .explore) { model.open(.explore) }
-                NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: false) { AskPanelController.shared.show() }
+                NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: model.route == .ask) { model.showAsk() }
                 NavRow(symbol: "curlybraces", title: "API", selected: model.route == .api) { model.open(.api) }
                 NavRow(symbol: "person", title: "Profile", selected: model.route == .profile,
                        badge: model.state.badges.contains(where: \.isNew)) { model.open(.profile) }
@@ -112,7 +114,7 @@ struct Sidebar: View {
 
             Spacer(minLength: 16)
 
-            NavRow(symbol: "gearshape", title: "Settings", trailing: "⌘,", selected: false) { model.showSettings(openSettings) }
+            NavRow(symbol: "gearshape", title: "Settings", trailing: "⌘,", selected: model.route == .settings) { model.showSettings() }
                 .padding(.horizontal, 8)
 
             ThisMacCard()
@@ -222,5 +224,48 @@ struct ThisMacCard: View {
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(hex: 0x1C1C1C)))
         .contentShape(Rectangle())
         .onTapGesture { model.open(.profile) }
+    }
+}
+
+// MARK: - Window chrome
+
+/// Hides the title bar's own background and separator, so the content runs to the top edge
+/// and the traffic lights sit on it. Without this, macOS draws a bar and a line above the content.
+private struct WindowChrome: NSViewRepresentable {
+    /// Each screen brings its own scroll view, and with it a new strip to hide, so a change of screen re-applies this.
+    var route: Route
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { Self.apply(to: view.window) }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { Self.apply(to: view.window) }
+        // The new screen's scroll view is laid out a moment after this update.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { Self.apply(to: view.window) }
+    }
+
+    private static func apply(to window: NSWindow?) {
+        guard let window else { return }
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.titleVisibility = .hidden
+        window.styleMask.insert(.fullSizeContentView)
+        window.isMovableByWindowBackground = true
+        if let root = window.contentView?.superview { hideScrollPockets(in: root) }
+    }
+
+    /// macOS 26 puts a "scroll pocket" under the title bar: a strip with a hard edge, drawn whenever a scroll view
+    /// sits beneath it. dots has no title bar to blend with, so the strip shows as a stray line across the top.
+    /// SwiftUI has no switch that reaches the one in the title bar, so it is found by class name and hidden.
+    /// If AppKit renames it, nothing matches and the window is simply left as macOS draws it.
+    private static func hideScrollPockets(in view: NSView) {
+        for sub in view.subviews {
+            let name = String(describing: type(of: sub))
+            if name == "NSScrollPocket" || name == "_NSTitlebarDecorationView" { sub.isHidden = true }
+            hideScrollPockets(in: sub)
+        }
     }
 }

@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct SettingsView: View {
+    /// True when shown as a screen of the main window, false in a window of its own.
+    var inline = false
     @Environment(AppModel.self) private var model
     @State private var confirmReset = false
     @State private var cloudAddress = ""
@@ -10,6 +12,9 @@ struct SettingsView: View {
         @Bindable var model = model
         LiveScroll {
             VStack(alignment: .leading, spacing: 22) {
+                if inline {
+                    Text("Settings").font(D.display(26)).foregroundStyle(D.t1)
+                }
                 section("Real models", "With an endpoint set, that route's prompts run on a real model. Without one, dots simulates the replies and says so.") {
                     EndpointEditor(title: "This Mac", detail: "LM Studio or Ollama. Everyday prompts run here first, privately and for free.",
                                    config: $model.settings.poolEndpoint,
@@ -112,7 +117,9 @@ struct SettingsView: View {
             }
             .padding(24)
         }
-        .frame(width: 560, height: isSnapshot ? nil : 640)
+        .frame(width: inline ? nil : 560, height: inline || isSnapshot ? nil : 640)
+        .frame(maxWidth: inline ? 640 : nil, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(D.bg2)
         .preferredColorScheme(.dark)
         .onAppear { cloudAddress = model.settings.cloud.address }

@@ -10,8 +10,15 @@ struct LiveScroll<Content: View>: View {
         if isSnapshot {
             content.fixedSize(horizontal: false, vertical: true).frame(minHeight: 0, maxHeight: .infinity, alignment: .top)
         } else {
-            ScrollView { content }
+            ScrollView { content }.ignoresSafeArea(.container, edges: .top).withoutTopEdgeLine()
         }
+    }
+}
+
+extension View {
+    /// macOS 26 draws a line and a soft blur where a scroll view meets the title bar. dots has no title bar, so it goes.
+    @ViewBuilder func withoutTopEdgeLine() -> some View {
+        if #available(macOS 26, *) { scrollEdgeEffectHidden(true, for: .top) } else { self }
     }
 }
 
@@ -191,6 +198,8 @@ enum Snapshots {
                     case .explore: ExploreView()
                     case .api: APIView()
                     case .profile: ProfileView()
+                    case .ask: AskScreen()
+                    case .settings: SettingsView(inline: true)
                     case .pool(let id): PoolView(pool: model.state.pool(id)!)
                     }
                 }

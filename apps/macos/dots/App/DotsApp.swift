@@ -16,13 +16,16 @@ struct DotsApp: App {
         .defaultSize(width: 1_180, height: 860)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.showSettings() }.keyboardShortcut(",")
+            }
             CommandMenu("Pools") {
                 Button("Explore") { model.open(.explore) }.keyboardShortcut("1")
                 Button("API") { model.open(.api) }.keyboardShortcut("2")
                 Button("Profile") { model.open(.profile) }.keyboardShortcut("3")
                 Divider()
                 Button("Start a Pool…") { model.sheet = .startPool }.keyboardShortcut("n")
-                Button("Ask…") { AskPanelController.shared.show() }.keyboardShortcut("k")
+                Button("Ask…") { model.showAsk() }.keyboardShortcut("k")
             }
         }
 
@@ -33,11 +36,6 @@ struct DotsApp: App {
             MenuBarLabel(status: model.lendingStatus)
         }
         .menuBarExtraStyle(.window)
-
-        Settings {
-            SettingsView()
-                .environment(model)
-        }
     }
 }
 

@@ -5,7 +5,6 @@ import UniformTypeIdentifiers
 struct AskPanelView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.isSnapshot) private var isSnapshot
-    @Environment(\.openSettings) private var openSettings
     @FocusState private var focused: Bool
     @State private var dropTargeted = false
     /// The answer's own height, measured inside the scroll view. The panel is sized from this, never the other
@@ -34,7 +33,7 @@ struct AskPanelView: View {
                 hint("return", "ask")
                 hint("esc", "close")
                 Spacer()
-                Button { model.showSettings(openSettings) } label: { Image(systemName: "gearshape").font(.system(size: 11)) }
+                Button { model.showSettings() } label: { Image(systemName: "gearshape").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(D.t5)
                     .help("Settings")
             }
@@ -177,6 +176,8 @@ struct RoutePicker: View {
 /// Everything under the question: routing, the answer, its receipt, and the second opinion.
 struct AskBody: View {
     @Environment(AppModel.self) private var model
+    /// In the main window the receipt folds to one line and the second opinion to one row.
+    var compact = false
 
     var body: some View {
         let ask = model.ask
@@ -200,10 +201,10 @@ struct AskBody: View {
             EmptyView()
         }
         if let receipt = ask.receipt, ask.phase != .routing {
-            ReceiptView(receipt: receipt)
+            ReceiptView(receipt: receipt, compact: compact)
         }
         if let second = ask.second {
-            SecondOpinionView(second: second)
+            SecondOpinionView(second: second, compact: compact)
         }
     }
 }
@@ -249,6 +250,8 @@ struct ConsentCard: View {
 
 struct ReceiptView: View {
     var receipt: Receipt
+    var compact = false
+    @State private var expanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -277,6 +280,9 @@ struct ReceiptView: View {
                 .fixedSize()
             }
             .padding(14)
+            .contentShape(Rectangle())
+            .onTapGesture { if compact { withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() } } }
+            if !compact || expanded {
             Hairline().padding(.horizontal, 14)
             VStack(alignment: .leading, spacing: 9) {
                 CapLabel("Why this route")
@@ -294,6 +300,7 @@ struct ReceiptView: View {
                 }
             }
             .padding(14)
+            }
         }
         .card(fill: D.deep)
     }
@@ -379,10 +386,23 @@ private struct ServingMac: View {
 struct SecondOpinionView: View {
     @Environment(AppModel.self) private var model
     var second: AskController.SecondOpinion
+    var compact = false
 
     var body: some View {
         let c = second.candidate
         switch second.phase {
+        case .idle where compact, .failed where compact:
+            HStack(spacing: 10) {
+                Text("Second opinion").font(D.ui(12)).foregroundStyle(D.t4)
+                Text(c.model).font(D.ui(13, .semibold)).foregroundStyle(D.t2)
+                IconLine(symbol: "smallcircle.filled.circle", text: "\(c.credits) credits", color: D.t3, size: 12)
+                Spacer()
+                HoverAccentButton(title: "Ask \(c.model.components(separatedBy: " ").first ?? c.model)") {
+                    model.ask.askSecondOpinion(model: model)
+                }
+            }
+            .padding(.horizontal, 14).frame(height: 44)
+            .card(fill: D.bg2, stroke: D.line)
         case .idle, .failed:
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -436,7 +456,7 @@ struct SecondOpinionView: View {
 }
 
 /// Takes a file dropped on the panel. Left off in snapshots, where the drop target draws as a placeholder.
-private struct FileDrop: ViewModifier {
+struct FileDrop: ViewModifier {
     var enabled: Bool
     @Binding var targeted: Bool
     var perform: @MainActor (URL) -> Void

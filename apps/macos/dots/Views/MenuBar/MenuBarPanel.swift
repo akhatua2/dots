@@ -5,7 +5,6 @@ import SwiftUI
 struct MenuBarPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.isSnapshot) private var isSnapshot
 
     var body: some View {
@@ -157,7 +156,7 @@ struct MenuBarPanel: View {
                 .contentTransition(.numericText())
                 .help("About \(Pricing.answers(s.credits).grouped) Opus prompts")
             Spacer()
-            Button("Ask") { AskPanelController.shared.show() }.buttonStyle(DButtonStyle(kind: .grey))
+            Button("Ask") { model.showAsk() }.buttonStyle(DButtonStyle(kind: .grey))
         }
         .padding(.horizontal, 6).padding(.vertical, 4)
     }
@@ -174,7 +173,7 @@ struct MenuBarPanel: View {
                 .buttonStyle(.plain).font(D.ui(13)).foregroundStyle(D.t2)
             }
             Spacer()
-            Button { model.showSettings(openSettings) } label: {
+            Button { model.showSettings() } label: {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28).contentShape(Rectangle())
             }
             .buttonStyle(.plain).foregroundStyle(D.t3)
