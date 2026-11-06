@@ -142,6 +142,13 @@ class SyncBuilder:
     def my_ledger(self, hub: HubView) -> dict:
         return (hub.ledger.get("accounts") or {}).get(self.me) or {}
 
+    def earned_since(self, hub: HubView, window: timedelta) -> int:
+        """Credits this Mac earned in the last `window`, from the ledger's turns."""
+        since = timefmt.now() - window
+        micro = sum((turn.get("credited") or {}).get(self.me, 0) for turn in hub.ledger.get("turns", [])
+                    if timefmt.parse(_wire_date(turn["started_iso"])) >= since)
+        return round(micro / 1e6 * self.config.credits_per_cu)
+
     def credit_log(self, hub: HubView) -> list[dict]:
         """Newest first: a line per day of work your Mac did, and every spend through the gateway."""
         per_cu = self.config.credits_per_cu
@@ -219,6 +226,7 @@ class SyncBuilder:
             "mock": False,
             "ladder": self.tiers(hub),
             "hub": {"online": hub.online, "model": hub.model, "ticket": self.config.hub_ticket or None},
+            "earning": {"lastHour": self.earned_since(hub, timedelta(hours=1))},
         }
         worker = self.worker(hub)
         if worker:
@@ -278,7 +286,8 @@ class SyncBuilder:
             "questionsHelped": runs,
             "pools": [{"name": self.config.pool_name, "answered": runs, "sharePercent": 100}] if runs else [],
             "badges": [],
-            "headline": f"Your Mac lent {hours:g} hours this week and earned {int(earned)} credits.",
+            "headline": f"Your Mac lent {hours:g} {'hour' if hours == 1 else 'hours'} this week "
+                        f"and earned {int(earned)} {'credit' if int(earned) == 1 else 'credits'}.",
         }
 
 

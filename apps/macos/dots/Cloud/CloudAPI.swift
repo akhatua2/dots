@@ -93,6 +93,12 @@ struct CloudSync: Codable {
     var ladder: LadderData?
     /// The hub behind the cloud: whether it answers, its model, and the ticket a worker dials to lend.
     var hub: HubInfo?
+    /// What this Mac earned lately, from the hub's ledger. The mock doesn't send it.
+    var earning: Earning?
+}
+
+struct Earning: Codable, Equatable {
+    var lastHour: Int
 }
 
 struct HubInfo: Codable, Equatable {

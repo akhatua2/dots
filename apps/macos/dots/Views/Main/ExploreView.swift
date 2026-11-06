@@ -5,7 +5,13 @@ struct ExploreView: View {
     @Environment(\.isSnapshot) private var isSnapshot
     @State private var query = ""
     @State private var filter = "All"
-    private let filters = ["All", "Code", "Research", "Writing", "Nearby"]
+    /// The tags the public pools carry, most common first, after "All". None when there is nothing to filter.
+    private var filters: [String] {
+        let tags = model.state.publicPools.flatMap(\.tags)
+        let counts = Dictionary(tags.map { ($0, 1) }, uniquingKeysWith: +)
+        let ordered = counts.keys.sorted { (counts[$0]!, $1) > (counts[$1]!, $0) }
+        return ordered.isEmpty ? [] : ["All"] + ordered
+    }
 
     private var pools: [Pool] {
         model.state.publicPools
@@ -68,9 +74,10 @@ struct ExploreView: View {
                     ForEach(pools) { pool in PoolCard(pool: pool) }
                 }
                 if pools.isEmpty {
-                    Text("No pools match that.")
+                    Text(model.state.publicPools.isEmpty
+                         ? "No public pools yet. Start one and make it public, or invite friends to yours."
+                         : "No pools match that. Try another word.")
                         .font(D.ui(13)).foregroundStyle(D.t4).padding(.top, 20)
-                        .help("Try another word, or start one yourself.")
                 }
             }
             .page()

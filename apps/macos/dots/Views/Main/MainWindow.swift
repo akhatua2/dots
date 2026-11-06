@@ -245,7 +245,7 @@ struct ThisMacCard: View {
                 Text(status.isActive ? "Live in \(s.lendingPool?.name ?? "your pool")" : status.headline)
                     .font(D.ui(13, .semibold)).foregroundStyle(D.t1).lineLimit(1)
             }
-            Text(status.isActive ? "\(Int(s.credits).grouped) credits · +\(model.creditsPerHour) an hour" : "\(Int(s.credits).grouped) credits")
+            Text(status.isActive ? "\(Int(s.credits).grouped) credits · \(model.earningLine)" : "\(Int(s.credits).grouped) credits")
                 .font(D.ui(12.5).monospacedDigit()).foregroundStyle(D.t3).lineLimit(1)
                 .contentTransition(.numericText())
                 .padding(.leading, 15)

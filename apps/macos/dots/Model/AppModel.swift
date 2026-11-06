@@ -184,9 +184,12 @@ final class AppModel {
         return .lending(pool: pool.name, working: backend.worker?.working ?? false)
     }
 
-    var creditsPerHour: Int {
-        guard let pool = state.lendingPool else { return 0 }
-        return pool.creditsPerHour(lendGB: state.lending.limitGB)
+    /// The sidebar's earning line: what the ledger says this Mac earned in the last hour, or, from the mock,
+    /// its estimate for an hour of lending.
+    var earningLine: String {
+        if let earning = backend.earning { return "+\(earning.lastHour.grouped) this hour" }
+        guard let pool = state.lendingPool else { return "" }
+        return "+\(pool.creditsPerHour(lendGB: state.lending.limitGB)) an hour"
     }
 
     func setLendingOn(_ on: Bool) {

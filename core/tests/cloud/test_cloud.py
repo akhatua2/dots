@@ -262,3 +262,15 @@ async def test_speed_and_tokens_come_from_the_hub(env):
     night = next(n for n in body["state"]["nights"] if n["poolID"] == "hub") if body["state"].get("nights") else None
     if night is not None:
         assert night["tokens"] == 160
+
+
+async def test_what_this_mac_earned_in_the_last_hour_comes_from_the_ledger(env, monkeypatch):
+    from datetime import datetime, timezone
+
+    from dots.cloud import timefmt
+
+    client, _ = env
+    monkeypatch.setattr(timefmt, "now", lambda: datetime(2026, 11, 5, 22, 40, tzinfo=timezone.utc))
+    assert (await state(client))["earning"]["lastHour"] == 6, "6,025 micro-CU at 1,000 credits a CU, half an hour ago"
+    monkeypatch.setattr(timefmt, "now", lambda: datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc))
+    assert (await state(client))["earning"]["lastHour"] == 0

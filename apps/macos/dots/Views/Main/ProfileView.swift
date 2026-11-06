@@ -158,6 +158,11 @@ struct AllTimeCard: View {
     @Environment(AppModel.self) private var model
     var nights: [NightLent]
 
+    /// 0.9 -> "0.9", 127.4 -> "127": a decimal only while it still says something.
+    static func hours(_ h: Double) -> String {
+        h < 10 ? String(format: "%.1f", h) : Int(h.rounded()).grouped
+    }
+
     var body: some View {
         let s = model.state
         let weeks = Self.weeks(nights)
@@ -171,7 +176,7 @@ struct AllTimeCard: View {
             }
             .padding(.top, 14)
             Rule().padding(.top, 18)
-            StatRow(stats: [.init(value: Int(s.hoursLent ?? 0).grouped, label: "hours lent"),
+            StatRow(stats: [.init(value: Self.hours(s.hoursLent ?? 0), label: "hours lent"),
                             .init(value: s.questionsHelped.grouped, label: "runs"),
                             .init(value: Int(s.credits).grouped, label: "credits")])
                 .padding(.top, 16)
