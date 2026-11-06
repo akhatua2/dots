@@ -42,5 +42,5 @@ frontier_max_tokens = 1024                  # override: DOTS_FRONTIER_MAX_TOKENS
 frontier_url = "https://api.anthropic.com/v1/messages"  # override: DOTS_FRONTIER_URL
 
 # Liquid-glass look: translucent sidebar and floating panels over native macOS
-# vibrancy. false = the flat graphite look from the mockups.   override: DOTS_GLASS
-glass = true
+# vibrancy. false (default) = the flat graphite look from the mockups.   override: DOTS_GLASS
+glass = false
