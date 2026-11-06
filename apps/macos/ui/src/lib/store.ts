@@ -219,6 +219,7 @@ class BridgeStore {
           return
         }
         const [config, lend] = await Promise.all([getConfig(), getLend()])
+        document.documentElement.dataset.glass = config.glass ? 'on' : 'off'
         this.set({ config, lend })
         if (s.ready) {
           const account = await getAccount().catch(() => null)

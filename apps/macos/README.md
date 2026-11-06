@@ -15,6 +15,8 @@ a pool, ask the pool, and use it as an OpenAI endpoint, with no terminal.
   which Macs answered and why it ran there. Drop a text file on it for context.
 - **Explore / Pool / Profile / API** screens, and the join moment.
 - Closing the window keeps the app (and lending) alive in the menu bar.
+- **Liquid-glass look** (`glass = true` in `config.toml`): translucent sidebar, dropdown and
+  Ask panel over native macOS vibrancy. `false` gives the flat graphite look from the mockups.
 
 ## Data: real vs preview
 

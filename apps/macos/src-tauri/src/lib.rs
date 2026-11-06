@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tauri::image::Image;
+use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -224,7 +225,7 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-fn make_panel(app: &AppHandle, label: &str, w: f64, h: f64) -> tauri::Result<()> {
+fn make_panel(app: &AppHandle, label: &str, w: f64, h: f64, radius: f64) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(label)
         .inner_size(w, h)
@@ -235,6 +236,13 @@ fn make_panel(app: &AppHandle, label: &str, w: f64, h: f64) -> tauri::Result<()>
         .resizable(false)
         .visible(false)
         .focused(false)
+        .effects(
+            EffectsBuilder::new()
+                .effect(Effect::HudWindow)
+                .state(EffectState::Active)
+                .radius(radius)
+                .build(),
+        )
         .build()?;
     Ok(())
 }
@@ -357,8 +365,8 @@ pub fn run() {
             let handle = app.handle().clone();
             let bridge = tauri::async_runtime::block_on(Bridge::spawn(handle.clone()))?;
             app.manage(bridge);
-            make_panel(&handle, "tray", TRAY_W, TRAY_H)?;
-            make_panel(&handle, "ask", ASK_W, ASK_H)?;
+            make_panel(&handle, "tray", TRAY_W, TRAY_H, 14.0)?;
+            make_panel(&handle, "ask", ASK_W, ASK_H, 20.0)?;
             build_tray(&handle)?;
             app.global_shortcut()
                 .register(Shortcut::new(Some(Modifiers::ALT), Code::Space))?;

@@ -13,7 +13,7 @@ export function TrayPanel() {
   const l = s.lend
   if (!l) {
     return (
-      <div ref={autosize} className="w-[316px] rounded-[14px] border border-line bg-[#1e1e1e] p-6 text-center text-dim">
+      <div ref={autosize} className="panel w-[316px] rounded-[14px] p-6 text-center text-dim">
         Starting up
       </div>
     )
@@ -27,7 +27,7 @@ export function TrayPanel() {
   return (
     <div
       ref={autosize}
-      className="w-[316px] overflow-hidden rounded-[14px] border border-line bg-[#1e1e1e] text-ink"
+      className="panel w-[316px] overflow-hidden rounded-[14px] text-ink"
     >
       <section className="px-4 pb-3.5 pt-3.5">
         <div className="flex items-center justify-between">

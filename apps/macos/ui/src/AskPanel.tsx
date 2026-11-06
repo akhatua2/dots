@@ -15,7 +15,7 @@ export function AskPanel() {
   return (
     <div
       ref={autosize}
-      className="w-[620px] overflow-hidden rounded-[20px] border border-line bg-[#1e1e1e] text-ink shadow-2xl"
+      className="panel w-[620px] overflow-hidden rounded-[20px] text-ink"
     >
       {/* Re-keyed on every open so the field is empty and focused. */}
       <AskInput key={s.focusTick} />

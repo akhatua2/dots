@@ -31,6 +31,7 @@ export interface AppConfig {
   api_base: string
   pool_name: string
   credits_per_cu: number
+  glass: boolean
   frontier: { label: string; enabled: boolean }
 }
 

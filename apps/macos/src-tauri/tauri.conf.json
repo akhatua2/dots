@@ -24,7 +24,13 @@
           "y": 24
         },
         "theme": "Dark",
-        "backgroundColor": "#191919"
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "sidebar"
+          ],
+          "state": "active"
+        }
       }
     ],
     "security": {

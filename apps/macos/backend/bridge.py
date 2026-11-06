@@ -679,6 +679,7 @@ async def dispatch(req: dict) -> None:
                 "api_base": _conf("hub_http", "DOTS_HUB_HTTP").rstrip("/") + "/v1",
                 "pool_name": _conf("pool_name", "DOTS_POOL_NAME"),
                 "credits_per_cu": _conf_num("credits_per_cu", "DOTS_CREDITS_PER_CU"),
+                "glass": _conf_bool("glass", "DOTS_GLASS"),
                 "frontier": {
                     "label": _conf("frontier_label", "DOTS_FRONTIER_LABEL"),
                     "enabled": bool(os.environ.get("ANTHROPIC_API_KEY")),

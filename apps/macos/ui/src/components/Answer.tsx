@@ -35,7 +35,7 @@ export function Answer({ m, s }: { m: Msg; s: BridgeState }) {
       )}
       {!m.pending && m.receipt && <Receipt r={m.receipt} />}
       {!m.pending && m.frontier && (
-        <div className="mt-3 flex items-center gap-2.5 rounded-xl bg-[#141414] px-3.5 py-3 text-[13px]">
+        <div className="inset mt-3 flex items-center gap-2.5 rounded-xl px-3.5 py-3 text-[13px]">
           <Icon name="external" size={14} />
           <span className="font-medium">Ran at Anthropic · {m.frontier.label}</span>
           <span className="text-dim">{m.frontier.tokens.toLocaleString('en-US')} tokens</span>

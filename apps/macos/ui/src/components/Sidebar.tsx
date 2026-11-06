@@ -24,7 +24,7 @@ export function Sidebar({ s }: { s: BridgeState }) {
   const lending = !!s.lend?.lending
 
   return (
-    <aside className="flex w-[250px] shrink-0 flex-col bg-sidebar">
+    <aside className="sidebar flex w-[250px] shrink-0 flex-col">
       <div data-tauri-drag-region className="h-[38px] shrink-0" />
       <div className="px-5 pb-[18px] pt-1 text-[23px] font-bold leading-none tracking-[-0.03em]">
         dots<span className="text-signal">.</span>
@@ -90,7 +90,7 @@ export function Sidebar({ s }: { s: BridgeState }) {
         )}
       </div>
 
-      <div className="m-3 rounded-[14px] border border-line bg-card px-3.5 py-3">
+      <div className="glass-card m-3 rounded-[14px] border border-line bg-card px-3.5 py-3">
         <div className="flex items-start gap-2.5">
           {lending ? (
             <span className="mt-[7px] size-2 rounded-full bg-signal" />

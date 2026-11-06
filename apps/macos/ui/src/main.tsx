@@ -15,6 +15,7 @@ try {
   label = location.hash.slice(1) || 'main'
 }
 document.documentElement.dataset.surface = label
+document.documentElement.dataset.glass = 'on' // until config says otherwise
 // The main window is designed on a larger canvas; scale it to native density.
 if (label === 'main') {
   try {

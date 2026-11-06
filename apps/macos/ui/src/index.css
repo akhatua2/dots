@@ -423,3 +423,51 @@ textarea {
 .pop {
   animation: pop 3.2s ease-out both;
 }
+
+/* ---- Surfaces: flat graphite by default, liquid glass when data-glass="on" ---- */
+.panel {
+  background: #1e1e1e;
+  border: 1px solid var(--color-line);
+}
+.sidebar {
+  background: var(--color-sidebar);
+}
+.inset {
+  background: #141414;
+}
+
+/* Glass: the native window vibrancy shows through translucent surfaces, with a
+   soft top light and a hairline edge highlight like polished glass. */
+[data-glass='on'] body {
+  background: transparent;
+}
+[data-glass='on'] .panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11) 0%, rgba(255, 255, 255, 0.035) 34%, rgba(255, 255, 255, 0) 100%),
+    rgba(24, 24, 27, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  /* Keep secondary text legible over the see-through material. */
+  --color-dim: #bcbcc2;
+  --color-faint: #93939a;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+}
+[data-glass='on'] .panel .border-line,
+[data-glass='on'] .panel hr {
+  border-color: rgba(255, 255, 255, 0.10);
+}
+[data-glass='on'] .panel .inset {
+  background: rgba(0, 0, 0, 0.26);
+}
+[data-glass='on'] .sidebar {
+  --color-dim: #a9a9af;
+  --color-faint: #7d7d84;
+  background: rgba(16, 16, 18, 0.46);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+[data-glass='on'] .sidebar .glass-card {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}

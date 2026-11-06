@@ -7,7 +7,7 @@ import { Icon } from './Icon'
 export function Receipt({ r }: { r: R }) {
   const macs = r.macs.length
   return (
-    <div className="mt-3 overflow-hidden rounded-xl bg-[#141414]">
+    <div className="inset mt-3 overflow-hidden rounded-xl">
       <div className="flex items-center gap-3 px-3.5 py-3">
         <div className="flex -space-x-1.5">
           {r.macs.slice(0, 4).map((m, i) => (
