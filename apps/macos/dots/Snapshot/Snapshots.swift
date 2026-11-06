@@ -45,7 +45,7 @@ enum Snapshots {
         // 1. Explore, before your Mac lends anywhere, with Sam's invite at the top
         save(Shell(route: .explore), model, window, dir, "01-explore")
 
-        // 2. Join Student Union: your Mac tips it over DeepSeek V3.1's line
+        // 2. Join Student Union: your Mac tips it over GLM 5.3's line
         let union = model.state.pools.first { $0.id == "student-union" }!
         save(Shell(route: .pool(union.id)), model, window, dir, "02-pool-before")
         model.join(union)
@@ -115,8 +115,8 @@ enum Snapshots {
         let baseline = model.settings.savingsBaseline
         for (dest, place, mdl, credits, usd, i, o) in [
             (Destination.thisMac, "This Mac", "qwen3-8b", 0, 0.0, 820, 240),
-            (.yourPool, "Studio 9", "Qwen3 235B", 0, 0.0, 2_400, 610),
-            (.publicPool, "Open Science", "Kimi K2", 4, 0.0, 6_100, 900),
+            (.yourPool, "Studio 9", "MiniMax M2.7", 0, 0.0, 2_400, 610),
+            (.publicPool, "Open Science", "Kimi K2.5", 4, 0.0, 6_100, 900),
             (.frontier, "Anthropic", "Claude Opus 5.5", 13, 0.0, 1_500, 600),
             (.frontier, "Anthropic", "Claude Opus 5.5", 0, Pricing.usd(baseline, input: 3_200, output: 800), 3_200, 800),
         ] {
@@ -147,7 +147,7 @@ enum Snapshots {
         save(SettingsView(), model, CGSize(width: 560, height: 640), dir, "14-settings", fitHeight: true)
         save(Shell(route: .settings), model, window, dir, "14-settings-page")
 
-        // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with DeepSeek Boost coming
+        // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with GLM Boost coming
         let lateNight = Date().nightStart.addingTimeInterval(14.1 * 3_600)
         if let invite = model.backend.invites.first(where: { $0.code == "LATE7Q" }) {
             model.acceptInvite(invite, lendGB: 10)

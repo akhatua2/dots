@@ -141,15 +141,30 @@ def _active_params(model) -> int:
         return 0
 
 
-def _layer_mask(hidden, cache):
+def _layer_mask(hidden, cache, as_array: bool):
     """A layer's mask, from the kind of state it keeps: a per-token cache gets the attention mask (its
-    `make_mask` handles a sliding window), a running state (linear attention, convolution) the SSM one."""
+    `make_mask` handles a sliding window), a running state (linear attention, convolution) the SSM one.
+    A layer that keeps several caches (attention beside an indexer, in DeepSeek-style sparse attention)
+    is masked by its first. `as_array` is for models whose attention wants the mask as an array."""
     from mlx_lm.models.base import create_attention_mask, create_ssm_mask
-    from mlx_lm.models.cache import ArraysCache
+    from mlx_lm.models.cache import ArraysCache, CacheList
 
+    if isinstance(cache, CacheList):
+        cache = cache[0]
     if isinstance(cache, ArraysCache):
         return create_ssm_mask(hidden, cache)
-    return create_attention_mask(hidden, cache)
+    return create_attention_mask(hidden, cache, return_array=as_array)
+
+
+def _wants_array_mask(text) -> bool:
+    """Whether the model's own forward pass asks for an array mask, as DeepSeek-style attention does.
+    Read from its code once, so a model family needs no entry in a list here."""
+    import inspect
+
+    try:
+        return "return_array=True" in inspect.getsource(type(text).__call__)
+    except (OSError, TypeError):
+        return False
 
 
 class FullModelHost:
@@ -168,6 +183,7 @@ class FullModelHost:
         self.layers = self.text.layers
         self.embed = self.text.embed_tokens
         self.norm = getattr(self.text, final_norm_name(self.text))
+        self._array_masks = _wants_array_mask(self.text)
         # The output layer: its own, or the embedding read backwards when the two are tied
         self._output = getattr(output_owner(model), "lm_head", None)
         self.n_layers = len(self.layers)
@@ -226,7 +242,7 @@ class FullModelHost:
         for layer, layer_cache in zip(self.layers[start:end], cache[start:end]):
             kind = type(layer_cache)
             if kind not in masks:
-                masks[kind] = _layer_mask(hidden, layer_cache)
+                masks[kind] = _layer_mask(hidden, layer_cache, self._array_masks)
             hidden = layer(hidden, masks[kind], cache=layer_cache)
         return hidden
 

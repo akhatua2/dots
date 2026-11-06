@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Models the network can run
 
 /// What a pool can run is set by how much memory its Macs lend (4-bit weights plus room for the cache).
-/// The lines follow the case study: Qwen3 235B at 136 GB, DeepSeek V3.1 at 396, Kimi K2 at 620.
+/// The cloud sends the real lines in every sync; these are the offline demo's, from the case study.
 struct ModelTier: Codable, Hashable, Identifiable {
     var id: String
     var name: String
@@ -19,17 +19,17 @@ struct ModelTier: Codable, Hashable, Identifiable {
 enum Ladder {
     /// The cloud sends the ladder in every sync (see `adopt`). This is the starting point until the first one arrives.
     static private(set) var tiers: [ModelTier] = [
-        ModelTier(id: "llama-3.1-8b", name: "Llama 3.1 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 62, credits: 1, layers: 32, activeB: 8),
-        ModelTier(id: "gemma-3-27b", name: "Gemma 3 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 38, credits: 1, layers: 62, activeB: 27),
-        ModelTier(id: "llama-3.3-70b", name: "Llama 3.3 70B", minGB: 40, params: "70B", paramsLong: "70 billion parameters", tokPerSec: 19, credits: 1, layers: 80, activeB: 70),
-        ModelTier(id: "qwen3-235b", name: "Qwen3 235B", minGB: 136, params: "235B", paramsLong: "235 billion parameters", tokPerSec: 24, credits: 2, layers: 94, activeB: 22),
-        ModelTier(id: "deepseek-v3.1", name: "DeepSeek V3.1", minGB: 396, params: "671B", paramsLong: "671 billion parameters", tokPerSec: 11, credits: 3, layers: 61, activeB: 37),
-        ModelTier(id: "kimi-k2", name: "Kimi K2", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 9, credits: 4, layers: 61, activeB: 32),
+        ModelTier(id: "lfm2.5-8b", name: "LFM2.5 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 60, credits: 1, layers: 24, activeB: 1.5),
+        ModelTier(id: "qwen3.8-27b", name: "Qwen3.8 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 14, credits: 1, layers: 64, activeB: 27),
+        ModelTier(id: "qwen3.6-35b", name: "Qwen3.6 35B", minGB: 40, params: "35B", paramsLong: "35 billion parameters", tokPerSec: 35, credits: 1, layers: 40, activeB: 3),
+        ModelTier(id: "minimax-m2.7", name: "MiniMax M2.7", minGB: 136, params: "230B", paramsLong: "230 billion parameters", tokPerSec: 18, credits: 2, layers: 62, activeB: 10),
+        ModelTier(id: "glm-5.3", name: "GLM 5.3", minGB: 396, params: "744B", paramsLong: "744 billion parameters", tokPerSec: 9, credits: 3, layers: 78, activeB: 40),
+        ModelTier(id: "kimi-k2.5", name: "Kimi K2.5", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 8, credits: 4, layers: 61, activeB: 32),
     ]
 
     /// Coding pools can prefer a coding model when they have room for it.
     static private(set) var special: [ModelTier] = [
-        ModelTier(id: "qwen3-coder-480b", name: "Qwen3 Coder 480B", minGB: 270, params: "480B", paramsLong: "480 billion parameters", tokPerSec: 13, credits: 3, layers: 62, activeB: 35),
+        ModelTier(id: "qwen3-coder-next", name: "Qwen3 Coder Next", minGB: 270, params: "80B", paramsLong: "80 billion parameters", tokPerSec: 30, credits: 3, layers: 48, activeB: 3),
     ]
 
     /// Takes the ladder the cloud sent, so a pool's models are the ones its hub can actually serve.

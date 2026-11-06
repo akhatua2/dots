@@ -64,13 +64,14 @@ extension Receipt {
         }
     }
 
-    /// "mlx-community/Qwen2.5-0.5B-Instruct-4bit" -> "Qwen2.5 0.5B"; names like "Qwen3 235B" pass through.
+    /// "mlx-community/Qwen3.5-2B-MLX-4bit" -> "Qwen3.5 2B"; names like "GLM 5.3" pass through.
     var modelName: String {
         var name = model.split(separator: "/").last.map(String.init) ?? model
-        for suffix in ["-4bit", "-8bit", "-bf16", "-Instruct", "-Chat", "-it"] {
+        for suffix in ["-4bit", "-8bit", "-bf16", "-MLX", "-MXFP4", "-Q4", "-Instruct", "-Chat", "-it"] {
             name = name.replacingOccurrences(of: suffix, with: "")
         }
-        return name.replacingOccurrences(of: "-", with: " ")
+        // A hyphen before a size or a version is a space ("Qwen3.5 2B"); others stay ("gpt-oss")
+        return name.replacingOccurrences(of: "-(?=[0-9A-Z])", with: " ", options: .regularExpression)
     }
 }
 

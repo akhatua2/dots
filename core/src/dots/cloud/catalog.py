@@ -10,15 +10,25 @@ from __future__ import annotations
 import re
 
 # id, name, GB a pool needs, parameters, layers, active parameters (B), tokens a second nearby, credits an answer
+# The newest open models a pool can run, by the memory they need pooled: (id, name, min GB, params,
+# layers, active billions a token, rough tokens a second, credits a prompt). Ids are the MLX builds a
+# hub loads. Every architecture here runs split across Macs (core/tests/backends/test_mlx_architectures.py);
+# the speeds are estimates until pools measure them.
 _LADDER = [
-    ("llama-3.1-8b", "Llama 3.1 8B", 6, "8B", 32, 8, 62, 1),
-    ("gemma-3-27b", "Gemma 3 27B", 18, "27B", 62, 27, 38, 1),
-    ("llama-3.3-70b", "Llama 3.3 70B", 40, "70B", 80, 70, 19, 1),
-    ("qwen3-235b", "Qwen3 235B", 136, "235B", 94, 22, 24, 2),
-    ("deepseek-v3.1", "DeepSeek V3.1", 396, "671B", 61, 37, 11, 3),
-    ("kimi-k2", "Kimi K2", 620, "1T", 61, 32, 9, 4),
+    ("mlx-community/Qwen3.5-0.8B-4bit", "Qwen3.5 0.8B", 1, "0.8B", 24, 0.8, 90, 0),
+    ("mlx-community/Qwen3.5-2B-MLX-4bit", "Qwen3.5 2B", 2, "2B", 24, 2, 70, 0),
+    ("mlx-community/Qwen3.5-4B-MLX-4bit", "Qwen3.5 4B", 4, "4B", 32, 4, 50, 0),
+    ("mlx-community/LFM2.5-8B-A1B-MLX-4bit", "LFM2.5 8B", 6, "8B", 24, 1.5, 60, 1),
+    ("mlx-community/Qwen3.5-9B-MLX-4bit", "Qwen3.5 9B", 7, "9B", 32, 9, 30, 1),
+    ("mlx-community/gpt-oss-20b-MXFP4-Q4", "gpt-oss 20B", 13, "20B", 24, 3.6, 40, 1),
+    ("mlx-community/Qwen3.8-27B-4bit", "Qwen3.8 27B", 19, "27B", 64, 27, 14, 1),
+    ("mlx-community/Qwen3.6-35B-A3B-4bit", "Qwen3.6 35B", 24, "35B", 40, 3, 35, 1),
+    ("mlx-community/gpt-oss-120b-MXFP4-Q4", "gpt-oss 120B", 70, "120B", 36, 5.1, 25, 2),
+    ("mlx-community/MiniMax-M2.7-4bit", "MiniMax M2.7", 150, "230B", 62, 10, 18, 2),
+    ("mlx-community/GLM-5.3-4bit", "GLM 5.3", 480, "744B", 78, 40, 9, 3),
+    ("mlx-community/Kimi-K2.5", "Kimi K2.5", 720, "1T", 61, 32, 8, 4),
 ]
-_SPECIAL = [("qwen3-coder-480b", "Qwen3 Coder 480B", 270, "480B", 62, 35, 13, 3)]
+_SPECIAL: list[tuple] = []
 
 _LONG = {"T": "trillion", "B": "billion", "M": "million"}
 
@@ -54,10 +64,10 @@ def _tier(entry: tuple) -> dict:
 
 
 def short_name(model_id: str) -> str:
-    """'mlx-community/Qwen2.5-0.5B-Instruct-4bit' -> 'Qwen2.5 0.5B'."""
+    """'mlx-community/Qwen3.5-2B-MLX-4bit' -> 'Qwen3.5 2B'; 'mlx-community/gpt-oss-20b-MXFP4-Q4' -> 'gpt-oss 20b'."""
     tail = model_id.split("/")[-1]
-    tail = re.sub(r"-(Instruct|Chat|\d+bit|MLX|mlx|GGUF)\b", "", tail)
-    return tail.replace("-", " ").strip()
+    tail = re.sub(r"-(Instruct|Chat|it|\d+bit|MLX|mlx|GGUF|MXFP4|mxfp4|Q\d|DQ\w*|OptiQ)\b", "", tail)
+    return re.sub(r"-(?=[0-9A-Z])", " ", tail).strip()  # a hyphen before a size or a version is a space
 
 
 def served_tier(model_id: str, layers: int, tok_per_sec: float) -> dict:
@@ -83,8 +93,12 @@ def served_tier(model_id: str, layers: int, tok_per_sec: float) -> dict:
 def ladder(served: dict | None) -> dict:
     """{tiers, special}: the ladder, with the hub's own model first when it serves one."""
     tiers = [_tier(t) for t in _LADDER]
-    if served is not None and all(t["id"] != served["id"] for t in tiers):
-        tiers.insert(0, served)
+    if served is not None:
+        listed = next((t for t in tiers if t["id"] == served["id"]), None)
+        if listed is None:
+            tiers.insert(0, served)
+        elif served["tokPerSec"]:
+            listed["tokPerSec"] = served["tokPerSec"]  # what the pool measured beats the estimate
     return {"tiers": tiers, "special": [_tier(t) for t in _SPECIAL]}
 
 

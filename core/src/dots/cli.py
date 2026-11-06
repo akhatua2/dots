@@ -28,7 +28,7 @@ DEFAULT_HUB_HOST = "0.0.0.0"
 # Default model the chat (the querier) requests when the user doesn't
 # pass --model. The hub is model-agnostic — it never picks a model — so
 # this default lives on the client side.
-DEFAULT_CHAT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+DEFAULT_CHAT_MODEL = "mlx-community/Qwen3.5-0.8B-4bit"
 
 # Load a project-local .env file BEFORE any module that reads from the
 # environment is imported. This is how users typically configure
@@ -480,7 +480,7 @@ def main() -> None:
     )
     p_serve.add_argument(
         "model",
-        help="model id to serve, e.g. mlx-community/Qwen3-9B-4bit",
+        help="model id to serve, e.g. mlx-community/Qwen3.5-9B-MLX-4bit",
     )
     p_serve.add_argument(
         "hub",

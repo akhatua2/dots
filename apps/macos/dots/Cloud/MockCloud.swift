@@ -69,7 +69,7 @@ final class MockCloud {
 
     // MARK: The mock's own additions to the sample world
 
-    /// A friends' pool you've been invited to, one Mac short of Qwen3 235B, with a boost coming;
+    /// A friends' pool you've been invited to, one Mac short of MiniMax M2.7, with a boost coming;
     /// the totals behind your badges; and the nights your Mac lent before.
     private func seed() {
         world.update { s in
@@ -95,7 +95,7 @@ final class MockCloud {
         }
     }
 
-    /// Late Night Lab's DeepSeek Boost, on a Saturday afternoon (a boost can be any time), and what happened there lately.
+    /// Late Night Lab's GLM Boost, on a Saturday afternoon (a boost can be any time), and what happened there lately.
     private static func seedLateNightLab(_ s: inout NetworkState) {
         guard let i = s.pools.firstIndex(where: { $0.id == "late-night-lab" }) else { return }
         let now = Date()
@@ -104,7 +104,7 @@ final class MockCloud {
             c.weekday = 7
             c.hour = 14
             let saturday = Calendar.current.nextDate(after: now, matching: c, matchingPolicy: .nextTime) ?? now.addingTimeInterval(5 * 86_400)
-            s.pools[i].boost = PoolBoost(title: "DeepSeek Boost", modelID: "deepseek-v3.1", starts: saturday, hours: 4, plannedBy: "sam",
+            s.pools[i].boost = PoolBoost(title: "GLM Boost", modelID: "glm-5.3", starts: saturday, hours: 4, plannedBy: "sam",
                                          pledges: [.init(personID: "sam", gb: 96, guest: false), .init(personID: "ana", gb: 24, guest: false),
                                                    .init(personID: "nia", gb: 18, guest: true), .init(personID: "theo", gb: 96, guest: true),
                                                    .init(personID: "maya", gb: 48, guest: true), .init(personID: "priya", gb: 14, guest: true)])

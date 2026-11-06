@@ -13,7 +13,7 @@
 #
 # In the Mac app's Settings, turn off "Use the mock cloud" and connect to http://127.0.0.1:8800. Then lending
 # in the app starts this Mac's worker; the small model loads on the first answer.
-# The hub's own OpenAI API is http://127.0.0.1:8080/v1, serving mlx-community/Qwen2.5-0.5B-Instruct-4bit.
+# The hub's own OpenAI API is http://127.0.0.1:8080/v1, serving mlx-community/Qwen3.5-0.8B-4bit.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,8 +24,8 @@ HTTP_PORT="${DOTS_LOCAL_HTTP_PORT:-8080}"
 CLOUD_PORT="${DOTS_LOCAL_CLOUD_PORT:-8800}"
 MAX_RAM_GB="${DOTS_LOCAL_MAX_RAM_GB:-6}"
 # The split setup: a model bigger than one Mac's share, and a small draft with the same tokenizer
-SPLIT_MODEL="${DOTS_LOCAL_SPLIT_MODEL:-mlx-community/Qwen2.5-1.5B-Instruct-4bit}"
-DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"
+SPLIT_MODEL="${DOTS_LOCAL_SPLIT_MODEL:-mlx-community/Qwen3.5-2B-MLX-4bit}"
+DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-}"  # newest small models can't check guesses yet; set one that can
 
 # Run from the home directory with the token unset: python-dotenv would otherwise find a .env
 # above the working directory and bring a real join token in with it.
@@ -46,7 +46,7 @@ start() {
   fi
   echo "hub:    http://127.0.0.1:$HTTP_PORT/v1   (logs in $LOGS)"
   echo "cloud:  http://127.0.0.1:$CLOUD_PORT"
-  echo "model:  ${DOTS_POOL_MODEL:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"
+  echo "model:  ${DOTS_POOL_MODEL:-mlx-community/Qwen3.5-0.8B-4bit}"
 }
 
 worker() {

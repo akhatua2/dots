@@ -21,7 +21,7 @@ class CloudConfig:
     pool_name: str = "dots pool"
     # The model the pool asks the hub for. The hub serves whatever it is asked for, loading it on the
     # first request, so the cloud names one.
-    pool_model: str = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+    pool_model: str = "mlx-community/Qwen3.5-0.8B-4bit"
     # The hub's iroh join ticket, which a Mac's worker dials to lend. Read from the hub's home when unset.
     hub_ticket: str = ""
     # Credits per compute unit (1 CU = 1 TFLOP) the hub measured. A credit is worth terms.credit_usd.

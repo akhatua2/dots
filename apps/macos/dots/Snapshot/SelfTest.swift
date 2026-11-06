@@ -93,7 +93,7 @@ enum SelfTest {
         let list = await call(base, "GET", "/models")
         let ids = ((list.json?["data"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
         check("GET /v1/models lists auto, the pools' models and Claude, without a key",
-              list.code == 200 && ids.contains("auto") && ids.contains("deepseek-v3.1") && ids.contains("claude-opus-5-5"))
+              list.code == 200 && ids.contains("auto") && ids.contains("glm-5.3") && ids.contains("claude-opus-5-5"))
         let noKey = await call(base, "POST", "/chat/completions", body: ask("hi"))
         check("Without a key, OpenAI's format gets a 401 in OpenAI's error shape", noKey.code == 401 && noKey.errorType == "authentication_error")
         let noKeyA = await call(base, "POST", "/messages", format: .anthropic, body: ask("hi", format: .anthropic))
@@ -137,10 +137,10 @@ enum SelfTest {
         check("Preferring the best answer sends it to Claude instead", best.code == 200 && best.text("ran_on") == "Anthropic" && best.int("credits") > 0)
         let tools = await call(base, "POST", "/chat/completions", key: secret, body: ask("What's the weather in Lisbon?", extra: ["tools": [weatherTool]]))
         check("A request with tools goes to a frontier model, the only kind that takes them", tools.code == 200 && tools.text("ran_on") == "Anthropic")
-        let kimi = await call(base, "POST", "/chat/completions", key: secret, body: ask("Summarise this paper.", model: "kimi-k2"))
-        let fastest = model.state.publicPools.filter { $0.model?.id == "kimi-k2" && $0.lendingMacs > 0 }.max { $0.tokPerSec < $1.tokPerSec }
-        check("Pinning kimi-k2 runs it in the fastest public pool that has it (\(fastest?.name ?? "none")), for its credits",
-              kimi.code == 200 && fastest != nil && kimi.text("ran_on").contains(fastest?.name ?? "?") && kimi.int("credits") == Ladder.tier("kimi-k2")?.credits)
+        let kimi = await call(base, "POST", "/chat/completions", key: secret, body: ask("Summarise this paper.", model: "kimi-k2.5"))
+        let fastest = model.state.publicPools.filter { $0.model?.id == "kimi-k2.5" && $0.lendingMacs > 0 }.max { $0.tokPerSec < $1.tokPerSec }
+        check("Pinning kimi-k2.5 runs it in the fastest public pool that has it (\(fastest?.name ?? "none")), for its credits",
+              kimi.code == 200 && fastest != nil && kimi.text("ran_on").contains(fastest?.name ?? "?") && kimi.int("credits") == Ladder.tier("kimi-k2.5")?.credits)
         model.settings.poolEndpoint = EndpointConfig(enabled: true, label: "LM Studio", baseURL: "http://127.0.0.1:\(rig.macPort)/v1",
                                                      model: "qwen3-8b", keychainAccount: "dots-selftest-none")
         let local = await call(base, "POST", "/chat/completions", key: secret, body: ask("What's a good name for a cat?"))
@@ -257,7 +257,7 @@ enum SelfTest {
               mine("studio-9")?.state == .lending && mine("studio-9")?.lendGB == model.state.lending.limitGB)
         let worker = model.backend.worker
         check("The hub gives this Mac its share of the model's layers",
-              worker?.poolName == "Studio 9" && worker?.layers == 94 && (worker.map { $0.lastLayer >= $0.firstLayer } ?? false))
+              worker?.poolName == "Studio 9" && worker?.layers == model.state.pool("studio-9")?.model?.layers && (worker.map { $0.lastLayer >= $0.firstLayer } ?? false))
         print("      \(worker?.line ?? "no worker")")
         model.pauseForAnHour()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
@@ -366,15 +366,15 @@ enum SelfTest {
               && cloud.world.state.lendingPoolID == "student-union" && cloud.world.state.pool("studio-9")?.macs.contains { $0.macID == me } == false)
 
         story(13, "An unlock names the Mac that tipped it")
-        check("This Mac took Student Union from \(union.pooledGB) GB over DeepSeek V3.1's line",
-              joined?.unlock?.modelID == "deepseek-v3.1" && joined?.unlock?.byMacID == me)
+        check("This Mac took Student Union from \(union.pooledGB) GB over GLM 5.3's line",
+              joined?.unlock?.modelID == "glm-5.3" && joined?.unlock?.byMacID == me)
         check("The cloud records the unlock against this Mac, and the pool runs it now",
-              inCloud?.unlocks.contains { $0.modelID == "deepseek-v3.1" && $0.byMacID == me } == true && inCloud?.model?.id == "deepseek-v3.1")
+              inCloud?.unlocks.contains { $0.modelID == "glm-5.3" && $0.byMacID == me } == true && inCloud?.model?.id == "glm-5.3")
 
         story(14, "Badges for showing up")
         await model.backend.beatNow(active: true, adding: 3 * 3_600)
         check("Passing 100 hours lent earns 100 hours", badges().contains("hours-100") && (cloud.world.state.hoursLent ?? 0) >= 100)
-        check("Taking a pool over a line earns Unlocker", badges().contains("unlock-student-union-deepseek-v3.1"))
+        check("Taking a pool over a line earns Unlocker", badges().contains("unlock-student-union-glm-5.3"))
         model.endorse(model.state.pool("student-union")!)
         await model.backend.settled()
         check("Endorsing a pool of fewer than 20 Macs earns Early backer", badges().contains("backer-student-union"))
@@ -412,7 +412,7 @@ enum SelfTest {
               preview?.unlocks != nil && preview?.unlocks == expected && preview?.addGB == model.state.thisMac.maxLendGB)
         let small: InviteDetails? = try? await model.backend.client.get("v1/invites/LATE7Q", query: [URLQueryItem(name: "memory_gb", value: "8")])
         check("For a Mac with nothing to lend, it says how far the pool still is",
-              small?.unlocks == nil && small?.nextModel == "Qwen3 235B" && (small?.shortGB ?? 0) > 0)
+              small?.unlocks == nil && small?.nextModel == "MiniMax M2.7" && (small?.shortGB ?? 0) > 0)
         var refused = false
         do { _ = try await model.backend.preview(code: "NOPE99") } catch { refused = true }
         check("A code that isn't valid says so", refused)
@@ -448,7 +448,7 @@ enum SelfTest {
         story(18, "A boost to plan together, and the nights your Mac lent")
         let boost = cloud.world.state.pool("late-night-lab")?.boost
         check("Late Night Lab plans \(boost?.title ?? "a boost"): \(boost?.pledgedGB ?? 0) of \(boost?.targetGB ?? 0) GB pledged, guests welcome",
-              boost?.title == "DeepSeek Boost" && boost?.pledgedGB == 296 && boost?.targetGB == 396 && boost?.pledges.contains { $0.guest } == true)
+              boost?.title == "GLM Boost" && boost?.pledgedGB == 296 && boost?.targetGB == 396 && boost?.pledges.contains { $0.guest } == true)
         let spare = model.state.thisMac.maxLendGB
         model.backend.pledgeBoost(poolID: "late-night-lab", gb: spare)
         await model.backend.settled()

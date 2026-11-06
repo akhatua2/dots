@@ -187,7 +187,7 @@ struct EndpointEditor: View {
                 }
                 Field(placeholder: "https://…/v1", text: $config.baseURL, mono: true)
                 HStack(spacing: 8) {
-                    Field(placeholder: "Model, like qwen3-235b", text: $config.model, mono: true)
+                    Field(placeholder: "Model, like Qwen3.5-9B", text: $config.model, mono: true)
                     if !models.isEmpty {
                         Menu("Pick") {
                             ForEach(models, id: \.self) { m in Button(m) { config.model = m } }

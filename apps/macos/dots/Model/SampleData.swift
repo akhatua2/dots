@@ -28,7 +28,7 @@ enum SampleData {
             return PoolMac(macID: id, lendGB: d.maxLendGB, state: .lending, joinedAt: now.addingTimeInterval(-days * day))
         }
 
-        // Student Union sits just under DeepSeek V3.1's line, so your Mac is the one that tips it over.
+        // Student Union sits just under GLM 5.3's line, so your Mac is the one that tips it over.
         let myLend = thisMac.maxLendGB
         let unionGB = min(395, max(137, 396 - myLend))
 
@@ -53,7 +53,7 @@ enum SampleData {
             Pool(id: "indie-hackers", name: "Indie Hackers", isPublic: true, blurb: "Builders sharing a coding model around the clock.",
                  tags: ["Code"], memberIDs: ["theo"], macs: [],
                  crowdMacs: 126, crowdLending: 94, crowdGB: 560, endorsements: 1_104,
-                 phase: 0.89, createdAt: now.addingTimeInterval(-300 * day), servesModelID: "qwen3-coder-480b", speedFactor: 1.0, demand: 0.83),
+                 phase: 0.89, createdAt: now.addingTimeInterval(-300 * day), servesModelID: "qwen3-coder-next", speedFactor: 1.0, demand: 0.83),
             Pool(id: "film-school", name: "Film School", isPublic: true, blurb: "Editors' Mac Studios, lent out between renders.",
                  tags: ["Research"], memberIDs: [], macs: [],
                  crowdMacs: 64, crowdLending: 38, crowdGB: 1_380, endorsements: 510,
@@ -96,11 +96,11 @@ enum SampleData {
                                               isPrivate: false, inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             } else if i % 5 == 1 || (i % 10 == 7 && i % 20 != 7) {
                 requests.append(RequestRecord(date: date, source: "Ask", destination: .publicPool, place: "Open Science",
-                                              model: "Kimi K2", credits: Ladder.tier("kimi-k2")?.credits ?? 4, isPrivate: false,
+                                              model: "Kimi K2.5", credits: Ladder.tier("kimi-k2.5")?.credits ?? 4, isPrivate: false,
                                               inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             } else {
                 requests.append(RequestRecord(date: date, source: i % 4 == 0 ? "Raycast" : "Ask", destination: .yourPool,
-                                              place: "Studio 9", model: "Qwen3 235B", credits: 0, isPrivate: i % 3 == 0,
+                                              place: "Studio 9", model: "MiniMax M2.7", credits: 0, isPrivate: i % 3 == 0,
                                               inputTokens: input, outputTokens: output, measured: true, baselineUSD: baseline))
             }
         }
@@ -109,7 +109,7 @@ enum SampleData {
             CreditEvent(date: now.addingTimeInterval(-2 * 3_600), amount: -FrontierModel.opus.credits, note: "Claude Opus 5.5, a second opinion", kind: "spend"),
             CreditEvent(date: now.addingTimeInterval(-9 * 3_600), amount: 96, note: "Your Mac lent to Studio 9", kind: "lend",
                         poolID: "studio-9", minutes: 480, computePF: 3.6),
-            CreditEvent(date: now.addingTimeInterval(-26 * 3_600), amount: -(Ladder.tier("kimi-k2")?.credits ?? 4), note: "Kimi K2 in Open Science", kind: "spend"),
+            CreditEvent(date: now.addingTimeInterval(-26 * 3_600), amount: -(Ladder.tier("kimi-k2.5")?.credits ?? 4), note: "Kimi K2.5 in Open Science", kind: "spend"),
             CreditEvent(date: now.addingTimeInterval(-33 * 3_600), amount: 88, note: "Your Mac lent to Studio 9", kind: "lend",
                         poolID: "studio-9", minutes: 420, computePF: 3.1),
         ]

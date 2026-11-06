@@ -5,7 +5,7 @@ struct RouteCandidate: Identifiable, Hashable {
     var id: String
     var destination: Destination
     var place: String           // "This Mac", "Studio 9", "Open Science", "Anthropic"
-    var model: String           // "Qwen3 235B"
+    var model: String           // "MiniMax M2.7"
     var modelID: String
     var credits: Int
     var listCredits: Int

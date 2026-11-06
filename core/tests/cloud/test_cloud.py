@@ -16,7 +16,7 @@ from dots.cloud.server import Cloud
 from dots.cloud.store import Store
 
 ME = "acc-me"
-MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+MODEL = "mlx-community/Qwen3.5-0.8B-4bit"
 WIRE_DATE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
@@ -171,7 +171,7 @@ async def test_heartbeats_record_lending_and_an_unlock(env):
 async def test_a_pool_answer_comes_from_the_hub_with_its_macs(env):
     client, _ = env
     reply = await (await client.post("/hub/v1/pools/hub/chat/completions",
-                                     json={"model": "Qwen2.5 0.5B", "messages": [{"role": "user", "content": "hi"}]})).json()
+                                     json={"model": "Qwen3.5 0.8B", "messages": [{"role": "user", "content": "hi"}]})).json()
     assert reply["choices"][0]["message"]["content"] == "Hi there"
     assert reply["dots"]["simulated"] is False and len(reply["dots"]["macs"]) == 2
     r = await client.post("/hub/v1/pools/hub/chat/completions", json={"model": "x", "stream": True, "messages": []})
@@ -211,7 +211,8 @@ async def test_a_token_is_required_when_one_is_set(tmp_path):
         assert (await r.json())["hub"]["online"] is False
 
 
-@pytest.mark.parametrize("model_id,name", [(MODEL, "Qwen2.5 0.5B"), ("mlx-community/Llama-3.2-3B-Instruct-4bit", "Llama 3.2 3B")])
+@pytest.mark.parametrize("model_id,name", [(MODEL, "Qwen3.5 0.8B"), ("mlx-community/Qwen3.5-2B-MLX-4bit", "Qwen3.5 2B"),
+                                              ("mlx-community/gpt-oss-20b-MXFP4-Q4", "gpt-oss 20b")])
 def test_short_model_names(model_id, name):
     from dots.cloud.catalog import short_name
 
