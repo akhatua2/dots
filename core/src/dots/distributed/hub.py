@@ -39,6 +39,7 @@ from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import Pool, resource_decl_from_hello
 from ..placement.scheduler import Placement, WorkUnit, schedule
+from .chain_timing import describe as describe_chain
 from ..system.util import dots_home
 from ..system.geo import sanitize_geo
 from ..placement.work_units import ModelGeometry, units_for_geometry
@@ -1545,6 +1546,7 @@ class Hub:
             ui.notice(
                 f"turn {conv.id[:8]} done in {wall_ms:.0f}ms · tokens={tokens_total}"
                 + _speculation_note(resp)
+                + describe_chain(resp if isinstance(resp, dict) else {})
             )
             # delegate_token notifications dispatch as fire-and-forget
             # tasks; the response (delegate_done) may resolve before the

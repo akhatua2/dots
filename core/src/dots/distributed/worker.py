@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Callable
 
 from .. import ui
@@ -31,6 +32,7 @@ from ..backends.mlx.draft import load_draft_runtime, same_tokenizer
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
 from ..generation.speculative import SpeculativeGeneration
+from .chain_timing import ChainTiming
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import resource_decl_to_hello_field
@@ -385,15 +387,19 @@ class Worker:
         conv_id = msg["conv_id"]
         start = int(msg["layer_start"])
         end = int(msg["layer_end"])
+        started = time.perf_counter()
         hidden_in = runtime.decode_hidden(msg["hidden"])
         try:
             hidden_out = runtime.forward_segment(conv_id, hidden_in, start, end)
+            wire = runtime.encode_hidden(hidden_out)  # MLX computes the layers here
         except Exception as e:
             log.exception("compute_unit failed")
             return {"kind": "error", "error": str(e)}
         return {
             "kind": "compute_unit_out",
-            "hidden": runtime.encode_hidden(hidden_out),
+            "hidden": wire,
+            # So the head can tell this Mac's time from the network's
+            "compute_ms": round((time.perf_counter() - started) * 1000, 3),
         }
 
     async def _get_or_open_peer(self, peer_id: str, ticket: str) -> PeerConnection:
@@ -904,6 +910,9 @@ class Worker:
                     )
                 )
                 text, stats = result.text, result.stats
+                timing = getattr(forward_hidden, "timing", None)
+                if timing is not None:
+                    stats = {**stats, **timing.stats()}
             except Exception as e:
                 log.exception("delegate_turn failed")
                 return {"kind": "error", "error": str(e)}
@@ -942,26 +951,37 @@ class Worker:
             conn = await self._get_or_open_peer(peer_id, ticket)
             peer_conns.append((conn, start, end))
 
+        timing = ChainTiming(peers=len(peer_conns))
+
         async def forward_through_chain(hidden):
             # Our local segment first.
+            started = time.perf_counter()
             hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
             # Then each downstream chain segment.
-            for conn, start, end in peer_conns:
+            for i, (conn, start, end) in enumerate(peer_conns):
+                wire = runtime.encode_hidden(hidden)  # MLX computes our layers here
+                sent = time.perf_counter()
+                if i == 0:
+                    timing.here_ms += (sent - started) * 1000
                 resp = await conn.call(
                     "compute_unit",
                     model_id=model_id,
                     conv_id=conv_id,
                     layer_start=start,
                     layer_end=end,
-                    hidden=runtime.encode_hidden(hidden),
+                    hidden=wire,
                 )
                 if resp.get("kind") != "compute_unit_out":
                     raise RuntimeError(
                         f"compute_unit failed: {resp.get('error', resp)}"
                     )
+                timing.round_trip_ms[i] += (time.perf_counter() - sent) * 1000
+                timing.peer_compute_ms[i] += float(resp.get("compute_ms") or 0.0)
                 hidden = runtime.decode_hidden(resp["hidden"])
+            timing.passes += 1
             return hidden
 
+        forward_through_chain.timing = timing
         return forward_through_chain
 
     async def _build_chain_trimmer(self, *, conv_id: str, model_id: str, chain: list):
