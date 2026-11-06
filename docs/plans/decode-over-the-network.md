@@ -134,7 +134,9 @@ asyncio handoffs). Hidden states already go as raw bytes.
 
   Lookup alone needs no draft model, so every turn uses it, on one Mac too: there, answers that copy or
   edit came **2.55× faster** (one at a time 42 tok/s, lookup only 107), and general ones the same speed
-  with the same words. A draft model joins only when a turn crosses the network.
+  with the same words. A draft model joins only when a turn crosses the network. Through a real worker
+  and hub on one Mac, adding type hints to a 14-line function took 2.4 s instead of 2.9 s, same words: the
+  answer copied less of its input than the benchmark's (42 of 112 guesses kept).
 
   The kernel also takes a tied output layer (Qwen2.5's 152K-word projection, through
   `QuantizedEmbedding.as_linear`): 3.76 ms against 2.35 ms for five tokens.
