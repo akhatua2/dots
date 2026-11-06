@@ -102,7 +102,7 @@ def matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, group_s
                    output_shapes=[(tokens, n)], output_dtypes=[x.dtype])[0]
 
 
-def eligible(layer: nn.QuantizedLinear, x: mx.array) -> bool:
+def eligible(layer: "nn.QuantizedLinear | nn.QuantizedEmbedding", x: mx.array) -> bool:
     tokens = x.size // x.shape[-1]
     return (MIN_TOKENS <= tokens <= MAX_TOKENS and x.dtype in (mx.bfloat16, mx.float16) and layer.bits == 4
             and getattr(layer, "mode", "affine") == "affine" and "biases" in layer
@@ -111,14 +111,21 @@ def eligible(layer: nn.QuantizedLinear, x: mx.array) -> bool:
 
 
 _original_call = None
+_original_as_linear = None
 
 
 def install() -> bool:
-    """Route 2 to 5 token calls of large 4-bit layers through the kernel. Safe to call more than once."""
-    global _original_call
+    """Route 2 to 5 token calls of large 4-bit layers through the kernel. Safe to call more than once.
+
+    That covers the decoder's projections and, in models that tie their embeddings to the output (Qwen2.5
+    among them), the output layer: a vocabulary-sized multiply on the head Mac that MLX runs through
+    `QuantizedEmbedding.as_linear`.
+    """
+    global _original_call, _original_as_linear
     if _original_call is not None or os.environ.get("DOTS_SMALL_BATCH_KERNEL", "1") == "0":
         return _original_call is not None
     _original_call = nn.QuantizedLinear.__call__
+    _original_as_linear = nn.QuantizedEmbedding.as_linear
 
     def call(self, x):
         if not eligible(self, x):
@@ -130,5 +137,13 @@ def install() -> bool:
             y = y + self["bias"]
         return y
 
+    def as_linear(self, x):
+        if not eligible(self, x):
+            return _original_as_linear(self, x)
+        flat = x.reshape(-1, x.shape[-1])
+        y = matmul(flat, self["weight"], self["scales"], self["biases"], self.group_size)
+        return y.reshape(*x.shape[:-1], y.shape[-1])
+
     nn.QuantizedLinear.__call__ = call
+    nn.QuantizedEmbedding.as_linear = as_linear
     return True

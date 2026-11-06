@@ -29,10 +29,12 @@ if TYPE_CHECKING:
 class SpeculativeGeneration(GenerationStrategy):
     name = "speculative"
 
-    def __init__(self, draft: "BackendRuntime", draft_tokens: int = 4, adaptive: bool = False,
+    def __init__(self, draft: "BackendRuntime | None", draft_tokens: int = 4, adaptive: bool = False,
                  lookup: bool = False) -> None:
         if draft_tokens < 1:
             raise ValueError("draft_tokens must be at least 1")
+        if draft is None and not lookup:
+            raise ValueError("without a draft model, guesses can only be looked up")
         self.draft = draft
         self.k = draft_tokens
         # Adaptive: guess up to `draft_tokens`, fewer after a check that threw guesses away (a check
@@ -44,7 +46,7 @@ class SpeculativeGeneration(GenerationStrategy):
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         target, draft = request.runtime, self.draft
-        if not (target.supports_speculation and draft.supports_speculation):
+        if not (target.supports_speculation and (draft is None or draft.supports_speculation)):
             return await AutoregressiveGeneration().generate(request)
 
         conv = request.conv_id
@@ -52,7 +54,8 @@ class SpeculativeGeneration(GenerationStrategy):
         if prefill.logits_row is None:
             return GenerationResult(text="", stats={"prefill_tokens": 0, "decode_tokens": 0,
                                                     "prefill_ms": 0.0, "elapsed_ms": 0.0})
-        await draft.prefill(conv, request.history)
+        if draft is not None:
+            await draft.prefill(conv, request.history)
 
         out: list[int] = []
 
@@ -85,6 +88,8 @@ class SpeculativeGeneration(GenerationStrategy):
             from_lookup = len(proposal) >= 2
             if from_lookup:
                 looked_up += 1
+            elif draft is None:  # nothing to look up and no draft: this round is one token, as without guessing
+                proposal = []
             else:
                 # The draft proposes k tokens after `token`, feeding `token` and its own proposals as it goes.
                 proposal = []
@@ -94,7 +99,7 @@ class SpeculativeGeneration(GenerationStrategy):
                     fed = proposal[-1]
             n_guess = len(proposal)
             proposed += n_guess
-            if request.on_draft is not None:
+            if request.on_draft is not None and proposal:
                 # `token` isn't shown yet either: it is emitted once the pool has checked the proposal
                 await request.on_draft(_pending_text(target, out, _until_stop([token, *proposal], stop_ids)))
 
@@ -129,7 +134,9 @@ class SpeculativeGeneration(GenerationStrategy):
 
             # Keep exactly what was emitted. The big model was fed 1 + n_guess tokens.
             await _trim(target, request, conv, (1 + n_guess) - emitted)
-            if from_lookup:  # the draft sat this round out: it reads what was emitted, in one pass
+            if draft is None:
+                pass
+            elif from_lookup:  # the draft sat this round out: it reads what was emitted, in one pass
                 await draft.decode_many(conv, out[-emitted:])
             elif emitted <= n_guess:  # the draft was fed `token` and all but its last proposal
                 draft.trim(conv, n_guess - emitted)
@@ -147,7 +154,8 @@ class SpeculativeGeneration(GenerationStrategy):
             await request.on_token(tail)
         if request.on_draft is not None:
             await request.on_draft("")
-        draft.reset_conversation(conv)
+        if draft is not None:
+            draft.reset_conversation(conv)
         elapsed_ms = (time.perf_counter() - decode_start) * 1000
         return GenerationResult(
             text=target.decode_tokens(out),

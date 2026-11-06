@@ -1095,21 +1095,26 @@ class Worker:
 
     async def _generation_for(self, model_id: str, runtime: BackendRuntime, *, spans_macs: bool,
                               speculate: bool = True):
-        """Speculative decoding when the turn crosses the network and a fitting draft model is configured.
+        """How this turn writes: guessing ahead where it pays, one token at a time otherwise.
 
-        It saves round trips, not compute: on one Mac verifying a draft costs more than it saves
-        (scripts/bench_decode.py measured 0.6x at no latency, 1.35x at 50 ms and 1.76x at 100 ms with
-        four draft tokens). So a turn that stays on this Mac decodes one token at a time.
+        Guesses looked up in the conversation are free, so every turn uses them (scripts/bench_decode.py:
+        answers that copy or edit what they were given came 2.55x faster on one Mac, others the same).
+        A draft model's guesses cost a pass of the draft and a bigger check, which only pays when the
+        turn crosses the network (0.85x on one Mac, 1.26x at 25 ms, 1.47x at 50 ms), so it joins in then.
         """
-        draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
-        if not (speculate and spans_macs) or not draft_id or draft_id == model_id or not runtime.supports_speculation:
+        lookup = os.environ.get("DOTS_PROMPT_LOOKUP", "1") != "0"
+        if not speculate or not runtime.supports_speculation:
             return self.generation
-        draft = await self._load_draft(draft_id)
-        if draft is None or not same_tokenizer(draft, runtime):
+        draft = None
+        draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
+        if spans_macs and draft_id and draft_id != model_id:
+            draft = await self._load_draft(draft_id)
+            if draft is not None and not same_tokenizer(draft, runtime):
+                draft = None
+        if draft is None and not lookup:
             return self.generation
         return SpeculativeGeneration(draft, draft_tokens=int(os.environ.get("DOTS_DRAFT_TOKENS", "4")),
-                                     adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0",
-                                     lookup=os.environ.get("DOTS_PROMPT_LOOKUP", "1") != "0")
+                                     adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0", lookup=lookup)
 
     async def _load_draft(self, draft_id: str) -> BackendRuntime | None:
         """The draft model, loaded whole on this Mac the first time it is needed. None if it won't load."""

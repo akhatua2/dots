@@ -93,9 +93,10 @@ async def main() -> None:
     print(f"{'rtt ms':>6}  {'strategy':<14} {'tok/s':>7} {'speedup':>8} {'accepted':>9}  same output")
 
     prompts = EDIT_PROMPTS if args.prompts == "edit" else PROMPTS
-    variants = [(k, a, False) for k in args.k for a in ([False, True] if args.adaptive else [False])]
+    # (k, adaptive, lookup, with the draft model)
+    variants = [(k, a, False, True) for k in args.k for a in ([False, True] if args.adaptive else [False])]
     if args.lookup:
-        variants += [(k, True, True) for k in args.k]
+        variants += [(k, True, True, True) for k in args.k] + [(k, True, True, False) for k in args.k]
     for rtt in args.rtt:
         base_tokens = base_seconds = 0.0
         baseline_text = []
@@ -106,11 +107,12 @@ async def main() -> None:
             base_seconds += seconds
         base_rate = base_tokens / base_seconds
         print(f"{rtt:>6.0f}  {'one at a time':<14} {base_rate:>7.1f} {'1.00x':>8} {'':>9}")
-        for k, adaptive, lookup in variants:
+        for k, adaptive, lookup, with_draft in variants:
             tokens = seconds_total = proposed = accepted = 0.0
             same = True
             for i, prompt in enumerate(prompts):
-                strategy = SpeculativeGeneration(draft, draft_tokens=k, adaptive=adaptive, lookup=lookup)
+                strategy = SpeculativeGeneration(draft if with_draft else None, draft_tokens=k, adaptive=adaptive,
+                                                 lookup=lookup)
                 result, seconds = await run(strategy, target, host, prompt, rtt, args.max_tokens, f"s{i}")
                 same &= result.text == baseline_text[i]
                 tokens += result.stats["decode_tokens"]
@@ -118,8 +120,9 @@ async def main() -> None:
                 proposed += result.stats["draft_proposed"]
                 accepted += result.stats["draft_accepted"]
             rate = tokens / seconds_total
-            label = (f"lookup k<={k}" if lookup else f"draft k<={k}") if adaptive else f"draft k={k}"
-            print(f"{rtt:>6.0f}  {label:<14} {rate:>7.1f} {rate / base_rate:>7.2f}x "
+            label = ((f"lookup k<={k}" if with_draft else f"lookup only k<={k}") if lookup
+                     else f"draft k<={k}" if adaptive else f"draft k={k}")
+            print(f"{rtt:>6.0f}  {label:<18} {rate:>7.1f} {rate / base_rate:>7.2f}x "
                   f"{accepted / proposed:>8.0%}  {'yes' if same else 'NO'}")
 
 

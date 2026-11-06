@@ -132,6 +132,13 @@ asyncio handoffs). Hidden states already go as raw bytes.
 
   On general questions it changes nothing (0.73 against 0.72, 1.27 against 1.26).
 
+  Lookup alone needs no draft model, so every turn uses it, on one Mac too: there, answers that copy or
+  edit came **2.55× faster** (one at a time 42 tok/s, lookup only 107), and general ones the same speed
+  with the same words. A draft model joins only when a turn crosses the network.
+
+  The kernel also takes a tied output layer (Qwen2.5's 152K-word projection, through
+  `QuantizedEmbedding.as_linear`): 3.76 ms against 2.35 ms for five tokens.
+
 - **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
   plain speed per chain length and reports a drafted answer's speedup against it, slower included.
 

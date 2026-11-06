@@ -232,3 +232,15 @@ async def test_lookup_copies_from_the_conversation_with_the_same_tokens():
     assert with_lookup.text == without.text == expected.text
     assert with_lookup.stats["lookup_rounds"] > 0
     assert target_with.passes < target_without.passes / 2, "copying needs far fewer checks than a bad draft"
+
+
+async def test_lookup_alone_needs_no_draft_model():
+    plain = await AutoregressiveGeneration().generate(request(FakeModel(cycle_rule, prompt=tuple(CYCLE)), max_tokens=60))
+    target = FakeModel(cycle_rule, prompt=tuple(CYCLE))
+    result = await SpeculativeGeneration(None, draft_tokens=4, lookup=True).generate(request(target, max_tokens=60))
+    assert result.text == plain.text and result.stats["lookup_rounds"] > 0
+
+    other = FakeModel(target_rule)  # nothing repeats: every round is one token, as without guessing
+    expected = await AutoregressiveGeneration().generate(request(FakeModel(target_rule), max_tokens=30))
+    alone = await SpeculativeGeneration(None, lookup=True).generate(request(other, max_tokens=30))
+    assert alone.text == expected.text
