@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { loadConn, type Conn } from './lib/config'
+import { currentConn, subscribeConn, type Conn } from './lib/config'
 import { getCredits } from './lib/api'
 import { NoInvite } from './components/NoInvite'
 import { ContributePanel } from './components/ContributePanel'
@@ -12,17 +12,8 @@ import { cu } from './lib/format'
 type Panel = 'globe' | 'contribute' | null
 
 export default function App() {
-  const [conn, setConn] = useState<Conn | null>(() => loadConn())
+  const conn = useSyncExternalStore(subscribeConn, currentConn)
   const [panel, setPanel] = useState<Panel>(null)
-
-  useEffect(() => {
-    const onHash = () => {
-      const c = loadConn()
-      if (c) setConn(c)
-    }
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
 
   if (!conn) return <NoInvite />
 

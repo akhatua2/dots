@@ -38,11 +38,27 @@ final class WorkerProcess {
     }
 
     func stop() {
+        runningWith = nil  // first, so the exit below isn't taken for a crash
         if let process, process.isRunning { process.terminate() }
         process = nil
-        runningWith = nil
         try? FileManager.default.removeItem(atPath: pidFile)
     }
+
+    /// The worker exited while dots still wanted it lending (it crashed, or something else stopped it):
+    /// start it again after a pause, so a worker that keeps failing doesn't spin.
+    private func exited(_ p: Process) {
+        guard p === process, let wanted = runningWith, let command else { return }
+        process = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartDelay) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.process == nil, let current = self.runningWith,
+                      current.ticket == wanted.ticket, current.gb == wanted.gb else { return }
+                self.start(command: command, ticket: wanted.ticket, gb: wanted.gb)
+            }
+        }
+    }
+
+    private static let restartDelay: TimeInterval = 3
 
     /// A worker a previous run of dots started and couldn't stop (it was killed, or crashed) would lend
     /// on its own. Stop it, but only if that pid is still a dots worker.
@@ -70,6 +86,9 @@ final class WorkerProcess {
         p.currentDirectoryURL = URL(fileURLWithPath: home)
         p.standardOutput = FileHandle.nullDevice
         p.standardError = Self.logFile(in: home)
+        p.terminationHandler = { [weak self] ended in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.exited(ended) } }
+        }
         do {
             try p.run()
             process = p
