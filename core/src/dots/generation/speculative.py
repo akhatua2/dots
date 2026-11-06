@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 class SpeculativeGeneration(GenerationStrategy):
     name = "speculative"
 
-    def __init__(self, draft: "BackendRuntime", draft_tokens: int = 4, adaptive: bool = False) -> None:
+    def __init__(self, draft: "BackendRuntime", draft_tokens: int = 4, adaptive: bool = False,
+                 lookup: bool = False) -> None:
         if draft_tokens < 1:
             raise ValueError("draft_tokens must be at least 1")
         self.draft = draft
@@ -37,6 +38,9 @@ class SpeculativeGeneration(GenerationStrategy):
         # Adaptive: guess up to `draft_tokens`, fewer after a check that threw guesses away (a check
         # costs more the more it checks), more again after one that kept them all.
         self.adaptive = adaptive
+        # Lookup: when the last few tokens appeared earlier in the conversation, guess that what followed them
+        # then follows them now. Free, and right whenever an answer quotes, copies or edits what it was given.
+        self.lookup = lookup
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         target, draft = request.runtime, self.draft
@@ -71,15 +75,25 @@ class SpeculativeGeneration(GenerationStrategy):
             out.append(t)
 
         k = self.k
+        lookup = NGramLookup(prefill.context_ids) if self.lookup and prefill.context_ids else None
+        looked_up = 0
         while len(out) < request.max_tokens and token not in stop_ids:
             rounds += 1
-            # The draft proposes k tokens after `token`, feeding `token` and its own proposals as it goes.
-            proposal: list[int] = []
-            fed = token
-            for _ in range(k):
-                proposal.append(sample(draft, await draft.decode_one(conv, fed), out + [token] + proposal))
-                fed = proposal[-1]
-            proposed += k
+            if lookup is not None:
+                lookup.append(token)  # `token` is emitted this round whatever the check says
+            proposal = lookup.propose(self.k) if lookup is not None else []
+            from_lookup = len(proposal) >= 2
+            if from_lookup:
+                looked_up += 1
+            else:
+                # The draft proposes k tokens after `token`, feeding `token` and its own proposals as it goes.
+                proposal = []
+                fed = token
+                for _ in range(k):
+                    proposal.append(sample(draft, await draft.decode_one(conv, fed), out + [token] + proposal))
+                    fed = proposal[-1]
+            n_guess = len(proposal)
+            proposed += n_guess
             if request.on_draft is not None:
                 # `token` isn't shown yet either: it is emitted once the pool has checked the proposal
                 await request.on_draft(_pending_text(target, out, _until_stop([token, *proposal], stop_ids)))
@@ -95,7 +109,7 @@ class SpeculativeGeneration(GenerationStrategy):
                     break
                 matched.append(guess)
             if next_token is None:  # every proposal matched: the last row gives one more token for free
-                next_token = sample(target, rows[k], out + [token] + matched)
+                next_token = sample(target, rows[n_guess], out + [token] + matched)
 
             # Emit `token`, then the matched proposals, until a stop token or the length limit.
             await emit(token)
@@ -107,16 +121,21 @@ class SpeculativeGeneration(GenerationStrategy):
                 await emit(guess)
                 emitted += 1
             accepted_total += emitted - 1
+            if lookup is not None:
+                for t in out[len(out) - emitted + 1:]:
+                    lookup.append(t)
             if request.on_verified is not None:
-                await request.on_verified(emitted - 1, k)
+                await request.on_verified(emitted - 1, n_guess)
 
-            # Keep exactly what was emitted. The big model was fed 1 + k tokens; the draft was fed k.
-            await _trim(target, request, conv, (1 + k) - emitted)
-            if emitted <= k:
-                draft.trim(conv, k - emitted)
-            else:  # all k proposals kept: the draft never fed its last one, so it catches up
+            # Keep exactly what was emitted. The big model was fed 1 + n_guess tokens.
+            await _trim(target, request, conv, (1 + n_guess) - emitted)
+            if from_lookup:  # the draft sat this round out: it reads what was emitted, in one pass
+                await draft.decode_many(conv, out[-emitted:])
+            elif emitted <= n_guess:  # the draft was fed `token` and all but its last proposal
+                draft.trim(conv, n_guess - emitted)
+            else:  # all its proposals kept: it never fed its last one, so it catches up
                 await draft.decode_one(conv, proposal[-1])
-            if self.adaptive:
+            if self.adaptive and not from_lookup:
                 k = min(self.k, k + 1) if emitted > k else max(1, emitted)
 
             if stopped:
@@ -140,8 +159,39 @@ class SpeculativeGeneration(GenerationStrategy):
                 "verify_passes": rounds,
                 "draft_proposed": proposed,
                 "draft_accepted": accepted_total,
+                "lookup_rounds": looked_up,
             },
         )
+
+
+class NGramLookup:
+    """Where each short run of tokens last appeared, kept as tokens arrive, to guess what follows it again.
+
+    `propose` looks up the last three tokens (then two) and returns what followed their latest earlier
+    appearance: one dictionary lookup a size, however long the conversation.
+    """
+
+    def __init__(self, tokens: list[int], sizes: tuple[int, ...] = (3, 2)) -> None:
+        self.tokens: list[int] = []
+        self.sizes = sizes
+        self.seen: dict[tuple[int, ...], int] = {}
+        for t in tokens:
+            self.append(t)
+
+    def append(self, token: int) -> None:
+        # The runs ending at the current last token get a continuation now, so they can be looked back to
+        for n in self.sizes:
+            if len(self.tokens) >= n:
+                self.seen[tuple(self.tokens[-n:])] = len(self.tokens) - n
+        self.tokens.append(token)
+
+    def propose(self, k: int) -> list[int]:
+        for n in self.sizes:
+            if len(self.tokens) >= n:
+                start = self.seen.get(tuple(self.tokens[-n:]))
+                if start is not None:
+                    return self.tokens[start + n:start + n + k]
+        return []
 
 
 def _until_stop(tokens: list[int], stop_ids: set[int]) -> list[int]:

@@ -48,7 +48,7 @@ class FakeModel:
 
         self.passes += 1
         self.caches[conv] = list(self.prompt)
-        return PrefillOutput(self._row(self.caches[conv]), len(self.prompt), 0.0)
+        return PrefillOutput(self._row(self.caches[conv]), len(self.prompt), 0.0, context_ids=list(self.prompt))
 
     async def decode_one(self, conv, token, *, forward_hidden=None):
         self.passes += 1
@@ -195,3 +195,40 @@ async def test_adaptive_guesses_fewer_after_misses():
     await SpeculativeGeneration(draft, draft_tokens=6, adaptive=True).generate(
         request(target, max_tokens=20, on_verified=on_verified))
     assert sizes[0] == 6 and set(sizes[1:]) == {1}, "after a miss it guesses one token at a time"
+
+
+def test_lookup_finds_what_followed_the_last_tokens_before():
+    from dots.generation.speculative import NGramLookup
+
+    look = NGramLookup([1, 2, 3, 4, 5, 9, 2, 3])
+    assert look.propose(3) == [4, 5, 9], "2, 3 was followed by 4, 5, 9"
+    look.append(4)
+    assert look.propose(2) == [5, 9], "the longest match wins: 2, 3, 4"
+    assert NGramLookup([1, 2, 3]).propose(4) == [], "nothing repeats yet"
+
+
+CYCLE = [5, 7, 9, 11]
+
+
+def cycle_rule(fed: list[int]) -> int:
+    """Repeats the prompt's pattern, then stops: an answer that copies what it was given."""
+    return STOP if len(fed) >= 40 else CYCLE[len(fed) % len(CYCLE)]
+
+
+async def test_lookup_copies_from_the_conversation_with_the_same_tokens():
+    plain_target = FakeModel(cycle_rule, prompt=tuple(CYCLE))
+    expected = await AutoregressiveGeneration().generate(request(plain_target, max_tokens=60))
+
+    def run(lookup: bool):
+        target = FakeModel(cycle_rule, prompt=tuple(CYCLE))
+        draft = FakeModel(lambda fed: 3, prompt=tuple(CYCLE))  # a draft that is always wrong
+        return target, SpeculativeGeneration(draft, draft_tokens=4, lookup=lookup).generate(
+            request(target, max_tokens=60))
+
+    target_without, without = run(False)
+    without = await without
+    target_with, with_lookup = run(True)
+    with_lookup = await with_lookup
+    assert with_lookup.text == without.text == expected.text
+    assert with_lookup.stats["lookup_rounds"] > 0
+    assert target_with.passes < target_without.passes / 2, "copying needs far fewer checks than a bad draft"

@@ -120,6 +120,18 @@ asyncio handoffs). Hidden states already go as raw bytes.
   light" where one-at-a-time said "the shorter blue wavelengths". Both are the big model's choice; neither
   is more right. `DOTS_SMALL_BATCH_KERNEL=0` turns it off.
 
+- **Guesses looked up in the conversation**, on by default (`DOTS_PROMPT_LOOKUP=0` turns it off). When
+  the last two or three tokens appeared earlier, what followed them then is the guess, for free; the
+  draft model guesses otherwise and catches up in one pass. On answers that copy what they were given
+  (`bench_decode.py --prompts edit`), with adaptive drafting up to four:
+
+  | Round trip | Draft model | With lookup |
+  |---|---|---|
+  | 0 ms | 0.98× | 1.17× |
+  | 25 ms | 1.97× | 2.36× |
+
+  On general questions it changes nothing (0.73 against 0.72, 1.27 against 1.26).
+
 - **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
   plain speed per chain length and reports a drafted answer's speedup against it, slower included.
 

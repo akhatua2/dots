@@ -1108,7 +1108,8 @@ class Worker:
         if draft is None or not same_tokenizer(draft, runtime):
             return self.generation
         return SpeculativeGeneration(draft, draft_tokens=int(os.environ.get("DOTS_DRAFT_TOKENS", "4")),
-                                     adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0")
+                                     adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0",
+                                     lookup=os.environ.get("DOTS_PROMPT_LOOKUP", "1") != "0")
 
     async def _load_draft(self, draft_id: str) -> BackendRuntime | None:
         """The draft model, loaded whole on this Mac the first time it is needed. None if it won't load."""

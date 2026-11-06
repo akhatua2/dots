@@ -448,7 +448,7 @@ class MlxBackendRuntime(BackendRuntime):
         logits = host._project_logits(hidden[:, -1:, :])
         prefill_ms = (time.perf_counter() - t0) * 1000
         host._token_counts[conv_id] = already_seen + len(new_ids)
-        return PrefillOutput(logits[0, -1], len(new_ids), prefill_ms)
+        return PrefillOutput(logits[0, -1], len(new_ids), prefill_ms, context_ids=list(full_ids))
 
     async def decode_one(
         self,

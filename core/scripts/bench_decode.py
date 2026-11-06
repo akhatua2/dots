@@ -21,6 +21,17 @@ PROMPTS = [
     "List five practical uses for a spare laptop, one line each.",
 ]
 
+# Answers that copy what they were given: where looking the next words up in the conversation pays
+EDIT_PROMPTS = [
+    "Add type hints to this function and change nothing else:\n\n"
+    "def merge(left, right):\n    out = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n"
+    "        if left[i] <= right[j]:\n            out.append(left[i])\n            i += 1\n        else:\n"
+    "            out.append(right[j])\n            j += 1\n    out.extend(left[i:])\n    out.extend(right[j:])\n"
+    "    return out",
+    "Rewrite this paragraph in British spelling and change nothing else: The color of the organization's "
+    "logo was analyzed by the program, which then optimized the center of the design to minimize gray areas.",
+]
+
 
 def build(repo: str):
     from mlx_lm import load
@@ -69,6 +80,8 @@ async def main() -> None:
     p.add_argument("--k", type=int, nargs="+", default=[2, 4, 6], help="draft lengths to try")
     p.add_argument("--max-tokens", type=int, default=96)
     p.add_argument("--adaptive", action="store_true", help="also try adaptive draft lengths, up to each k")
+    p.add_argument("--lookup", action="store_true", help="also try looking guesses up in the conversation")
+    p.add_argument("--prompts", choices=["general", "edit"], default="general")
     args = p.parse_args()
 
     from dots.generation.autoregressive import AutoregressiveGeneration
@@ -79,29 +92,33 @@ async def main() -> None:
     print(f"target {args.target} ({host.n_layers} layers, split in two)   draft {args.draft}")
     print(f"{'rtt ms':>6}  {'strategy':<14} {'tok/s':>7} {'speedup':>8} {'accepted':>9}  same output")
 
+    prompts = EDIT_PROMPTS if args.prompts == "edit" else PROMPTS
+    variants = [(k, a, False) for k in args.k for a in ([False, True] if args.adaptive else [False])]
+    if args.lookup:
+        variants += [(k, True, True) for k in args.k]
     for rtt in args.rtt:
         base_tokens = base_seconds = 0.0
         baseline_text = []
-        for i, prompt in enumerate(PROMPTS):
+        for i, prompt in enumerate(prompts):
             result, seconds = await run(AutoregressiveGeneration(), target, host, prompt, rtt, args.max_tokens, f"b{i}")
             baseline_text.append(result.text)
             base_tokens += result.stats["decode_tokens"]
             base_seconds += seconds
         base_rate = base_tokens / base_seconds
         print(f"{rtt:>6.0f}  {'one at a time':<14} {base_rate:>7.1f} {'1.00x':>8} {'':>9}")
-        for k, adaptive in [(k, a) for k in args.k for a in ([False, True] if args.adaptive else [False])]:
+        for k, adaptive, lookup in variants:
             tokens = seconds_total = proposed = accepted = 0.0
             same = True
-            for i, prompt in enumerate(PROMPTS):
-                result, seconds = await run(SpeculativeGeneration(draft, draft_tokens=k, adaptive=adaptive), target,
-                                            host, prompt, rtt, args.max_tokens, f"s{i}")
+            for i, prompt in enumerate(prompts):
+                strategy = SpeculativeGeneration(draft, draft_tokens=k, adaptive=adaptive, lookup=lookup)
+                result, seconds = await run(strategy, target, host, prompt, rtt, args.max_tokens, f"s{i}")
                 same &= result.text == baseline_text[i]
                 tokens += result.stats["decode_tokens"]
                 seconds_total += seconds
                 proposed += result.stats["draft_proposed"]
                 accepted += result.stats["draft_accepted"]
             rate = tokens / seconds_total
-            label = f"draft k<={k}" if adaptive else f"draft k={k}"
+            label = (f"lookup k<={k}" if lookup else f"draft k<={k}") if adaptive else f"draft k={k}"
             print(f"{rtt:>6.0f}  {label:<14} {rate:>7.1f} {rate / base_rate:>7.2f}x "
                   f"{accepted / proposed:>8.0%}  {'yes' if same else 'NO'}")
 

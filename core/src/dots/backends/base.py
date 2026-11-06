@@ -74,6 +74,9 @@ class PrefillOutput:
     logits_row: Any | None
     prefill_tokens: int
     prefill_ms: float
+    # The whole conversation as tokens, when the backend has them: speculative decoding looks for its next
+    # words in it before asking a draft model
+    context_ids: list[int] | None = None
 
 
 class BackendRuntime(ABC):
