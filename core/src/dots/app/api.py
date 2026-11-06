@@ -64,6 +64,16 @@ def _querier(request: web.Request) -> str:
     return named if _ACCOUNT_ID.match(named) else _API_ACCOUNT
 
 
+def _template_kwargs(body: dict) -> dict:
+    """Options for the model's chat template. A request can pass them as vLLM does, in
+    `chat_template_kwargs`; without `enable_thinking` there, the hub's DOTS_THINKING setting decides (off by
+    default: a thinking model answers straight away instead of writing out its reasoning first)."""
+    given = body.get("chat_template_kwargs")
+    kwargs = dict(given) if isinstance(given, dict) else {}
+    kwargs.setdefault("enable_thinking", os.environ.get("DOTS_THINKING", "0") == "1")
+    return kwargs
+
+
 def _speculate(request: web.Request) -> bool:
     """`X-Dots-Speculate: off` asks for one-token-at-a-time decoding, to compare against a draft model."""
     return request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
@@ -315,6 +325,7 @@ class HttpApi:
         conv = Conversation(id=f"http-{uuid.uuid4()}")
         conv.history = list(messages)
         conv.token_count = 0
+        conv.template_kwargs = _template_kwargs(body)
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created_at = int(time.time())

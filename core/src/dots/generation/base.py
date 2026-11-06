@@ -20,6 +20,8 @@ class GenerationRequest:
     runtime: "BackendRuntime"
     conv_id: str
     history: list[dict]
+    # Passed to the model's chat template: {"enable_thinking": False} keeps a thinking model to the answer
+    template_kwargs: dict | None = None
     max_tokens: int = 256
     temperature: float = 0.7
     on_token: TokenCallback | None = None

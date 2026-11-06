@@ -120,7 +120,10 @@ class BackendRuntime(ABC):
         history: list[dict],
         *,
         forward_hidden: ForwardHidden | None = None,
-    ) -> PrefillOutput: ...
+        template_kwargs: dict | None = None,
+    ) -> PrefillOutput:
+        """Feeds the conversation's new tokens. `template_kwargs` go to the model's chat template
+        (`enable_thinking`, say)."""
 
     @abstractmethod
     async def decode_one(

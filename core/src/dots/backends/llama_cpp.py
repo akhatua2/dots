@@ -76,6 +76,7 @@ class LlamaCppBackendRuntime(BackendRuntime):
         history: list[dict],
         *,
         forward_hidden: ForwardHidden | None = None,
+        template_kwargs: dict | None = None,
     ) -> PrefillOutput:
         raise RuntimeError("llama.cpp backend execution is not implemented yet")
 

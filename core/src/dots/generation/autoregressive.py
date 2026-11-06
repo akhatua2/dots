@@ -16,6 +16,7 @@ class AutoregressiveGeneration(GenerationStrategy):
             request.conv_id,
             request.history,
             forward_hidden=request.forward_hidden,
+            template_kwargs=request.template_kwargs,
         )
         if prefill.logits_row is None:
             return GenerationResult(

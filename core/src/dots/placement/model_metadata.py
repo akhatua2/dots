@@ -7,6 +7,8 @@ counts for layer/head placement.
 
 from __future__ import annotations
 
+from .tensor_names import EMBED_TENSOR, FINAL_NORM_TENSOR, OUTPUT_TENSOR, VISION_TENSOR, layer_index
+
 import glob
 import json
 import logging
@@ -270,16 +272,18 @@ def _geometry_from_tensor_sizes(
 
     for name, size_bytes in tensors:
         saw_tensor = True
-        layer_idx = _layer_index(name)
+        layer_idx = layer_index(name)
         if layer_idx is not None and 0 <= layer_idx < base.n_layers:
             layer_bytes[layer_idx] += size_bytes
-        elif name.startswith("model.embed_tokens."):
+        elif EMBED_TENSOR.match(name):
             embed_bytes += size_bytes
-        elif name.startswith("lm_head."):
+        elif OUTPUT_TENSOR.match(name):
             lm_head_bytes += size_bytes
-        elif name.startswith("model.norm."):
+        elif FINAL_NORM_TENSOR.match(name):
             head_extra_bytes += size_bytes
-        elif not name.startswith("model.layers."):
+        elif VISION_TENSOR.match(name):
+            continue  # serving text, the vision encoder isn't loaded
+        elif layer_idx is None:
             # Small root-level tensors are needed by the head path in
             # current MLX partial loading. Count them instead of losing
             # bytes silently.
@@ -320,15 +324,3 @@ def _tensor_size_bytes(info: Any) -> int | None:
     if offsets and len(offsets) == 2:
         return int(offsets[1]) - int(offsets[0])
     return None
-
-
-def _layer_index(name: str) -> int | None:
-    if not name.startswith("model.layers."):
-        return None
-    parts = name.split(".", 3)
-    if len(parts) < 3:
-        return None
-    try:
-        return int(parts[2])
-    except ValueError:
-        return None

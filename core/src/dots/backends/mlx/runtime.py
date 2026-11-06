@@ -141,6 +141,17 @@ def _active_params(model) -> int:
         return 0
 
 
+def _layer_mask(hidden, cache):
+    """A layer's mask, from the kind of state it keeps: a per-token cache gets the attention mask (its
+    `make_mask` handles a sliding window), a running state (linear attention, convolution) the SSM one."""
+    from mlx_lm.models.base import create_attention_mask, create_ssm_mask
+    from mlx_lm.models.cache import ArraysCache
+
+    if isinstance(cache, ArraysCache):
+        return create_ssm_mask(hidden, cache)
+    return create_attention_mask(hidden, cache)
+
+
 class FullModelHost:
     """Owns a loaded model + tokenizer and serves chat turns.
 
@@ -151,8 +162,20 @@ class FullModelHost:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        self.n_layers = len(model.model.layers)
+        from .layout import final_norm_name, output_owner, text_model
+
+        self.text = text_model(model)
+        self.layers = self.text.layers
+        self.embed = self.text.embed_tokens
+        self.norm = getattr(self.text, final_norm_name(self.text))
+        # The output layer: its own, or the embedding read backwards when the two are tied
+        self._output = getattr(output_owner(model), "lm_head", None)
+        self.n_layers = len(self.layers)
         self.active_params = _active_params(model)
+        # Checking a draft rolls the cache back. Per-token caches can; a running state (linear attention,
+        # convolution) can't be un-mixed, so those models decode one token at a time.
+        self.can_rewind = all(callable(getattr(c, "is_trimmable", None)) and c.is_trimmable()
+                              for c in make_prompt_cache(model))
         self._caches: dict[str, list] = {}
         # Tokens already advanced through the cache for each conversation.
         # Next turn's prefill skips the prefix this number long, so a
@@ -180,15 +203,14 @@ class FullModelHost:
         return cache
 
     def _project_logits(self, hidden_last):
-        if self.model.args.tie_word_embeddings:
-            return self.model.model.embed_tokens.as_linear(hidden_last)
-        return self.model.lm_head(hidden_last)
+        if self._output is None or getattr(getattr(self.model, "args", None), "tie_word_embeddings", False):
+            return self.embed.as_linear(hidden_last)
+        return self._output(hidden_last)
 
     def _forward(self, ids_arr, cache):
-        hidden = self.model.model.embed_tokens(ids_arr)
+        hidden = self.embed(ids_arr)
         hidden = self._forward_layers(hidden, cache, 0, self.n_layers)
-        hidden = self.model.model.norm(hidden)
-        return hidden
+        return self.norm(hidden)
 
     def _forward_layers(self, hidden, cache, start: int, end: int):
         """Run a contiguous slice of decoder layers `[start, end)` on
@@ -199,10 +221,13 @@ class FullModelHost:
         assigned to this worker, with the caller handling embedding /
         final norm / sampling.
         """
-        cache_slice = cache[start:end]
-        mask = create_attention_mask(hidden, cache_slice)
-        for offset, layer in enumerate(self.model.model.layers[start:end]):
-            hidden = layer(hidden, mask=mask, cache=cache_slice[offset])
+        # Each layer gets the mask for the kind of state it keeps; layers of a kind share one
+        masks: dict[type, object] = {}
+        for layer, layer_cache in zip(self.layers[start:end], cache[start:end]):
+            kind = type(layer_cache)
+            if kind not in masks:
+                masks[kind] = _layer_mask(hidden, layer_cache)
+            hidden = layer(hidden, masks[kind], cache=layer_cache)
         return hidden
 
     def forward_segment(self, conv_id: str, hidden, start: int, end: int):
@@ -428,11 +453,13 @@ class MlxBackendRuntime(BackendRuntime):
         history: list[dict],
         *,
         forward_hidden: ForwardHidden | None = None,
+        template_kwargs: dict | None = None,
     ) -> PrefillOutput:
         host = self._require_host()
         full_ids = host.tokenizer.apply_chat_template(
             history,
             add_generation_prompt=True,
+            **(template_kwargs or {}),
         )
         already_seen = host._token_counts.get(conv_id, 0)
         if already_seen > len(full_ids):
@@ -443,9 +470,9 @@ class MlxBackendRuntime(BackendRuntime):
             return PrefillOutput(None, 0, 0.0)
 
         t0 = time.perf_counter()
-        hidden = host.model.model.embed_tokens(array([new_ids]))
+        hidden = host.embed(array([new_ids]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=1)  # only the last row picks a token
-        hidden = host.model.model.norm(hidden)
+        hidden = host.norm(hidden)
         logits = host._project_logits(hidden[:, -1:, :])
         prefill_ms = (time.perf_counter() - t0) * 1000
         host._token_counts[conv_id] = already_seen + len(new_ids)
@@ -459,16 +486,16 @@ class MlxBackendRuntime(BackendRuntime):
         forward_hidden: ForwardHidden | None = None,
     ):
         host = self._require_host()
-        hidden = host.model.model.embed_tokens(array([[token]]))
+        hidden = host.embed(array([[token]]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
-        hidden = host.model.model.norm(hidden)
+        hidden = host.norm(hidden)
         logits = host._project_logits(hidden[:, -1:, :])
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + 1
         return logits[0, -1]
 
     @property
     def supports_speculation(self) -> bool:
-        return True
+        return self.host is None or self.host.can_rewind
 
     async def propose(self, conv_id: str, token: int, k: int) -> list[int]:
         """k greedy guesses as one lazy graph: each guess feeds the next on the GPU, and they are read
@@ -479,9 +506,9 @@ class MlxBackendRuntime(BackendRuntime):
         fed = array([[token]])
         guesses = []
         for _ in range(k):
-            hidden = host.model.model.embed_tokens(fed)
+            hidden = host.embed(fed)
             hidden = await self._forward_hidden(conv_id, hidden, None)
-            logits = host._project_logits(host.model.model.norm(hidden)[:, -1:, :])
+            logits = host._project_logits(host.norm(hidden)[:, -1:, :])
             fed = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
             guesses.append(fed)
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + k
@@ -502,9 +529,9 @@ class MlxBackendRuntime(BackendRuntime):
         verifying a draft cheaper than decoding its tokens one by one.
         """
         host = self._require_host()
-        hidden = host.model.model.embed_tokens(array([tokens]))
+        hidden = host.embed(array([tokens]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
-        hidden = host.model.model.norm(hidden)
+        hidden = host.norm(hidden)
         logits = host._project_logits(hidden)
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + len(tokens)
         return logits[0]

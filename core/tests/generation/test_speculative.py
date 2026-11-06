@@ -43,7 +43,7 @@ class FakeModel:
         row[self.rule(fed)] = 1.0
         return row
 
-    async def prefill(self, conv, history, *, forward_hidden=None):
+    async def prefill(self, conv, history, *, forward_hidden=None, template_kwargs=None):
         from dots.backends.base import PrefillOutput
 
         self.passes += 1

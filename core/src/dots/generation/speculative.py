@@ -50,12 +50,13 @@ class SpeculativeGeneration(GenerationStrategy):
             return await AutoregressiveGeneration().generate(request)
 
         conv = request.conv_id
-        prefill = await target.prefill(conv, request.history, forward_hidden=request.forward_hidden)
+        prefill = await target.prefill(conv, request.history, forward_hidden=request.forward_hidden,
+                                       template_kwargs=request.template_kwargs)
         if prefill.logits_row is None:
             return GenerationResult(text="", stats={"prefill_tokens": 0, "decode_tokens": 0,
                                                     "prefill_ms": 0.0, "elapsed_ms": 0.0})
         if draft is not None:
-            await draft.prefill(conv, request.history)
+            await draft.prefill(conv, request.history, template_kwargs=request.template_kwargs)
 
         out: list[int] = []
 

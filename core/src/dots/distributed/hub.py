@@ -108,6 +108,8 @@ class Conversation:
     id: str
     history: list[dict] = field(default_factory=list)
     token_count: int = 0
+    # For the model's chat template, as vLLM takes them: {"enable_thinking": False}
+    template_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1534,6 +1536,7 @@ class Hub:
                 max_tokens=max_new_tokens,
                 temperature=temperature,
                 speculate=speculate,
+                template_kwargs=conv.template_kwargs,
             )
             if chain_payload:
                 call_payload["my_layer_end"] = my_layer_end

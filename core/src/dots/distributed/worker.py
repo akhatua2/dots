@@ -902,6 +902,7 @@ class Worker:
 
         conv_id = msg["conv_id"]
         history = msg["history"]
+        template_kwargs = msg.get("template_kwargs") or None
         max_tokens = int(msg.get("max_tokens", 256))
         temperature = float(msg.get("temperature", 0.7))
         # Optional multi-worker chain spec. Empty / missing = single-worker
@@ -970,6 +971,7 @@ class Worker:
                         runtime=runtime,
                         conv_id=conv_id,
                         history=history,
+                        template_kwargs=template_kwargs,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         on_token=on_token,
