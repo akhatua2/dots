@@ -156,6 +156,41 @@ def _layer_mask(hidden, cache, as_array: bool):
     return create_attention_mask(hidden, cache, return_array=as_array)
 
 
+# The most tokens a running state can be rolled back: a check of up to eight guesses and the token before
+MAX_REWIND = 9
+
+
+def _running_state(cache) -> bool:
+    """A layer state that summarizes every token so far (linear attention, convolution), not one entry each."""
+    from mlx_lm.models.cache import ArraysCache
+
+    return isinstance(cache, ArraysCache)
+
+
+def _sliding_window(cache) -> bool:
+    from mlx_lm.models.cache import RotatingKVCache
+
+    return isinstance(cache, RotatingKVCache)
+
+
+def _snapshot(cache):
+    """A running state as it is now. The arrays are kept by reference (a step replaces them, never edits
+    them); the list holding them is copied, since a step does change the list."""
+    arrays, left_padding, lengths = cache.state
+    return list(arrays), left_padding, lengths
+
+
+def _restore(cache, snapshot) -> None:
+    arrays, left_padding, lengths = snapshot
+    cache.state = (list(arrays), left_padding, lengths)
+
+
+def _concat(parts):
+    import mlx.core as mx
+
+    return mx.concatenate(parts, axis=1)
+
+
 def _wants_array_mask(text) -> bool:
     """Whether the model's own forward pass asks for an array mask, as DeepSeek-style attention does.
     Read from its code once, so a model family needs no entry in a list here."""
@@ -188,11 +223,17 @@ class FullModelHost:
         self._output = getattr(output_owner(model), "lm_head", None)
         self.n_layers = len(self.layers)
         self.active_params = _active_params(model)
-        # Checking a draft rolls the cache back. Per-token caches can; a running state (linear attention,
-        # convolution) can't be un-mixed, so those models decode one token at a time.
-        self.can_rewind = all(callable(getattr(c, "is_trimmable", None)) and c.is_trimmable()
+        # Checking a draft rolls the cache back. A per-token cache drops its last entries. A running state
+        # (linear attention, convolution) can't be un-mixed, so for short passes it is kept token by token
+        # (see `_run_keeping_states`) and rolled back to the state from before the rejected tokens.
+        # A sliding window overwrites its buffer in place once full, so it can't be rolled back after that:
+        # those models decode one token at a time.
+        self.can_rewind = all(_running_state(c) or (callable(getattr(c, "is_trimmable", None)) and c.is_trimmable()
+                                                    and not _sliding_window(c))
                               for c in make_prompt_cache(model))
         self._caches: dict[str, list] = {}
+        # conv id -> layer index -> the running states after each of the last few tokens, oldest first
+        self._states: dict[str, dict[int, list]] = {}
         # Tokens already advanced through the cache for each conversation.
         # Next turn's prefill skips the prefix this number long, so a
         # multi-turn chat doesn't re-prefill the whole history every turn.
@@ -201,14 +242,29 @@ class FullModelHost:
     def reset_conversation(self, conv_id: str) -> None:
         self._caches.pop(conv_id, None)
         self._token_counts.pop(conv_id, None)
+        self._states.pop(conv_id, None)
 
     def trim(self, conv_id: str, n: int) -> None:
-        """Rolls the conversation's KV cache back by `n` tokens (a draft's rejected tail)."""
+        """Rolls the conversation's cache back by `n` tokens (a draft's rejected tail): per-token caches
+        drop their last entries, running states go back to the one kept from before those tokens."""
         if n <= 0:
             return
         cache = self._caches.get(conv_id)
         if cache is not None:
-            trim_prompt_cache(cache, n)
+            kept = self._states.get(conv_id, {})
+            for i, c in enumerate(cache):
+                if _running_state(c):
+                    history = kept.get(i)
+                    if history is None:
+                        continue  # a layer another Mac runs: its state was never filled here
+                    if len(history) <= n:
+                        raise RuntimeError(f"can't roll a running state back {n} tokens; it keeps {len(history) - 1}")
+                    _restore(c, history[-n - 1])
+                    del history[-n:]
+                else:
+                    if not c.is_trimmable():  # a sliding window that has already wrapped
+                        raise RuntimeError("this cache can't be rolled back any more")
+                    c.trim(n)
         self._token_counts[conv_id] = max(0, self._token_counts.get(conv_id, 0) - n)
 
     def _get_cache(self, conv_id: str):
@@ -228,7 +284,7 @@ class FullModelHost:
         hidden = self._forward_layers(hidden, cache, 0, self.n_layers)
         return self.norm(hidden)
 
-    def _forward_layers(self, hidden, cache, start: int, end: int):
+    def _forward_layers(self, hidden, cache, start: int, end: int, conv_id: str | None = None):
         """Run a contiguous slice of decoder layers `[start, end)` on
         `hidden`. The cache slice tracks the per-layer KV state for the
         same range.
@@ -239,12 +295,36 @@ class FullModelHost:
         """
         # Each layer gets the mask for the kind of state it keeps; layers of a kind share one
         masks: dict[type, object] = {}
-        for layer, layer_cache in zip(self.layers[start:end], cache[start:end]):
+        for index in range(start, end):
+            layer, layer_cache = self.layers[index], cache[index]
+            if conv_id is not None and _running_state(layer_cache):
+                hidden = self._run_keeping_states(layer, layer_cache, hidden, self._states.setdefault(conv_id, {}), index)
+                continue
             kind = type(layer_cache)
             if kind not in masks:
                 masks[kind] = _layer_mask(hidden, layer_cache, self._array_masks)
             hidden = layer(hidden, masks[kind], cache=layer_cache)
         return hidden
+
+    def _run_keeping_states(self, layer, layer_cache, hidden, kept: dict[int, list], index: int):
+        """A running-state layer over `hidden`, keeping its state after each token so a check can be rolled
+        back. A pass short enough to be a check goes a token at a time (the state after each is a reference,
+        not a copy: MLX arrays don't change in place); a prompt goes whole and keeps only where it ended."""
+        history = kept.setdefault(index, [])
+        tokens = hidden.shape[1]
+        if tokens > MAX_REWIND:
+            hidden = layer(hidden, _layer_mask(hidden, layer_cache, self._array_masks), cache=layer_cache)
+            history[:] = [_snapshot(layer_cache)]
+            return hidden
+        if not history:
+            history.append(_snapshot(layer_cache))
+        outputs = []
+        for t in range(tokens):
+            step = hidden[:, t:t + 1]
+            outputs.append(layer(step, _layer_mask(step, layer_cache, self._array_masks), cache=layer_cache))
+            history.append(_snapshot(layer_cache))
+        del history[:-MAX_REWIND - 1]
+        return outputs[0] if tokens == 1 else _concat(outputs)
 
     def forward_segment(self, conv_id: str, hidden, start: int, end: int):
         """Run `hidden` through layer range `[start, end)` for `conv_id`.
@@ -254,7 +334,7 @@ class FullModelHost:
         just forward through their layer slice.
         """
         cache = self._get_cache(conv_id)
-        return self._forward_layers(hidden, cache, start, end)
+        return self._forward_layers(hidden, cache, start, end, conv_id=conv_id)
 
     async def run_turn(
         self,

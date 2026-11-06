@@ -6,7 +6,7 @@ model runs locally, as it would on the head Mac. Output is checked token for tok
 decoding, so a speedup is never bought with a different answer.
 
     uv run python scripts/bench_decode.py
-    uv run python scripts/bench_decode.py --target mlx-community/Qwen2.5-3B-Instruct-4bit --rtt 0 25 50 100
+    uv run python scripts/bench_decode.py --target mlx-community/Qwen3.5-4B-MLX-4bit --rtt 0 25 50 100
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ async def run(strategy, runtime, host, prompt: str, rtt_ms: float, max_tokens: i
     runtime.reset_conversation(conv_id)
     request = GenerationRequest(runtime=runtime, conv_id=conv_id, history=[{"role": "user", "content": prompt}],
                                 max_tokens=max_tokens, temperature=0.0, repetition_penalty=1.0,
+                                template_kwargs={"enable_thinking": False},
                                 forward_hidden=split_pool(host, conv_id, rtt_ms))
     t0 = time.perf_counter()
     result = await strategy.generate(request)
@@ -74,8 +75,8 @@ async def run(strategy, runtime, host, prompt: str, rtt_ms: float, max_tokens: i
 
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--target", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
-    p.add_argument("--draft", default="mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+    p.add_argument("--target", default="mlx-community/Qwen3.5-2B-MLX-4bit")
+    p.add_argument("--draft", default="mlx-community/Qwen3.5-0.8B-4bit")
     p.add_argument("--rtt", type=float, nargs="+", default=[0, 20, 50, 100], help="round trips to simulate, in ms")
     p.add_argument("--k", type=int, nargs="+", default=[2, 4, 6], help="draft lengths to try")
     p.add_argument("--max-tokens", type=int, default=96)

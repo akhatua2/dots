@@ -33,21 +33,29 @@ inputs) fail too.
 
 Testing uses Qwen3.5 0.8B, and Qwen3.5 2B to split.
 
+**Guessing ahead works on them too.** A running state (linear attention, convolution) can't be rolled
+back by dropping tokens, so for a pass short enough to be a check those layers go a token at a time and
+keep the state after each (a reference, not a copy); a rejected guess puts the state back. Sliding-window
+models (gpt-oss) still decode one token at a time: their window is overwritten in place once full. Qwen3.5
+2B checked by Qwen3.5 0.8B (`bench_decode.py`, adaptive, up to four guesses):
+
+| Prompts | Round trip | Draft model | Lookup only |
+|---|---|---|---|
+| edit | 0 ms | 0.85× | 1.44× |
+| edit | 25 ms | 2.06× | 1.48× |
+| general | 0 ms | 0.93× | 0.97× |
+| general | 25 ms | 1.30× | 0.99× |
+
 ## Next
 
-1. **Guessing ahead on the newest models.** Linear-attention and convolution layers keep a running
-   state that can't be rolled back by dropping tokens, so these models decode one token at a time.
-   MLX arrays are immutable, so keeping the state from before a check costs nothing; what's missing is
-   the state after each accepted guess. Options: have the check return per-position states (a change to
-   the gated-delta kernel), or re-run the accepted tokens through those layers only.
-2. **Their own drafts (MTP).** Qwen3.5/3.6, DeepSeek V4.1 and MiniMax M2.7 ship multi-token-prediction
+1. **Their own drafts (MTP).** Qwen3.5/3.6, DeepSeek V4.1 and MiniMax M2.7 ship multi-token-prediction
    layers: the model guesses its next tokens itself, no draft model, which is how the Project Maya fork
    gets 38-42 tok/s across two PCs. mlx-community has MTP builds (Qwen3.8-27B-MTP).
-3. **Images in.** Qwen3.5 is natively multimodal; we skip its vision encoder today. The head Mac would
+2. **Images in.** Qwen3.5 is natively multimodal; we skip its vision encoder today. The head Mac would
    run the encoder and feed image features in with the text; the rest of the split is unchanged.
-4. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
+3. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
    so the pool sends the whole job to a Mac that has the model (MLX ports such as mflux). Personal
    photos stay private by default, the way Ask keeps personal documents in your own pools: an edit runs
    on your own Mac unless you say otherwise.
-5. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
+4. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
    is set up as a worker (`infra/remote-worker.sh`).
