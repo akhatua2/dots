@@ -55,15 +55,24 @@ draft, and the draft kept 23 of 68 proposals (2.4 tokens a pass). Per pass, with
 The ping between the two is 0.7 ms, so about 3 ms of the wire is the message path (framing, QUIC,
 asyncio handoffs). Hidden states already go as raw bytes.
 
+## Checked
+
+- **A model that fits stays on one Mac.** With two or three Macs each holding the whole model, a turn runs
+  on one of them with no hop, on the asker's own Mac when they have one; a smaller Mac joining stays idle
+  (`tests/distributed/test_whole_model_stays_on_one_mac.py`).
+- **How a split falls when it must.** For one answer the layers run one after another, so a token costs the
+  sum of every Mac's share: balancing the layers buys nothing. What matters is the number of hops and how
+  many layers the fastest Macs carry. Today's split follows memory: two equal 10 GB Macs get 8 and 20
+  layers, and when one of them is four times faster the split is the same, with the head (which also runs
+  the vocabulary-sized output layer) on the slower one. In the real two-worker test above, the 1 and 27
+  split was forced by memory: the head also holds the embeddings and its working space.
+
 ## Next
 
-1. **Keep a model on one Mac when it fits.** Placement already prefers this. Check it holds when a
-   second Mac joins mid-session.
-2. **Balance the split by time, not memory.** The head holds the embeddings and output layer (150K rows
-   for Qwen), so a memory-balanced split gave it 1 layer and the peer 27. The per-pass timing gives
-   the numbers to balance on.
-3. **Ring instead of star.** Today the head calls each peer in turn and every hidden state comes back
-   through it: two network legs per peer. Passing it peer to peer and back to the head once saves a leg
-   per extra peer.
-4. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
-5. **Measure over a real WAN** with two Macs on different networks before deciding between 2 and 3.
+1. **Put the head on the fastest Mac** that can hold it, and give faster Macs layers first. Small change
+   in the scheduler's ordering; the per-pass timing shows whether it helped.
+2. **Ring instead of star.** Today the head calls each peer in turn and every hidden state comes back
+   through it: two network legs per peer, 2n for n peers. Passing it peer to peer and back to the head
+   once takes n + 1. It saves a leg per peer beyond the first, so it matters from three Macs up.
+3. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
+4. **Measure over a real WAN** with two Macs on different networks, with and without a draft model.
