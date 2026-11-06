@@ -99,11 +99,37 @@ pool's cap on this Mac (`imageMaxPixels`), and sends it as a JPEG part of the qu
 like a document, so it stays on this Mac and in your own pools, and only goes to a pool whose model reads
 images: the cloud marks those on the ladder (`readsImages`). With none, Ask says so and asks first.
 
+**Images out, and editing.** A diffusion model runs every layer many times over one image, so splitting it
+would cross the network at every step, and the image models people use fit on one Mac: the hub sends each
+job whole to a worker that offers an image model (`DOTS_IMAGE_MODEL`), through OpenAI's image API
+(`/v1/images/generations`, `/v1/images/edits`). The worker runs mflux in its own uv environment
+(`images.py`): mflux brings torch and opencv, which a worker doesn't otherwise need.
+
+The model was picked from the open-weights leaderboards in November 2026. Qwen-Image-2.1 led text to image
+on Artificial Analysis (Elo 1,044) with FLUX 3 Image Klein one point behind (1,043); both were among the top
+three for editing. Klein is half the size (5.3 GB in 4 bits against 10.6), its license (FLUX Kommunity) is
+free for commercial use below $5M a year where Qwen's is research-only, and it edits by instruction from up
+to ten reference pictures. It is the default; FLUX.2 klein 4B is the Apache-licensed choice.
+
+On this M1 Pro (16 GB), each picture a fresh run of the tool, model load included (`scripts/bench_images.py`):
+
+| Model | Picture | Steps | Seconds | Peak GB |
+|---|---|---|---|---|
+| FLUX 3 Image Klein, 4-bit | 512x512 | 16 (its default) | 81 | 3.8 |
+| FLUX 3 Image Klein, 4-bit | 512x512 | 8 | 44 | 3.8 |
+| FLUX 3 Image Klein, 4-bit | 1024x1024 | 16 | 325 | 4.3 |
+| FLUX 3 Image Klein, 4-bit | edit, 1024x1024 | 16 | 744 | 5.7 |
+| FLUX 3 Image Klein, 4-bit | edit, 512x512, through the hub | 8 | 221 | |
+| FLUX.2 klein 4B, 4-bit | 512x512 | its default | 34 | 4.4 |
+| Z-Image Turbo, 4-bit | 512x512 | its default | 68 | 4.6 |
+
+Eight steps drew nearly the same pictures as sixteen, so workers default to 8 (`DOTS_IMAGE_STEPS`). Loading
+the model is about 10 s of a picture's time, so keeping it loaded between jobs would save little yet. All
+three spelled a sign's words right. Z-Image Turbo can only restyle a picture; Klein follows edit
+instructions ("make it a snowy winter evening" kept the road and the mountains). An edit costs about three
+times a new picture, because the starting picture's tokens join the image's own.
+
 ## Next
 
-1. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
-   so the pool sends the whole job to a Mac that has the model (MLX ports such as mflux). Personal
-   photos stay private by default, the way Ask keeps personal documents in your own pools: an edit runs
-   on your own Mac unless you say otherwise.
-2. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
+1. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
    is set up as a worker (`infra/remote-worker.sh`).

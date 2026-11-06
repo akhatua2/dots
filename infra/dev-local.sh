@@ -26,6 +26,9 @@ MAX_RAM_GB="${DOTS_LOCAL_MAX_RAM_GB:-6}"
 # Each model guesses ahead with its own draft head. mlx-community has none for the small Qwen3.5s, so the
 # head comes out of Qwen's original release (only its tensors are loaded).
 DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-Qwen/Qwen3.5-0.8B}"
+# An image model for this Mac to draw with (core/src/dots/images.py). Off by default: drawing takes about
+# 5 GB on top of the lent share. mflux-community/flux-3-image-klein-mflux-q4 suits the defaults.
+IMAGE_MODEL="${DOTS_LOCAL_IMAGE_MODEL:-}"
 # The split setup: a model bigger than one Mac's share
 SPLIT_MODEL="${DOTS_LOCAL_SPLIT_MODEL:-mlx-community/Qwen3.5-2B-MLX-4bit}"
 SPLIT_DRAFT_MODEL="${DOTS_LOCAL_SPLIT_DRAFT_MODEL:-Qwen/Qwen3.5-2B}"
@@ -54,7 +57,8 @@ start() {
 
 worker() {
   if pgrep -f "dots.cli worker" >/dev/null; then echo "worker already running"; return; fi
-  run env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" nohup "$PY" -m dots.cli worker \
+  run env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" "DOTS_IMAGE_MODEL=${DOTS_IMAGE_MODEL:-$IMAGE_MODEL}" \
+    nohup "$PY" -m dots.cli worker \
     "$(tr -d ' \n' <"$HOME_DIR/hub_ticket.txt")" --max-ram "$MAX_RAM_GB" \
     >"$LOGS/worker.log" 2>&1 &
   echo "worker started (logs in $LOGS/worker.log)"
@@ -69,7 +73,8 @@ app() {
   for _ in $(seq 1 50); do pgrep -x dots >/dev/null || break; sleep 0.2; done
   pkill -x dots || true
   open --env "DOTS_HOME=$HOME_DIR" --env "DOTS_WORKER=$PY -m dots.cli worker" \
-    --env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" "$bundle"
+    --env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" --env "DOTS_IMAGE_MODEL=${DOTS_IMAGE_MODEL:-$IMAGE_MODEL}" \
+    "$bundle"
 }
 
 # A model too big for one Mac's share, to see a pool split across Macs.

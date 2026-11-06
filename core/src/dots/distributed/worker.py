@@ -19,6 +19,8 @@ interactive `ChatUI` when the user does want to talk to the model.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import sys
@@ -33,6 +35,7 @@ from ..backends.mlx.draft import draft_for, load_draft
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
 from ..generation.speculative import SpeculativeGeneration
+from ..images import ImageJob, ImageTool
 from .chain_timing import ChainTiming
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
@@ -127,6 +130,9 @@ class Worker:
         # Drafts for speculative decoding, by (draft repo, model): a model's own head or a small model
         # (None: it failed to load)
         self._drafts: dict[tuple[str, str], object | None] = {}
+        # The image model this Mac draws with, if it offers one; one picture at a time
+        self.image_tool = ImageTool.from_env()
+        self._drawing = asyncio.Lock()
         self._host_ready = asyncio.Event()
         self._host_ready_by_model: dict[str, asyncio.Event] = {}
         self._host_load_task: asyncio.Task | None = None
@@ -304,6 +310,8 @@ class Worker:
             hello_payload["join_token"] = join_token
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
+        if self.image_tool is not None and self.compute:
+            hello_payload["images"] = self.image_tool.model
         # A chat client tells the hub which model it intends to query so
         # the hub knows that model is "in use" and won't evict it to make
         # room for another. Compute-only workers leave this unset.
@@ -723,6 +731,8 @@ class Worker:
             return await self._handle_delegate_turn(msg)
         if kind == "probe_peer":
             return await self._handle_probe_peer(msg)
+        if kind == "make_image":
+            return await self._handle_make_image(msg)
         if kind == "reset_conversation":
             conv_id = msg.get("conv_id")
             model_id = msg.get("model_id")
@@ -1179,6 +1189,25 @@ class Worker:
                 log.exception("draft %s failed to load for %s; guessing ahead without it", draft_id, model_id)
                 self._drafts[key] = None
         return self._drafts[key]
+
+    async def _handle_make_image(self, msg: dict) -> dict:
+        """Draws one picture with this Mac's image model, whole, and sends it back as base64 PNG."""
+        if self.image_tool is None:
+            return {"kind": "error", "error": "this Mac doesn't offer images"}
+        try:
+            image = msg.get("image")
+            job = ImageJob(prompt=str(msg.get("prompt", "")), width=msg.get("width"), height=msg.get("height"),
+                           steps=msg.get("steps"), seed=msg.get("seed"),
+                           image=base64.b64decode(image) if image else None, strength=msg.get("strength"))
+        except (ValueError, TypeError, binascii.Error) as e:
+            return {"kind": "error", "error": str(e)}
+        async with self._drawing:
+            try:
+                png, ms = await self.image_tool.draw(job)
+            except RuntimeError as e:
+                log.warning("image job failed: %s", e)
+                return {"kind": "error", "error": str(e)}
+        return {"kind": "image_ok", "png": base64.b64encode(png).decode(), "model": self.image_tool.model, "ms": ms}
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
         """Hub-triggered probe: open (or reuse) a connection to the target

@@ -152,6 +152,10 @@ def _sanitize_device(d: object) -> str | None:
     return None
 
 
+class NoImageMac(RuntimeError):
+    """Nothing in the pool can draw: no worker offers an image model."""
+
+
 @dataclass
 class Participant:
     """A connected worker (or chat-only client) and its hub-side state."""
@@ -185,6 +189,8 @@ class Participant:
     # Worker-advertised device name for the pool map, e.g. "MacBook Pro · Apple
     # M1 Pro". Best-effort; None if the worker didn't send one.
     device: str | None = None
+    # The image model this worker draws with, if it offers one (images.py)
+    images: str | None = None
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
@@ -349,6 +355,26 @@ class Hub:
     @_selected_backend.setter
     def _selected_backend(self, value: str | None) -> None:
         self._deployment_for().selected_backend = value
+
+    def image_models(self) -> list[str]:
+        return sorted({p.images for p in self.participants.values() if p.compute and p.images})
+
+    async def make_image(self, **job) -> dict:
+        """Draws a picture, whole, on a Mac that offers an image model, one not busy with a turn if there is
+        one. Returns the worker's answer: base64 `png`, `model`, `ms`, and which Mac drew it."""
+        offering = [p for p in self.participants.values() if p.compute and p.images]
+        if not offering:
+            raise NoImageMac("no Mac in the pool offers images right now")
+        idle = [p for p in offering if not self.is_serving(p.id)]
+        worker = (idle or offering)[0]
+        ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
+        try:
+            resp = await worker.conn.call("make_image", **job)
+        except ConnectionError as e:
+            raise RuntimeError(f"the Mac drawing it dropped: {e}") from e
+        if resp.get("kind") != "image_ok":
+            raise RuntimeError(resp.get("error", "the image failed"))
+        return {**resp, "worker_id": worker.id}
 
     def is_serving(self, worker_id: str) -> bool:
         """Whether a worker is part of a turn being answered right now."""
@@ -921,6 +947,7 @@ class Hub:
                 peer_ticket=peer_ticket,
                 geo=sanitize_geo(hello_msg.get("geo")),
                 device=_sanitize_device(hello_msg.get("device")),
+                images=hello_msg.get("images") if isinstance(hello_msg.get("images"), str) else None,
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:

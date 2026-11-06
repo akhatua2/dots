@@ -4,6 +4,8 @@ A `dots hub` can optionally expose a second port speaking the chat-
 completions subset of the OpenAI API:
 
     POST /v1/chat/completions   — generate a response (streaming or not)
+    POST /v1/images/generations — draw a picture from words
+    POST /v1/images/edits       — draw from a starting picture and words
     GET  /v1/models             — list the served model
     GET  /healthz               — basic liveness probe
 
@@ -20,6 +22,8 @@ weights are sharded behind the scenes.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -128,6 +132,8 @@ class HttpApi:
             middlewares=[_auth_cors_middleware],
         )
         app.router.add_post("/v1/chat/completions", self._chat_completions)
+        app.router.add_post("/v1/images/generations", self._images)
+        app.router.add_post("/v1/images/edits", self._images)
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/v1/credits", self._credits_all)
         app.router.add_get("/v1/credits/{account_id}", self._credits_one)
@@ -167,9 +173,45 @@ class HttpApi:
                         "tok_per_sec": round(deployments[model_id].tok_per_sec, 1),
                     }
                     for model_id in sorted(deployments)
+                ] + [
+                    {"id": model_id, "object": "model", "owned_by": "dots", "type": "image"}
+                    for model_id in self.hub.image_models()
                 ],
             }
         )
+
+    async def _images(self, request: web.Request) -> web.Response:
+        """OpenAI's image API, drawn whole on a Mac that offers an image model. An edit sends its starting
+        picture as `image`: a data: URL or base64 in JSON, or a file in a multipart form, as OpenAI's own."""
+        from ..distributed.hub import NoImageMac
+        from ..images import ImageJob, parse_size
+
+        editing = request.path.endswith("/edits")
+        try:
+            body, image = await _image_request(request)
+            width, height = parse_size(body.get("size"))
+            job = ImageJob(prompt=str(body.get("prompt", "")), width=width, height=height,
+                           steps=_int_or_none(body.get("steps")), seed=_int_or_none(body.get("seed")), image=image,
+                           strength=float(body["strength"]) if body.get("strength") is not None else None)
+        except (ValueError, TypeError) as e:
+            return _error(400, str(e))
+        if editing and job.image is None:
+            return _error(400, "an edit needs the picture to start from, as `image`")
+        payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
+                   "seed": job.seed, "strength": job.strength}
+        if job.image is not None:
+            payload["image"] = base64.b64encode(job.image).decode()
+        try:
+            drawn = await self.hub.make_image(**payload)
+        except NoImageMac as e:
+            return _error(503, str(e))
+        except RuntimeError as e:
+            return _error(502, str(e))
+        return web.json_response({
+            "created": int(time.time()),
+            "data": [{"b64_json": drawn["png"]}],
+            "dots": {"model": drawn.get("model"), "ms": round(drawn.get("ms", 0)), "worker_id": drawn["worker_id"]},
+        })
 
     async def _credits_all(self, _request: web.Request) -> web.Response:
         return web.json_response(self.hub.ledger.as_dict())
@@ -496,6 +538,35 @@ class HttpApi:
         await response.write(chunk({}, finish_reason="stop"))
         await response.write(b"data: [DONE]\n\n")
         return response
+
+
+async def _image_request(request: web.Request) -> tuple[dict, bytes | None]:
+    """The request's fields, and its starting picture if it sent one."""
+    if request.content_type.startswith("multipart/"):
+        form = await request.post()
+        upload = form.get("image") or form.get("image[]")
+        image = upload.file.read() if hasattr(upload, "file") else None
+        return {k: v for k, v in form.items() if isinstance(v, str)}, image
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError("request body must be valid JSON") from e
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    image = body.get("image")
+    if image is None:
+        return body, None
+    if not isinstance(image, str):
+        raise ValueError("image is a data: URL or base64")
+    payload = image.split(",", 1)[1] if image.startswith("data:") else image
+    try:
+        return body, base64.b64decode(payload, validate=True)
+    except binascii.Error as e:
+        raise ValueError("image isn't valid base64") from e
+
+
+def _int_or_none(value) -> int | None:
+    return None if value is None or value == "" else int(value)
 
 
 def _error(status: int, message: str) -> web.Response:
