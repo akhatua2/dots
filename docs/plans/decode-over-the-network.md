@@ -103,6 +103,23 @@ asyncio handoffs). Hidden states already go as raw bytes.
   | 25 ms | 1.14× | 1.20× |
   | 50 ms | 1.39× | 1.34× |
 
+- **A Metal kernel for checking drafts** (`backends/mlx/small_batch.py`). MLX's 4-bit layers have a fast
+  path for one token and a slow one for a few: on Qwen2.5 1.5B a pass of five tokens cost 3.5 times one.
+  The kernel reads each packed weight once for every token in the pass, and takes 2 to 5 tokens on large
+  layers (past that its registers spill). Whole-model passes, 2 to 5 tokens: 1.33 to 1.65 times faster.
+  End to end with adaptive drafting, up to four guesses:
+
+  | Round trip | MLX | With the kernel |
+  |---|---|---|
+  | 0 ms | 0.78× | 0.85× |
+  | 25 ms | 1.19× | 1.26× |
+  | 50 ms | 1.36× | 1.47× |
+
+  The check now adds in a different order than one-token decoding, so where two words are all but tied
+  the pick can differ: in one of three test answers the text matched for 277 characters, then said "blue
+  light" where one-at-a-time said "the shorter blue wavelengths". Both are the big model's choice; neither
+  is more right. `DOTS_SMALL_BATCH_KERNEL=0` turns it off.
+
 - **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
   plain speed per chain length and reports a drafted answer's speedup against it, slower included.
 

@@ -256,6 +256,10 @@ class MlxBackendRuntime(BackendRuntime):
         self.assignment = ModelAssignment()
         self.host: FullModelHost | None = None
         self._geometry: ModelGeometry | None = None
+        # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't
+        from .small_batch import install
+
+        install()
 
     @classmethod
     def from_host(cls, host: FullModelHost) -> "MlxBackendRuntime":
