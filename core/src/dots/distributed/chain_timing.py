@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 @dataclass
 class ChainTiming:
     peers: int
+    # A ring times the whole loop as one hop: the hidden state goes peer to peer and comes home once
+    ring: bool = False
     passes: int = 0
     here_ms: float = 0.0
     round_trip_ms: list[float] = field(default_factory=list)
@@ -28,6 +30,7 @@ class ChainTiming:
             return {}
         n = self.passes
         return {
+            "chain": "ring" if self.ring else "star",
             "chain_passes": n,
             "here_ms": round(self.here_ms / n, 2),
             "hops": [
@@ -42,7 +45,12 @@ def describe(stats: dict) -> str:
     hops = stats.get("hops")
     if not hops:
         return ""
-    parts = [f"here {stats['here_ms']:.1f} ms"] + [
-        f"hop {i} {h['round_trip_ms']:.1f} ms ({h['compute_ms']:.1f} computing)" for i, h in enumerate(hops, 1)
-    ]
+    if stats.get("chain") == "ring":
+        ring = hops[0]
+        parts = [f"here {stats['here_ms']:.1f} ms",
+                 f"ring {ring['round_trip_ms']:.1f} ms ({ring['compute_ms']:.1f} computing)"]
+    else:
+        parts = [f"here {stats['here_ms']:.1f} ms"] + [
+            f"hop {i} {h['round_trip_ms']:.1f} ms ({h['compute_ms']:.1f} computing)" for i, h in enumerate(hops, 1)
+        ]
     return " · a pass: " + ", ".join(parts)

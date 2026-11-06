@@ -23,6 +23,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from typing import Callable
 
 from .. import ui
@@ -145,6 +146,8 @@ class Worker:
         # the head worker in a multi-worker placement). Keyed by peer
         # worker_id; cached so the per-token hot path doesn't reconnect.
         self._peer_conns: dict[str, PeerConnection] = {}
+        # Passes sent round a ring, waiting for the hidden state to come home
+        self._ring_waiters: dict[str, asyncio.Future] = {}
         # Per-conversation handler lock: two delegate_turn calls for the
         # same conv would corrupt the KV cache.
         self._turn_locks: dict[str, asyncio.Lock] = {}
@@ -354,6 +357,12 @@ class Worker:
             return await self._handle_compute_unit(msg)
         if kind == "trim_cache":
             return self._handle_trim_cache(msg)
+        if kind == "ring_unit":
+            await self._handle_ring_unit(msg)
+            return None
+        if kind == "ring_result":
+            self._handle_ring_result(msg)
+            return None
         return {"kind": "error", "error": f"unknown peer kind: {kind!r}"}
 
     def _handle_trim_cache(self, msg: dict) -> dict:
@@ -372,35 +381,66 @@ class Worker:
         """Run a single hidden-state forward through this worker's
         assigned layer range. Used by head workers chaining work
         through multi-worker placements."""
+        wire, compute_ms, error = await self._run_segment(msg)
+        if error is not None:
+            return {"kind": "error", "error": error}
+        return {
+            "kind": "compute_unit_out",
+            "hidden": wire,
+            # So the head can tell this Mac's time from the network's
+            "compute_ms": compute_ms,
+        }
+
+    async def _run_segment(self, msg: dict) -> tuple[dict | None, float, str | None]:
+        """This worker's layers over a hidden state from a peer: (hidden out, compute ms, error)."""
         model_id = msg.get("model_id") or self.model_id
         if not isinstance(model_id, str) or not model_id:
-            return {"kind": "error", "error": "model_id is required"}
+            return None, 0.0, "model_id is required"
         runtime = self._runtime_for_model(model_id)
         if runtime is None:
-            return {"kind": "error", "error": "backend not selected"}
+            return None, 0.0, "backend not selected"
         try:
             await asyncio.wait_for(
                 self._ready_event_for(model_id).wait(), timeout=120.0
             )
         except asyncio.TimeoutError:
-            return {"kind": "error", "error": "model not loaded yet"}
-        conv_id = msg["conv_id"]
-        start = int(msg["layer_start"])
-        end = int(msg["layer_end"])
+            return None, 0.0, "model not loaded yet"
         started = time.perf_counter()
-        hidden_in = runtime.decode_hidden(msg["hidden"])
         try:
-            hidden_out = runtime.forward_segment(conv_id, hidden_in, start, end)
+            hidden_in = runtime.decode_hidden(msg["hidden"])
+            hidden_out = runtime.forward_segment(msg["conv_id"], hidden_in, int(msg["layer_start"]), int(msg["layer_end"]))
             wire = runtime.encode_hidden(hidden_out)  # MLX computes the layers here
         except Exception as e:
             log.exception("compute_unit failed")
-            return {"kind": "error", "error": str(e)}
-        return {
-            "kind": "compute_unit_out",
-            "hidden": wire,
-            # So the head can tell this Mac's time from the network's
-            "compute_ms": round((time.perf_counter() - started) * 1000, 3),
-        }
+            return None, 0.0, str(e)
+        return wire, round((time.perf_counter() - started) * 1000, 3), None
+
+    async def _handle_ring_unit(self, msg: dict) -> None:
+        """One stop on a ring: run our layers, then hand the hidden state straight to the next peer, or, as the
+        last stop, back to the head. Nothing returns along the way, so each extra peer costs one network leg
+        instead of two. A failure goes straight to the head, so it never waits out a timeout."""
+        wire, compute_ms, error = await self._run_segment(msg)
+        computed = [*msg.get("compute_ms", []), compute_ms]
+        hops = msg.get("hops") or []
+        try:
+            if error is None and hops:
+                nxt = hops[0]
+                conn = await self._get_or_open_peer(str(nxt["worker_id"]), str(nxt["ticket"]))
+                onward = {k: v for k, v in msg.items() if k not in ("kind", "rid")}
+                await conn.notify("ring_unit", **{**onward, "hidden": wire, "layer_start": nxt["layer_start"],
+                                                  "layer_end": nxt["layer_end"], "hops": hops[1:],
+                                                  "compute_ms": computed})
+                return
+            head = await self._get_or_open_peer(str(msg["head_ticket"]), str(msg["head_ticket"]))
+            await head.notify("ring_result", pass_id=msg["pass_id"], hidden=wire, compute_ms=computed, error=error)
+        except Exception:
+            log.exception("ring hand-off failed")
+
+    def _handle_ring_result(self, msg: dict) -> None:
+        """The hidden state coming home to the head at the end of a ring."""
+        waiter = self._ring_waiters.pop(str(msg.get("pass_id")), None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(msg)
 
     async def _get_or_open_peer(self, peer_id: str, ticket: str) -> PeerConnection:
         """Cached outgoing iroh connection to a peer worker. Workers in the
@@ -951,6 +991,10 @@ class Worker:
             conn = await self._get_or_open_peer(peer_id, ticket)
             peer_conns.append((conn, start, end))
 
+        if os.environ.get("DOTS_CHAIN", "star").strip() == "ring" and self._peer_ticket is not None:
+            return self._ring_forwarder(conv_id=conv_id, model_id=model_id, runtime=runtime,
+                                        my_layer_end=my_layer_end, chain=chain, first=peer_conns[0][0])
+
         timing = ChainTiming(peers=len(peer_conns))
 
         async def forward_through_chain(hidden):
@@ -983,6 +1027,45 @@ class Worker:
 
         forward_through_chain.timing = timing
         return forward_through_chain
+
+    def _ring_forwarder(self, *, conv_id: str, model_id: str, runtime: BackendRuntime, my_layer_end: int,
+                        chain: list, first: PeerConnection):
+        """Like the star forwarder, but the hidden state goes peer to peer and comes home once.
+
+        With n peers that is n + 1 network legs a pass instead of 2n. The head waits on a future that the
+        last peer's `ring_result` resolves; a peer that fails reports straight here.
+        """
+        hops = [{"worker_id": str(e["worker_id"]), "ticket": str(e["ticket"]),
+                 "layer_start": int(e["layer_start"]), "layer_end": int(e["layer_end"])} for e in chain]
+        timeout = float(os.environ.get("DOTS_RING_TIMEOUT_S", "120"))
+        timing = ChainTiming(peers=1, ring=True)
+
+        async def forward_round_ring(hidden):
+            started = time.perf_counter()
+            hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
+            wire = runtime.encode_hidden(hidden)  # MLX computes our layers here
+            sent = time.perf_counter()
+            timing.here_ms += (sent - started) * 1000
+            pass_id = uuid.uuid4().hex
+            home = asyncio.get_running_loop().create_future()
+            self._ring_waiters[pass_id] = home
+            try:
+                await first.notify("ring_unit", model_id=model_id, conv_id=conv_id,
+                                   layer_start=hops[0]["layer_start"], layer_end=hops[0]["layer_end"],
+                                   hidden=wire, hops=hops[1:], head_ticket=self._peer_ticket,
+                                   pass_id=pass_id, compute_ms=[])
+                result = await asyncio.wait_for(home, timeout=timeout)
+            finally:
+                self._ring_waiters.pop(pass_id, None)
+            if result.get("error"):
+                raise RuntimeError(f"ring pass failed: {result['error']}")
+            timing.round_trip_ms[0] += (time.perf_counter() - sent) * 1000
+            timing.peer_compute_ms[0] += sum(result.get("compute_ms") or [])
+            timing.passes += 1
+            return runtime.decode_hidden(result["hidden"])
+
+        forward_round_ring.timing = timing
+        return forward_round_ring
 
     async def _build_chain_trimmer(self, *, conv_id: str, model_id: str, chain: list):
         """Drops rejected draft tokens from every chain member's cache, reusing the turn's connections."""

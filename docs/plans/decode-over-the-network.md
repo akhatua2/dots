@@ -71,10 +71,13 @@ asyncio handoffs). Hidden states already go as raw bytes.
   faster, the fast one becomes the head with 16 layers and the slow one takes 12; before, the slow one was
   the head. By the scheduler's own estimate that is about 9% faster a token.
 
+- **A ring, as an option** (`DOTS_CHAIN=ring` on the workers). The head sends a pass to the first peer;
+  each peer runs its layers and hands the hidden state to the next; the last sends it home, and a failure
+  goes straight to the head. n + 1 legs a pass instead of 2n, so it only pays from two peers up. On one Mac
+  with two segments it gave the same words as the star and the same speed within noise (19.9 against
+  18.1 ms a pass). Star stays the default until a three-Mac WAN run says otherwise.
+
 ## Next
 
-1. **Ring instead of star.** Today the head calls each peer in turn and every hidden state comes back
-   through it: two network legs per peer, 2n for n peers. Passing it peer to peer and back to the head
-   once takes n + 1. It saves a leg per peer beyond the first, so it matters from three Macs up.
-2. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
-3. **Measure over a real WAN** with two Macs on different networks, with and without a draft model.
+1. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
+2. **Measure over a real WAN** (with three or more Macs, star against ring) with two Macs on different networks, with and without a draft model.
