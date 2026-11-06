@@ -131,8 +131,19 @@ xcodegen generate
 xcodebuild -project dots.xcodeproj -scheme dots -configuration Debug -derivedDataPath build \
   -destination 'platform=macOS,arch=arm64' CODE_SIGN_IDENTITY="-" DEVELOPMENT_TEAM="" CODE_SIGN_STYLE=Manual build
 open build/Build/Products/Debug/dots.app
-build/Build/Products/Debug/dots.app/Contents/MacOS/dots --selftest   # 110 checks against a mock cloud
+build/Build/Products/Debug/dots.app/Contents/MacOS/dots --selftest   # checks every story against a mock cloud
 ```
 
 `project.yml` signs with Sourabh's team. The flags above build it ad hoc on any Mac.
-The app talks to a mock cloud until the real one exists; its contract is `apps/macos/API.md`.
+
+An ad hoc build is a new app to macOS each time, so it asks again for the Desktop folder (the worker runs
+from this repo) after every rebuild, and the worker waits until someone clicks Allow. Signing with your
+own Apple Development identity keeps the answer across rebuilds:
+
+```bash
+security find-identity -v -p codesigning     # the identity's hash; its team is the OU in the certificate
+xcodebuild ... CODE_SIGN_IDENTITY="<hash>" DEVELOPMENT_TEAM="<team>" CODE_SIGN_STYLE=Manual build
+```
+
+`infra/dev-local.sh` runs the app against a real hub and cloud on this Mac; see the top of that script.
+Its contract with the cloud is `apps/macos/API.md`.
