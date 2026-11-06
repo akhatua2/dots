@@ -14,8 +14,18 @@ struct AnswerActions: View {
                        on: turn.rating == 1) { model.chats.rate(turn.id, 1) }
             ActionIcon(symbol: turn.rating == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown", help: "Bad answer",
                        on: turn.rating == -1) { model.chats.rate(turn.id, -1) }
+            if let drafted {
+                Text(drafted).font(D.ui(12).monospacedDigit()).foregroundStyle(D.t5).padding(.leading, 8)
+                    .help("A small draft model guessed ahead and the pool checked its guesses in batches.")
+            }
         }
         .padding(.leading, -7)  // the icons' own padding, so they line up with the answer's text
+    }
+
+    /// With a draft model: how its guesses did, in the same quiet row
+    private var drafted: String? {
+        guard let r = turn.receipt, let kept = r.draftKept, let proposed = r.draftProposed, proposed > 0 else { return nil }
+        return "Drafted · \(kept) of \(proposed) guesses kept"
     }
 
     private func copy() {

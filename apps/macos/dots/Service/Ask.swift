@@ -26,6 +26,7 @@ struct Receipt: Codable, Equatable {
     /// With a draft model: how many checks the pool ran, and how many drafted tokens it kept
     var draftChecks: Int?
     var draftKept: Int?
+    var draftProposed: Int?
 }
 
 /// One check of a draft model's proposal by the big model.
@@ -168,8 +169,6 @@ final class AskController {
     var draft = ""
     /// Each check of the draft so far, oldest first. Empty when the answer isn't speculative.
     var checks: [DraftCheck] = []
-    /// The answer's last characters that a check just confirmed, and when, so they can light up
-    var fresh: (count: Int, at: Date)?
     var receipt: Receipt?
     var second: SecondOpinion?
     var focusToken = 0
@@ -239,7 +238,6 @@ final class AskController {
                 self.answer = ""
                 self.draft = ""
                 self.checks = []
-                self.fresh = nil
                 self.receipt = receipt
                 self.phase = .streaming
                 let started = Date()
@@ -252,10 +250,6 @@ final class AskController {
                         case .text(let t):
                             self.answer += t
                             self.draft = ""
-                            if !self.checks.isEmpty {  // tokens a check confirmed arrive together: light them up as one
-                                let recent = self.fresh.map { Date().timeIntervalSince($0.at) < 0.2 } ?? false
-                                self.fresh = (recent ? (self.fresh?.count ?? 0) + t.count : t.count, .now)
-                            }
                             let elapsed = Date().timeIntervalSince(started)
                             if elapsed > 0.5 { receipt.tokPerSec = Double(Pricing.tokens(self.answer)) / elapsed }
                         case .draft(let d):
@@ -264,6 +258,7 @@ final class AskController {
                             self.checks.append(DraftCheck(kept: kept, proposed: proposed))
                             receipt.draftChecks = self.checks.count
                             receipt.draftKept = self.checks.reduce(0) { $0 + $1.kept }
+                            receipt.draftProposed = self.checks.reduce(0) { $0 + $1.proposed }
                         case let .macAsleep(macID, name):
                             receipt.asleepMacID = macID
                             receipt.handoffNote = "\(name)'s Mac went to sleep. Moving its layers to the others…"

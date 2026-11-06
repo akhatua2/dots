@@ -8,12 +8,10 @@ import SwiftUI
 struct MarkdownText: View {
     var text: String
     var draft = ""
-    /// The answer's last characters a check just confirmed, which glow by `tint.glow`
-    var fresh = 0
     var tint = Markdown.Tint()
 
     var body: some View {
-        let blocks = Markdown.blocks(Markdown.marked(text, fresh: fresh, draft: draft))
+        let blocks = Markdown.blocks(draft.isEmpty ? text : text + Markdown.draftMark + draft)
         let pieces = Markdown.pieces(blocks)
         let firstDraft = draft.isEmpty ? nil : pieces.firstIndex(where: \.holdsDraft)
         VStack(alignment: .leading, spacing: 14) {
@@ -124,35 +122,15 @@ private struct MarkdownTable: View {
 enum Markdown {
     /// Marks where the confirmed answer ends and the draft begins. A private-use character no model writes.
     static let draftMark = "\u{E000}"
-    /// Marks where the text a check just confirmed begins
-    static let freshMark = "\u{E001}"
     static let draftOpacity = 0.4
 
-    /// How the parts of a speculative answer look right now: how brightly just-confirmed text glows
-    /// (0 to 1), and how strongly the draft shows.
+    /// How strongly the draft shows right now (it breathes while the pool checks it).
     struct Tint {
-        var glow = 0.0
         var draft = Markdown.draftOpacity
     }
 
-    /// The answer with its marks: before the text a check just confirmed, and before the draft.
-    static func marked(_ text: String, fresh: Int, draft: String) -> String {
-        var out = text
-        if fresh > 0 {
-            out.insert(contentsOf: freshMark, at: out.index(out.endIndex, offsetBy: -min(fresh, out.count)))
-        }
-        return draft.isEmpty ? out : out + draftMark + draft
-    }
-
     static func unmarked(_ text: String) -> String {
-        text.replacingOccurrences(of: freshMark, with: "").replacingOccurrences(of: draftMark, with: "")
-    }
-
-    /// The dots orange fading back to the answer's grey as `glow` goes from 1 to 0.
-    static func glowColor(_ glow: Double) -> Color {
-        let g = max(0, min(1, glow))
-        let mix = { (from: Double, to: Double) in (from + (to - from) * g) / 255 }
-        return Color(.sRGB, red: mix(0xD6, 0xFF), green: mix(0xD6, 0x8A), blue: mix(0xD6, 0x5C))
+        text.replacingOccurrences(of: draftMark, with: "")
     }
 
     enum Block: Equatable {
@@ -374,14 +352,9 @@ enum Markdown {
         greyDraft(AttributedString(text), tint: tint)
     }
 
-    /// Just-confirmed text in its glow, everything after the draft mark in grey, and the marks gone.
+    /// Everything after the draft mark in grey, and the mark itself gone.
     private static func greyDraft(_ text: AttributedString, tint: Tint) -> AttributedString {
         var out = text
-        if let fresh = out.range(of: freshMark) {
-            let end = out.range(of: draftMark)?.lowerBound ?? out.endIndex
-            out[fresh.upperBound..<end].foregroundColor = glowColor(tint.glow)
-            out.removeSubrange(fresh)
-        }
         if let mark = out.range(of: draftMark) {
             out[mark.upperBound...].foregroundColor = D.t2.opacity(tint.draft)
             out.removeSubrange(mark)

@@ -185,16 +185,15 @@ struct AskBody: View {
             RoutingRow(decision: decision)
         }
         if !ask.answer.isEmpty || !ask.draft.isEmpty {
-            // While a draft model works: its guesses breathe in grey, and what a check confirms flashes orange
-            TimelineView(.animation(minimumInterval: 1 / 30, paused: !ask.isBusy || ask.checks.isEmpty)) { context in
-                let glow = ask.fresh.map { max(0, 1 - context.date.timeIntervalSince($0.at) / 0.7) } ?? 0
-                let breath = 0.42 + 0.14 * sin(context.date.timeIntervalSinceReferenceDate * 5)
-                MarkdownText(text: ask.answer, draft: ask.draft, fresh: glow > 0 ? ask.fresh?.count ?? 0 : 0,
-                             tint: .init(glow: glow, draft: breath))
+            // While a draft model works its guesses breathe in grey after the answer, until the pool checks them
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: ask.draft.isEmpty || !ask.isBusy)) { context in
+                MarkdownText(text: ask.answer, draft: ask.isBusy ? ask.draft : "",
+                             tint: .init(draft: 0.38 + 0.12 * sin(context.date.timeIntervalSinceReferenceDate * 4)))
             }
+            .modifier(GrowOnly(while: ask.isBusy))
         }
-        if !ask.checks.isEmpty {
-            SpeculationMeter(checks: ask.checks, live: ask.isBusy)
+        if ask.isBusy, let last = ask.checks.last {
+            SpeculationMeter(latest: last, checks: ask.checks)
         }
         switch ask.phase {
         case .needsConsent(let why):
@@ -453,5 +452,23 @@ struct FileDrop: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// While an answer streams its height only grows, easing into each new line, so a drafted line that
+/// wraps and is then replaced doesn't jolt the text above it up and down.
+private struct GrowOnly: ViewModifier {
+    var active: Bool
+    @State private var tallest: CGFloat = 0
+
+    init(while active: Bool) { self.active = active }
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                guard active else { tallest = 0; return }
+                if height > tallest { withAnimation(.easeOut(duration: 0.18)) { tallest = height } }
+            }
+            .frame(minHeight: active ? tallest : nil, alignment: .top)
     }
 }
