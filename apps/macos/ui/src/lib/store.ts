@@ -8,6 +8,8 @@ import {
   getLend,
   getNodes,
   getStatus,
+  getUiState,
+  setUiState,
   getUsage,
   onAskShown,
   onChat,
@@ -96,17 +98,14 @@ export interface BridgeState {
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const STORAGE = 'dots.ui.v1'
-
-function loadLocal(): Local {
-  const fresh: Local = { seeded: false, joined: [], endorsed: [], pools: [], keys: [], lendingTo: null }
-  try {
-    const raw = localStorage.getItem(STORAGE)
-    return raw ? { ...fresh, ...JSON.parse(raw) } : fresh
-  } catch {
-    return fresh
-  }
-}
+const freshLocal = (): Local => ({
+  seeded: false,
+  joined: [],
+  endorsed: [],
+  pools: [],
+  keys: [],
+  lendingTo: null,
+})
 
 const surface = document.documentElement.dataset.surface ?? 'main'
 
@@ -122,7 +121,7 @@ class BridgeStore {
     lend: null,
     nodes: [],
     route: { name: 'explore' },
-    local: loadLocal(),
+    local: freshLocal(),
     join: null,
     msgs: [],
     busy: false,
@@ -132,6 +131,7 @@ class BridgeStore {
   }
   private listeners = new Set<() => void>()
   private started = false
+  private stateLoaded = false // user state read from the backend
   // The worker needs a few seconds after connecting to load its model layers;
   // until then chat requests come back as "pool loading". Auto-retry through
   // that warmup so the user only sends once.
@@ -157,11 +157,7 @@ class BridgeStore {
 
   private setLocal(patch: Partial<Local>) {
     const local = { ...this.state.local, ...patch }
-    try {
-      localStorage.setItem(STORAGE, JSON.stringify(local))
-    } catch {
-      /* storage unavailable */
-    }
+    void setUiState(local).catch(() => {})
     this.set({ local })
   }
 
@@ -170,14 +166,14 @@ class BridgeStore {
     this.started = true
     void onChat((e) => this.onChat(e))
     void onLend((lend) => this.set({ lend }))
-    void onTrayShown(() => void this.refresh())
+    void onTrayShown(() => void this.refresh().then(() => this.loadState()))
     void onAskShown(() => this.askShown())
     void onFileDrop((paths) => void this.attachPath(paths[0]))
-    // Another window changed local state (joined a pool, made a key…).
-    window.addEventListener('storage', () => this.set({ local: loadLocal() }))
+    void this.loadState().then(() => {
+      if (surface === 'main') void this.nodesLoop()
+      else void this.refreshCatalog()
+    })
     void this.connectLoop()
-    if (surface === 'main') void this.nodesLoop()
-    else void this.refreshCatalog()
   }
 
   // Poll the pool map data every 2s; it is a small hub request.
@@ -194,7 +190,22 @@ class BridgeStore {
     await this.refreshCatalog()
   }
 
+  /** User state (joined pools, endorsements, keys) lives in the backend. */
+  async loadState() {
+    for (let i = 0; i < 20; i++) {
+      const saved = await getUiState().catch(() => null)
+      if (saved) {
+        this.stateLoaded = true
+        this.set({ local: { ...freshLocal(), ...(saved as Partial<Local>) } })
+        return
+      }
+      await delay(500)
+    }
+    this.stateLoaded = true
+  }
+
   async refreshCatalog() {
+    if (!this.stateLoaded) return
     const catalog = await getCatalog().catch(() => null)
     if (!catalog) return
     this.set({ catalog })

@@ -427,6 +427,24 @@ class Lender:
 
 lender = Lender()
 
+# What the user did in the UI (pools joined, endorsements, keys made). Kept by
+# the backend so the frontend holds no state of its own; this is the seam where
+# the hub takes over once it serves these features.
+_UI_STATE_PATH = _DOTS_DIR / "ui_state.json"
+
+
+def _ui_state_get() -> dict:
+    try:
+        return json.loads(_UI_STATE_PATH.read_text())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _ui_state_set(state: dict) -> dict:
+    _DOTS_DIR.mkdir(parents=True, exist_ok=True)
+    _UI_STATE_PATH.write_text(json.dumps(state))
+    return state
+
 
 bridge = Bridge()
 
@@ -688,6 +706,10 @@ async def dispatch(req: dict) -> None:
         elif method == "frontier":
             p = req.get("params") or {}
             data = await asyncio.to_thread(_frontier_call, p.get("prompt", ""), p.get("context"))
+        elif method == "ui_state_get":
+            data = _ui_state_get()
+        elif method == "ui_state_set":
+            data = _ui_state_set((req.get("params") or {}).get("state") or {})
         elif method == "catalog":
             data = await catalog()
         elif method == "api_key":

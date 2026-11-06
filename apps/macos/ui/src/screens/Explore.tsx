@@ -81,7 +81,7 @@ function PoolCard({ p, s, featured }: { p: Pool; s: BridgeState; featured: boole
         <div className="min-w-0">
           <p className="truncate text-[16.5px] font-semibold leading-tight">{p.name}</p>
           <p className="truncate text-[13.5px] text-dim">
-            {p.model} · {p.macs + (lending ? 1 : 0)} Macs
+            {p.model} · {p.macs + (lending ? 1 : 0)} {p.macs + (lending ? 1 : 0) === 1 ? 'Mac' : 'Macs'}
           </p>
         </div>
       </div>
