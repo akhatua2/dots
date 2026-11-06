@@ -9,7 +9,7 @@ model = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 hub_http = "https://delpha-perse-granville.ngrok-free.dev"
 
 # Name shown for the pool this Mac lends to.   override: DOTS_POOL_NAME
-pool_name = "Home"
+pool_name = "dots pool"
 
 # Share of this Mac's memory always kept for its owner (never lendable).
 # override: DOTS_RESERVE_FRACTION

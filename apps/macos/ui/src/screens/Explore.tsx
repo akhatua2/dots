@@ -86,18 +86,22 @@ function PoolCard({ p, s, featured }: { p: Pool; s: BridgeState; featured: boole
         </div>
       </div>
       <p className="mt-[14px] min-h-[38px] text-[14px] leading-[1.4] text-[#b9b9b9]">{p.blurb}</p>
-      <div className="mt-2.5 flex items-center gap-4 text-[13px]">
+      <div className="mt-2.5 flex items-center gap-4 text-[12px]">
         <span className="flex items-center gap-2 text-ink">
           <span className="size-2 rounded-full bg-dim" /> {p.lending + (lending ? 1 : 0)} lending
         </span>
-        <span className="flex items-center gap-2 text-dim">
-          <Icon name="gauge" size={15} /> {p.tps} tok/s for you
-        </span>
+        {p.tps > 0 && (
+          <span className="flex items-center gap-2 text-dim">
+            <Icon name="gauge" size={14} /> {p.tps} tok/s for you
+          </span>
+        )}
       </div>
-      <p className="mt-2 flex items-center gap-2 text-[13px] text-ink">
-        <Icon name="credits" size={15} /> About {p.earn} credits an hour for your Mac
-      </p>
-      <p className="mt-2.5 flex min-h-[26px] items-center gap-2 text-[13px]">
+      {p.earn > 0 && (
+        <p className="mt-2 flex items-center gap-2 text-[12px] text-ink">
+          <Icon name="credits" size={14} /> About {p.earn} credits an hour for your Mac
+        </p>
+      )}
+      <p className="mt-2.5 flex min-h-[26px] items-center gap-2 text-[12px]">
         {lending ? (
           <span className="text-[#cfcfcf]">You&apos;re lending {lentGb} GB here.</span>
         ) : p.friends.length ? (
@@ -116,9 +120,13 @@ function PoolCard({ p, s, featured }: { p: Pool; s: BridgeState; featured: boole
         )}
       </p>
       <div className="mt-3 flex items-center justify-between border-t border-line pt-3">
-        <span className="flex items-center gap-2 text-[13px] text-ink">
-          <Icon name="shield" size={16} className="text-dim" /> {p.endorsements_label} endorsements
-        </span>
+        {p.endorsements > 0 ? (
+          <span className="flex items-center gap-2 text-[12px] text-ink">
+            <Icon name="shield" size={15} className="text-dim" /> {p.endorsements_label} endorsements
+          </span>
+        ) : (
+          <span />
+        )}
         {joined ? (
           <span className="flex items-center gap-2 rounded-lg bg-btn px-3 py-[7px] text-[14px] font-medium">
             <span className="size-2 rounded-full bg-signal" /> Lending

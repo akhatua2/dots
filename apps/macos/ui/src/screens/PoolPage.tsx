@@ -26,11 +26,12 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
           <div>
             <h1 className="text-[26px] font-bold leading-[1.15] tracking-[-0.025em]">{p.name}</h1>
             <p className="text-[13.5px] text-dim">
-              {p.public ? 'Public pool' : 'Private pool'} · {p.model} · {p.macs} Macs · {p.capacity_gb} GB
+              {p.public ? 'Public pool' : 'Private pool'} · {p.model} · {p.macs} {p.macs === 1 ? 'Mac' : 'Macs'}
+              {p.capacity_gb > 0 ? ` · ${p.capacity_gb} GB` : ''}
             </p>
           </div>
         </div>
-        {p.public && (
+        {p.public && p.endorsements > 0 && (
           <button
             onClick={() => store.toggleEndorse(id)}
             className={`flex items-center gap-2 rounded-[10px] px-3.5 py-2 text-[14px] font-semibold ${
@@ -73,7 +74,9 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
             </span>
             {m.unlocked ? (
               <span className="text-[14.5px] text-[#cfcfcf]">
-                {m.unlock_on_join && joined ? 'Unlocked tonight' : 'Unlocked'} at {m.at_gb} GB
+                {m.at_gb === 0
+                  ? 'Running now'
+                  : `${m.unlock_on_join && joined ? 'Unlocked tonight' : 'Unlocked'} at ${m.at_gb} GB`}
               </span>
             ) : (
               <>
@@ -87,7 +90,7 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
         ))}
       </div>
 
-      {p.public && (
+      {p.public && p.endorsements > 0 && (
         <>
           <p className="mt-[22px] flex items-center gap-2 text-[14.5px]">
             <Icon name="shield" size={17} className="text-dim" />

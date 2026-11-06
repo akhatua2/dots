@@ -98,6 +98,12 @@ def _conf_num(key: str, env: str) -> float:
 MODEL = _conf("model", "DOTS_UI_MODEL")
 
 
+def _short_model(model_id: str) -> str:
+    """'mlx-community/Qwen2.5-0.5B-Instruct-4bit' -> 'Qwen2.5-0.5B'."""
+    tail = model_id.split("/")[-1]
+    return re.sub(r"-(4bit|8bit|Instruct)", "", tail)
+
+
 def _hub_get(path: str) -> dict:
     token = os.environ.get("DOTS_JOIN_TOKEN", "")
     req = urllib.request.Request(
@@ -215,8 +221,16 @@ class Bridge:
             log("connect failed:", e)
 
     async def usage(self) -> dict:
+        """This account's ledger entry (the hub returns the whole ledger)."""
         resp = await self.chat.conn.call("credits")
-        return resp.get("data", {})
+        ledger = resp.get("data", {})
+        acc = (ledger.get("accounts") or {}).get(self.account_id) or {}
+        return {
+            "balance_cu": float(acc.get("balance_cu") or 0),
+            "earned_cu": float(acc.get("earned_cu") or 0),
+            "spent_cu": float(acc.get("spent_cu") or 0),
+            "turns_as_worker": int(acc.get("turns_as_worker") or 0),
+        }
 
     async def pool(self) -> dict:
         return await self.chat.get_pool_status(MODEL)
@@ -440,7 +454,7 @@ async def catalog() -> dict:
     real_pool = {
         "id": "hub",
         "name": _conf("pool_name", "DOTS_POOL_NAME"),
-        "model": MODEL,
+        "model": _short_model(MODEL),
         "macs": len([x for x in lenders if not x["mine"]]),
         "blurb": "The pool this hub serves.",
         "lending": len([x for x in lenders if x["ready"] and not x["mine"]]),
@@ -453,7 +467,7 @@ async def catalog() -> dict:
         "public": True,
         "capacity_gb": 0,
         "lenders": [x["name"][:1].upper() for x in lenders if not x["mine"]],
-        "can_run": [{"name": MODEL, "at_gb": 0}],
+        "can_run": [{"name": _short_model(MODEL), "at_gb": 0}],
     }
     token = os.environ.get("DOTS_JOIN_TOKEN", "")
     data: dict = {

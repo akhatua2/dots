@@ -58,6 +58,12 @@ button {
   cursor: default;
   font: inherit;
 }
+button:focus,
+button:focus-visible,
+input:focus,
+input:focus-visible {
+  outline: none;
+}
 input,
 textarea {
   user-select: text;

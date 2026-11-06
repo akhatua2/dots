@@ -13,9 +13,13 @@ export function Avatar({
   const you = letter === 'You'
   return (
     <span
-      style={{ width: size, height: size, fontSize: Math.max(10, size * 0.4) }}
+      style={{
+        ...(you ? { minWidth: size } : { width: size }),
+        height: size,
+        fontSize: Math.max(10, size * 0.4),
+      }}
       className={`inline-grid shrink-0 place-items-center rounded-full font-medium ${
-        you ? 'bg-signal px-3 text-[#1a0a03]' : 'bg-surface-2 text-ink'
+        you ? 'bg-signal px-3.5 font-semibold text-[#1a0a03]' : 'bg-surface-2 text-ink'
       } ${ring ? 'ring-1 ring-ink/70' : ''} ${className}`}
     >
       {you ? 'You' : letter}
