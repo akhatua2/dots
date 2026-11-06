@@ -353,6 +353,11 @@ struct ContributionCard: View {
         let on = here && s.lending.isOn
         let status = model.lendingStatus
         let maxLend = s.thisMac.maxLendGB
+        // What the pool counts for this Mac: its worker lends the setting, or less when that much isn't free.
+        // Until the worker is in the pool it is starting, and lends nothing yet.
+        let me = pool.macs.first { $0.macID == s.thisMacID }
+        let starting = on && status.isActive && me?.state == .online
+        let lent = me?.state == .lending ? me?.lendGB ?? s.lending.limitGB : s.lending.limitGB
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Your Contribution").font(D.ui(13, .semibold)).foregroundStyle(D.title)
@@ -364,14 +369,16 @@ struct ContributionCard: View {
             }
             .frame(height: 20)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(on ? "\(s.lending.limitGB) GB" : here ? "Paused" : "Off")
+                Text(starting ? "Starting" : on ? "\(lent) GB" : here ? "Paused" : "Off")
                     .font(D.ui(30, .semibold).monospacedDigit()).tracking(-0.6)
                     .foregroundStyle(on ? D.t1 : Color(hex: 0x8A8A8A))
                     .contentTransition(.numericText())
                 HStack(spacing: 6) {
-                    if status.isActive && here { Circle().fill(D.accent).frame(width: 6, height: 6).modifier(Blink(on: !isSnapshot)) }
-                    Text(note(here: here, on: on, status: status)).lineLimit(1)
+                    if status.isActive && here && !starting { Circle().fill(D.accent).frame(width: 6, height: 6).modifier(Blink(on: !isSnapshot)) }
+                    Text(starting ? "your Mac is joining the pool" : note(here: here, on: on, status: status) + (on && lent < s.lending.limitGB ? ", up to \(s.lending.limitGB) GB" : ""))
+                        .lineLimit(1)
                 }
+                .help(on && lent < s.lending.limitGB ? "Only \(lent) GB is free on your Mac right now, so that is what it lends." : "")
                 .font(D.ui(13)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.top, 10)
@@ -404,7 +411,7 @@ struct ContributionCard: View {
         if includeMe, let w = model.backend.worker, w.poolID == pool.id {
             return [(w.firstLayer, 0x4E4E4E), (w.lastLayer - w.firstLayer + 1, 0xFF5A1F), (max(0, w.layers - w.lastLayer - 1), 0x8A8A8A)]
         }
-        let layers = pool.model?.layers ?? 80
+        guard let layers = pool.model?.layers else { return [] }  // no model, no layers to share
         var macs = pool.macs.filter { $0.state == .lending && ($0.macID != s.thisMacID || includeMe) }.sorted { $0.joinedAt < $1.joinedAt }
         if includeMe, !macs.contains(where: { $0.macID == s.thisMacID }) {
             macs.append(PoolMac(macID: s.thisMacID, lendGB: s.lending.limitGB, state: .lending, joinedAt: .now))
@@ -431,6 +438,7 @@ struct ContributionCard: View {
     private func layersLine(on: Bool) -> String {
         let s = model.state
         if on, let w = model.backend.worker, w.poolID == pool.id { return "Runs layers \(w.firstLayer + 1) to \(w.lastLayer + 1)" }
+        if on, pool.model == nil { return "Layers are shared out once the pool runs a model" }
         if on {
             var start = 0
             for share in shares(includeMe: true) {
