@@ -18,7 +18,13 @@ final class WorkerProcess {
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         command = Self.findCommand(environment)
+        home = environment["DOTS_HOME"] ?? NSHomeDirectory() + "/.dots"
+        Self.stopLeftover(pidFile: pidFile)
     }
+
+    /// Where the worker keeps its identity, logs and the pid file.
+    private let home: String
+    private var pidFile: String { home + "/worker.pid" }
 
     var isAvailable: Bool { command != nil }
     var isRunning: Bool { process?.isRunning == true }
@@ -35,6 +41,24 @@ final class WorkerProcess {
         if let process, process.isRunning { process.terminate() }
         process = nil
         runningWith = nil
+        try? FileManager.default.removeItem(atPath: pidFile)
+    }
+
+    /// A worker a previous run of dots started and couldn't stop (it was killed, or crashed) would lend
+    /// on its own. Stop it, but only if that pid is still a dots worker.
+    private static func stopLeftover(pidFile: String) {
+        guard let text = try? String(contentsOfFile: pidFile, encoding: .utf8),
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        defer { try? FileManager.default.removeItem(atPath: pidFile) }
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/ps")
+        probe.arguments = ["-o", "command=", "-p", String(pid)]
+        let out = Pipe()
+        probe.standardOutput = out
+        guard (try? probe.run()) != nil else { return }
+        probe.waitUntilExit()
+        let command = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        if command.contains("dots") && command.contains("worker") { kill(pid, SIGTERM) }
     }
 
     private func start(command: [String], ticket: String, gb: Int) {
@@ -42,7 +66,6 @@ final class WorkerProcess {
         p.executableURL = URL(fileURLWithPath: command[0])
         p.arguments = Array(command.dropFirst()) + [ticket, "--max-ram", String(gb)]
         // Run from the worker's own home so it never picks up a .env from some other working directory.
-        let home = ProcessInfo.processInfo.environment["DOTS_HOME"] ?? NSHomeDirectory() + "/.dots"
         try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
         p.currentDirectoryURL = URL(fileURLWithPath: home)
         p.standardOutput = FileHandle.nullDevice
@@ -51,6 +74,7 @@ final class WorkerProcess {
             try p.run()
             process = p
             runningWith = (ticket, gb)
+            try? String(p.processIdentifier).write(toFile: pidFile, atomically: true, encoding: .utf8)
         } catch {
             process = nil
             runningWith = nil

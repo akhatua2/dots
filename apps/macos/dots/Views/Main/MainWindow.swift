@@ -69,6 +69,20 @@ struct MainWindow: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("sidebar.poolsFolded") private var poolsFolded = false
+    @AppStorage("sidebar.chatsFolded") private var chatsFolded = false
+
+    private func newChat() {
+        model.ask.clear()
+        model.chats.startNew()
+        model.showAsk()
+    }
+
+    private func open(_ chat: Chat) {
+        model.ask.clear()
+        model.chats.open(chat.id)
+        model.showAsk()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -86,33 +100,49 @@ struct Sidebar: View {
             }
             .padding(.horizontal, 8)
 
-            Text("Your pools")
-                .font(D.ui(11, .semibold)).foregroundStyle(Color(hex: 0x6E6E6E))
-                .padding(.leading, 18)
-                .padding(.top, 24)
-                .padding(.bottom, 6)
-
-            VStack(spacing: 2) {
-                ForEach(model.state.myPools) { pool in
-                    PoolRow(pool: pool, selected: model.route == .pool(pool.id),
-                            lending: model.state.lendingPoolID == pool.id) { model.open(.pool(pool.id)) }
-                }
-                Button { model.sheet = .startPool } label: {
-                    HStack(spacing: 11) {
-                        Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 28)
-                        Text("Start a Pool").font(D.ui(13.5, .medium))
-                        Spacer()
+            // Your pools, then your chats, each folding away under its heading.
+            LiveScroll {
+                VStack(alignment: .leading, spacing: 0) {
+                    SidebarSection(title: "Your pools", folded: $poolsFolded) {
+                        ForEach(model.state.myPools) { pool in
+                            PoolRow(pool: pool, selected: model.route == .pool(pool.id),
+                                    lending: model.state.lendingPoolID == pool.id) { model.open(.pool(pool.id)) }
+                        }
+                        Button { model.sheet = .startPool } label: {
+                            HStack(spacing: 11) {
+                                Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 28)
+                                Text("Start a Pool").font(D.ui(13.5, .medium))
+                                Spacer()
+                            }
+                            .foregroundStyle(D.t4)
+                            .frame(height: 38)
+                            .padding(.horizontal, 10)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .foregroundStyle(D.t4)
-                    .frame(height: 38)
-                    .padding(.horizontal, 10)
-                    .contentShape(Rectangle())
+                    SidebarSection(title: "Chats", folded: $chatsFolded, action: ("square.and.pencil", "New chat", newChat)) {
+                        ForEach(model.chats.chats) { chat in
+                            ChatRow(chat: chat, selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
+                                .contextMenu {
+                                    Button("Delete Chat", role: .destructive) {
+                                        if chat.id == model.chats.currentID { model.ask.clear() }
+                                        model.chats.delete(chat.id)
+                                    }
+                                }
+                        }
+                        if model.chats.chats.isEmpty {
+                            Text("Your conversations show up here.")
+                                .font(D.ui(12)).foregroundStyle(D.t5)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
             }
-            .padding(.horizontal, 8)
+            .scrollIndicators(.never)
 
-            Spacer(minLength: 16)
+            Spacer(minLength: 8)
 
             NavRow(symbol: "gearshape", title: "Settings", trailing: "⌘,", selected: model.route == .settings) { model.showSettings() }
                 .padding(.horizontal, 8)
@@ -267,5 +297,65 @@ private struct WindowChrome: NSViewRepresentable {
             if name == "NSScrollPocket" || name == "_NSTitlebarDecorationView" { sub.isHidden = true }
             hideScrollPockets(in: sub)
         }
+    }
+}
+
+
+/// A heading in the sidebar that folds its rows away, with an optional button on the right.
+struct SidebarSection<Content: View>: View {
+    var title: String
+    @Binding var folded: Bool
+    var action: (symbol: String, label: String, run: () -> Void)? = nil
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Button { withAnimation(.easeOut(duration: 0.18)) { folded.toggle() } } label: {
+                    HStack(spacing: 5) {
+                        Text(title).font(D.ui(11, .semibold))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(folded ? 0 : 90))
+                    }
+                    .foregroundStyle(Color(hex: 0x6E6E6E))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(folded ? "Show \(title)" : "Hide \(title)")
+                Spacer()
+                if let action {
+                    Button(action: action.run) { Image(systemName: action.symbol).font(.system(size: 11.5, weight: .medium)) }
+                        .buttonStyle(.plain).foregroundStyle(D.t4)
+                        .help(action.label)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 20)
+            .padding(.bottom, 6)
+            if !folded { content }
+        }
+    }
+}
+
+/// A chat in the sidebar: its first question, and when it was last used.
+struct ChatRow: View {
+    var chat: Chat
+    var selected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(chat.title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                    .lineLimit(1)
+                Text(chat.updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

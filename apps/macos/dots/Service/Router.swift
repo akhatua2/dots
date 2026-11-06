@@ -17,7 +17,7 @@ struct RouteCandidate: Identifiable, Hashable {
     var canUseTools = false
 }
 
-struct RouteReason: Hashable {
+struct RouteReason: Codable, Hashable {
     var symbol: String
     var text: String
 }

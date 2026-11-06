@@ -54,9 +54,10 @@ worker() {
 app() {
   local bundle="$ROOT/apps/macos/build/Build/Products/Debug/dots.app"
   [ -d "$bundle" ] || { echo "Build the app first (see docs/development.md)" >&2; exit 1; }
-  # Quit a running copy first and wait for it, or `open` hands the request to the old one.
+  # Quit a running copy first, politely so it stops its worker, and wait for it to go.
+  osascript -e 'tell application "dots" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 50); do pgrep -x dots >/dev/null || break; sleep 0.2; done
   pkill -x dots || true
-  while pgrep -x dots >/dev/null; do sleep 0.2; done
   open --env "DOTS_HOME=$HOME_DIR" --env "DOTS_WORKER=$PY -m dots.cli worker" "$bundle"
 }
 

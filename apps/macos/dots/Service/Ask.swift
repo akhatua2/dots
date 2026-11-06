@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// A receipt for one answer: where it ran, on which Macs, why, and what it cost.
-struct Receipt: Equatable {
+struct Receipt: Codable, Equatable {
     var destination: Destination
     var model: String
     var place: String
@@ -25,7 +25,7 @@ struct Receipt: Equatable {
     var fallbackNote: String?
 }
 
-struct ReceiptMac: Equatable, Identifiable {
+struct ReceiptMac: Codable, Equatable, Identifiable {
     var id: String
     var initial: String
     var name: String
@@ -81,12 +81,14 @@ enum AnswerRunner {
                        isPrivate: decision.isPrivate && c.isPrivate, isSimulated: false, reasons: reasons, paidWithKey: paidWithKey)
     }
 
-    static func messages(question: String, attachment: AskController.Attachment?) -> [ChatMessage] {
+    /// The request for a question: the system prompt, the conversation so far, then the question.
+    static func messages(question: String, attachment: AskController.Attachment?, history: [ChatTurn] = []) -> [ChatMessage] {
         var system = "You are answering through dots, a pool of Macs. Be direct and concise."
         if let a = attachment {
             system += "\n\nThe user attached \(a.name). Its text:\n\n\(a.text)"
         }
-        return [ChatMessage(role: "system", content: system), ChatMessage(role: "user", content: question)]
+        let earlier = history.flatMap { [ChatMessage(role: "user", content: $0.question), ChatMessage(role: "assistant", content: $0.answer)] }
+        return [ChatMessage(role: "system", content: system)] + earlier + [ChatMessage(role: "user", content: question)]
     }
 }
 
@@ -119,6 +121,8 @@ final class AskController {
     var receipt: Receipt?
     var second: SecondOpinion?
     var focusToken = 0
+    /// The chat turn this exchange was saved as, once its answer finished.
+    var recordedTurnID: UUID?
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var secondTask: Task<Void, Never>?
@@ -133,13 +137,13 @@ final class AskController {
     func clear() {
         task?.cancel(); secondTask?.cancel()
         input = ""; asked = ""; attachment = nil; forcedID = nil
-        phase = .idle; decision = nil; answer = ""; receipt = nil; second = nil
+        phase = .idle; decision = nil; answer = ""; receipt = nil; second = nil; recordedTurnID = nil
     }
 
     func submit(model: AppModel) {
         let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
-        let messages = AnswerRunner.messages(question: question, attachment: attachment)
+        let messages = AnswerRunner.messages(question: question, attachment: attachment, history: model.chats.current?.turns ?? [])
         let facts = RequestFacts(inputTokens: messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 })
         let decision = Router.decide(question: question, hasDocument: attachment != nil, state: model.state,
                                      rules: model.settings.rules, forcedID: forcedID, facts: facts, thisMac: model.thisMacRoute)
@@ -163,6 +167,8 @@ final class AskController {
         self.decision = decision
         phase = .routing
         let attachment = self.attachment
+        let history = model.chats.current?.turns ?? []
+        recordedTurnID = nil
         task = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(650))
             guard let self, !Task.isCancelled else { return }
@@ -170,7 +176,7 @@ final class AskController {
                 self.phase = .needsConsent(decision.needsConsent ?? "Nothing can take this right now.")
                 return
             }
-            let messages = AnswerRunner.messages(question: question, attachment: attachment)
+            let messages = AnswerRunner.messages(question: question, attachment: attachment, history: history)
             var missed: [String] = []
             for candidate in [chosen] + decision.fallbacks {
                 guard let plan = AnswerRunner.plan(for: candidate, messages: messages, model: model) else { continue }
@@ -235,6 +241,9 @@ final class AskController {
                 receipt.finished = true
                 self.receipt = receipt
                 self.phase = .done
+                let turn = ChatTurn(question: question, answer: self.answer, receipt: receipt, attachment: attachment?.name, date: .now)
+                model.chats.record(turn)
+                self.recordedTurnID = turn.id
                 if candidate.destination == .thisMac, receipt.tokPerSec > 0 { model.noteLocalSpeed(receipt.tokPerSec) }
                 model.recordAnswer(destination: candidate.destination, place: candidate.place, model: candidate.model, source: "Ask",
                                    credits: receipt.credits, usd: receipt.usd, isPrivate: receipt.isPrivate, input: input, output: output,

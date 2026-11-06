@@ -122,7 +122,12 @@ final class AppModel {
         let settings = settings ?? .load()
         self.settings = settings
         self.backend = backend ?? CloudBackend(client: Self.client(for: settings))
+        // The self-test and snapshots pass a backend of their own; they must not touch your saved chats.
+        self.chats = ChatStore(persists: backend == nil)
     }
+
+    /// Your Ask conversations, kept on this Mac.
+    let chats: ChatStore
 
     var state: NetworkState { backend.state }
     /// Your Mac is working on someone's question right now, as the hub says
