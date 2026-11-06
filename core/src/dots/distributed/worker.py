@@ -381,7 +381,7 @@ class Worker:
         """Run a single hidden-state forward through this worker's
         assigned layer range. Used by head workers chaining work
         through multi-worker placements."""
-        wire, compute_ms, error = await self._run_segment(msg)
+        wire, compute_ms, error = await self._run_segment(msg, keep_last=msg.get("keep_last"))
         if error is not None:
             return {"kind": "error", "error": error}
         return {
@@ -391,8 +391,9 @@ class Worker:
             "compute_ms": compute_ms,
         }
 
-    async def _run_segment(self, msg: dict) -> tuple[dict | None, float, str | None]:
-        """This worker's layers over a hidden state from a peer: (hidden out, compute ms, error)."""
+    async def _run_segment(self, msg: dict, keep_last: int | None = None) -> tuple[dict | None, float, str | None]:
+        """This worker's layers over a hidden state from a peer: (hidden out, compute ms, error).
+        `keep_last` sends back only the last positions; the cache still holds them all."""
         model_id = msg.get("model_id") or self.model_id
         if not isinstance(model_id, str) or not model_id:
             return None, 0.0, "model_id is required"
@@ -409,6 +410,8 @@ class Worker:
         try:
             hidden_in = runtime.decode_hidden(msg["hidden"])
             hidden_out = runtime.forward_segment(msg["conv_id"], hidden_in, int(msg["layer_start"]), int(msg["layer_end"]))
+            if keep_last:
+                hidden_out = hidden_out[:, -int(keep_last):, :]
             wire = runtime.encode_hidden(hidden_out)  # MLX computes the layers here
         except Exception as e:
             log.exception("compute_unit failed")
@@ -419,9 +422,10 @@ class Worker:
         """One stop on a ring: run our layers, then hand the hidden state straight to the next peer, or, as the
         last stop, back to the head. Nothing returns along the way, so each extra peer costs one network leg
         instead of two. A failure goes straight to the head, so it never waits out a timeout."""
-        wire, compute_ms, error = await self._run_segment(msg)
-        computed = [*msg.get("compute_ms", []), compute_ms]
         hops = msg.get("hops") or []
+        # Only the last stop trims: the ones before it pass every position on
+        wire, compute_ms, error = await self._run_segment(msg, keep_last=None if hops else msg.get("keep_last"))
+        computed = [*msg.get("compute_ms", []), compute_ms]
         try:
             if error is None and hops:
                 nxt = hops[0]
@@ -1008,7 +1012,7 @@ class Worker:
 
         timing = ChainTiming(peers=len(peer_conns))
 
-        async def forward_through_chain(hidden):
+        async def forward_through_chain(hidden, keep_last: int | None = None):
             # Our local segment first.
             started = time.perf_counter()
             hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
@@ -1025,6 +1029,8 @@ class Worker:
                     layer_start=start,
                     layer_end=end,
                     hidden=wire,
+                    # The last Mac sends back only what the head needs (one row for a prompt)
+                    keep_last=keep_last if i == len(peer_conns) - 1 else None,
                 )
                 if resp.get("kind") != "compute_unit_out":
                     raise RuntimeError(
@@ -1051,7 +1057,7 @@ class Worker:
         timeout = float(os.environ.get("DOTS_RING_TIMEOUT_S", "120"))
         timing = ChainTiming(peers=1, ring=True)
 
-        async def forward_round_ring(hidden):
+        async def forward_round_ring(hidden, keep_last: int | None = None):
             started = time.perf_counter()
             hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
             wire = runtime.encode_hidden(hidden)  # MLX computes our layers here
@@ -1064,7 +1070,7 @@ class Worker:
                 await first.notify("ring_unit", model_id=model_id, conv_id=conv_id,
                                    layer_start=hops[0]["layer_start"], layer_end=hops[0]["layer_end"],
                                    hidden=wire, hops=hops[1:], head_ticket=self._peer_ticket,
-                                   pass_id=pass_id, compute_ms=[])
+                                   pass_id=pass_id, compute_ms=[], keep_last=keep_last)
                 result = await asyncio.wait_for(home, timeout=timeout)
             finally:
                 self._ring_waiters.pop(pass_id, None)

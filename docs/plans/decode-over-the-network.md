@@ -157,6 +157,16 @@ asyncio handoffs). Hidden states already go as raw bytes.
 - **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
   plain speed per chain length and reports a drafted answer's speedup against it, slower included.
 
+- **A prompt's last hop sends one row back.** The head only needs the last position's hidden state to
+  pick the first token, so the last Mac returns that row and not the whole prompt (its cache still holds
+  every position). For a 1,600-token prompt on Qwen2.5 3B that is 6.6 MB less on the way back: about
+  0.12 s on one Mac and about 2.6 s on a 20 Mbit/s home uplink.
+- **8-bit prompt hops, measured, not shipped.** Following the Project Maya fork's KL gate, an 8-bit
+  hidden state with the 8 largest channels kept at 16 bits halves the bytes: mean KL 1.2e-3 (worst
+  0.022) when every hop is 8-bit, 3.8e-3 at the first answer token when only the prompt is, with 5 of 6
+  forty-token answers word for word the same. Plain 8-bit (worst KL 2.2) and fp8 (KL 2.1) are not
+  usable: a few residual channels are huge. Worth turning on for slow uplinks once a WAN run says so.
+
 ## Next
 
 1. **Measure over a real WAN** (with three or more Macs, star against ring) with two Macs on different networks, with and without a draft model.

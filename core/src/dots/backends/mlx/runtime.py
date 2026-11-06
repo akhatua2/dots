@@ -415,10 +415,11 @@ class MlxBackendRuntime(BackendRuntime):
         conv_id: str,
         hidden,
         forward_hidden: ForwardHidden | None,
+        keep_last: int | None = None,
     ):
         host = self._require_host()
         if forward_hidden is not None:
-            return await forward_hidden(hidden)
+            return await forward_hidden(hidden, keep_last=keep_last)
         return host.forward_segment(conv_id, hidden, 0, host.n_layers)
 
     async def prefill(
@@ -443,7 +444,7 @@ class MlxBackendRuntime(BackendRuntime):
 
         t0 = time.perf_counter()
         hidden = host.model.model.embed_tokens(array([new_ids]))
-        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
+        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=1)  # only the last row picks a token
         hidden = host.model.model.norm(hidden)
         logits = host._project_logits(hidden[:, -1:, :])
         prefill_ms = (time.perf_counter() - t0) * 1000

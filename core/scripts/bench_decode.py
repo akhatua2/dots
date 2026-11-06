@@ -49,7 +49,7 @@ def split_pool(host, conv_id: str, rtt_ms: float):
 
     half = host.n_layers // 2
 
-    async def forward(hidden):
+    async def forward(hidden, keep_last=None):
         hidden = host.forward_segment(conv_id, hidden, 0, half)
         mx.eval(hidden)  # the hidden state is materialized to go on the wire
         if rtt_ms:

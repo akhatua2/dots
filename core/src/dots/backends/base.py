@@ -14,7 +14,9 @@ from typing import Any
 from ..placement.work_units import ModelGeometry
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
-ForwardHidden = Callable[[Any], Awaitable[Any]]
+# Runs a hidden state through the rest of the model's layers, wherever they are: `await f(hidden, keep_last=n)`.
+# `keep_last` asks for only the last n positions back (a prefill needs one), so the last Mac sends less.
+ForwardHidden = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
