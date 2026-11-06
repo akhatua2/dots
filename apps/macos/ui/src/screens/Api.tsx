@@ -68,7 +68,7 @@ export function Api({ s }: { s: BridgeState }) {
       </div>
       <div className="card mt-3 divide-y divide-line">
         {s.local.keys.map((k) => (
-          <div key={k.id} className="grid grid-cols-[1.4fr_1fr_1fr_auto] items-center gap-4 px-[18px] py-[11px]">
+          <div key={k.id} className="grid grid-cols-[1.4fr_1fr_1fr_56px] items-center gap-4 px-[18px] py-[11px]">
             <div className="min-w-0">
               <p className="flex items-center gap-2.5 text-[16px] font-semibold">
                 {k.name}
@@ -85,9 +85,13 @@ export function Api({ s }: { s: BridgeState }) {
             </div>
             <p className="font-mono text-[13.5px] text-[#cfcfcf]">dots_sk_••••{k.tail}</p>
             <p className="text-[14px] text-[#cfcfcf]">{k.usage}</p>
-            <button onClick={() => store.revokeKey(k.id)} className="text-[14px] text-dim hover:text-ink">
-              Revoke
-            </button>
+            {k.id === 'join' ? (
+              <span />
+            ) : (
+              <button onClick={() => store.revokeKey(k.id)} className="text-[14px] text-dim hover:text-ink">
+                Revoke
+              </button>
+            )}
           </div>
         ))}
         {s.local.keys.length === 0 && <p className="px-5 py-6 text-center text-dim">No keys yet.</p>}
