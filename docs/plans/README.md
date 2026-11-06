@@ -119,6 +119,9 @@ order.
 
 - [`microbatching.md`](./microbatching.md) — N tokens in flight through
   the pipeline at once. Amortizes per-stage network cost.
+- [`decode-over-the-network.md`](./decode-over-the-network.md) —
+  Speculative decoding across a pool, per-pass timing, and what to
+  measure and change next.
 
 ### Discussed but not yet written down
 
