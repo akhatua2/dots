@@ -327,23 +327,51 @@ struct MacsServing: View {
     var serving: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 20, paused: !serving)) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
+        TimelineView(.animation(minimumInterval: 1 / 20, paused: !serving)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
             HStack(spacing: 6) {
-                ForEach(Array(macs.enumerated()), id: \.element.id) { i, mac in
-                    let asleep = mac.id == asleepID
-                    let pulse = serving && !asleep ? 0.3 + 0.7 * (0.5 + 0.5 * sin(2 * .pi * (t * 1.6 - Double(i) / 4))) : 0
-                    Avatar(text: mac.initial, size: 26, isYou: mac.initial == "You", dimmed: asleep)
-                        .overlay(Circle().strokeBorder(Color.white.opacity(pulse * 0.9), lineWidth: 1.5).padding(-3))
-                        .overlay(alignment: .topTrailing) {
-                            if asleep {
-                                Image(systemName: "moon.fill").font(.system(size: 8)).foregroundStyle(D.t2)
-                                    .padding(2.5).background(Circle().fill(D.deep)).offset(x: 4, y: -4)
-                            }
-                        }
-                        .help(asleep ? "\(mac.name)'s Mac is asleep" : "\(mac.name)'s Mac")
+                ForEach(Array(macs.enumerated()), id: \.element.id) { index, mac in
+                    ServingMac(mac: mac, asleep: mac.id == asleepID, pulse: pulse(at: time, index: index, asleep: mac.id == asleepID))
                 }
             }
+        }
+    }
+
+    /// 0 when idle or asleep, otherwise a wave that travels along the row of Macs.
+    private func pulse(at time: Double, index: Int, asleep: Bool) -> Double {
+        guard serving, !asleep else { return 0 }
+        let phase = 2 * Double.pi * (time * 1.6 - Double(index) / 4)
+        return 0.3 + 0.7 * (0.5 + 0.5 * sin(phase))
+    }
+}
+
+/// One Mac in the row: its initial, a pulsing ring while it serves, and a moon when it is asleep.
+private struct ServingMac: View {
+    var mac: ReceiptMac
+    var asleep: Bool
+    var pulse: Double
+
+    var body: some View {
+        Avatar(text: mac.initial, size: 26, isYou: mac.initial == "You", dimmed: asleep)
+            .overlay(ring)
+            .overlay(alignment: .topTrailing) { moon }
+            .help(asleep ? "\(mac.name)'s Mac is asleep" : "\(mac.name)'s Mac")
+    }
+
+    private var ring: some View {
+        Circle()
+            .strokeBorder(Color.white.opacity(pulse * 0.9), lineWidth: 1.5)
+            .padding(-3)
+    }
+
+    @ViewBuilder private var moon: some View {
+        if asleep {
+            Image(systemName: "moon.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(D.t2)
+                .padding(2.5)
+                .background(Circle().fill(D.deep))
+                .offset(x: 4, y: -4)
         }
     }
 }

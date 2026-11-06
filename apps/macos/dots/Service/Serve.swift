@@ -81,10 +81,14 @@ extension AppModel {
     }
 
     private var gatewayModels: [(String, String)] {
-        [("auto", "dots picks where each request runs")]
-            + (thisMacRoute.map { [($0.modelID, "\($0.modelID) on this Mac")] } ?? [])
-            + (Ladder.tiers + Ladder.special).map { ($0.id, $0.name) }
-            + FrontierModel.all.map { ($0.id, $0.name) }
+        let auto: [(String, String)] = [("auto", "dots picks where each request runs")]
+        var onThisMac: [(String, String)] = []
+        if let route = thisMacRoute {
+            onThisMac = [(route.modelID, "\(route.modelID) on this Mac")]
+        }
+        let pools: [(String, String)] = (Ladder.tiers + Ladder.special).map { ($0.id, $0.name) }
+        let frontier: [(String, String)] = FrontierModel.all.map { ($0.id, $0.name) }
+        return auto + onThisMac + pools + frontier
     }
 
     private func serve(_ request: HTTPRequest, _ res: HTTPResponder, format: APIFormat) async {

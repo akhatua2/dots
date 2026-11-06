@@ -262,23 +262,43 @@ struct BoostGauge: View, Animatable {
         set { mine = newValue }
     }
 
+    /// How many dots (3 GB each) the pledges of members, or of guests, fill. You are counted separately.
+    private func dots(guest: Bool) -> Int {
+        let others = boost.pledges.filter { $0.guest == guest && $0.personID != meID }
+        return others.reduce(0) { $0 + $1.gb } / 3
+    }
+
+    private enum DotColor {
+        static let member: UInt32 = 0x8A8A8A
+        static let guest: UInt32 = 0xD6D6D6
+        static let you: UInt32 = 0xFF5A1F
+        static let empty: UInt32 = 0x262626
+    }
+
     var body: some View {
         Canvas { ctx, sz in
             let w = sz.width
             let c = w / 2, r = w * 0.43
-            let n = max(1, boost.targetGB / 3)
-            let members = boost.pledges.filter { !$0.guest && $0.personID != meID }.reduce(0) { $0 + $1.gb } / 3
-            let guests = boost.pledges.filter { $0.guest && $0.personID != meID }.reduce(0) { $0 + $1.gb } / 3
+            let total = max(1, boost.targetGB / 3)
+            let members = dots(guest: false)
+            let guests = dots(guest: true)
             let you = Int((mine / 3).rounded())
             let size = w * 7 / 472
+
+            // One path per colour, so the ring is a handful of fills and not one per dot.
             var paths: [UInt32: Path] = [:]
-            for i in 0..<n {
-                let a = Double(i) / Double(n) * 2 * .pi - .pi / 2
-                let rgb: UInt32 = i < members ? 0x8A8A8A : i < members + guests ? 0xD6D6D6 : i < members + guests + you ? 0xFF5A1F : 0x262626
-                paths[rgb, default: Path()].addRect(CGRect(x: (c + r * cos(a) - size / 2).rounded(), y: (c + r * sin(a) - size / 2).rounded(),
-                                                           width: size, height: size))
+            for i in 0..<total {
+                let angle = Double(i) / Double(total) * 2 * .pi - .pi / 2
+                let colour: UInt32
+                if i < members { colour = DotColor.member }
+                else if i < members + guests { colour = DotColor.guest }
+                else if i < members + guests + you { colour = DotColor.you }
+                else { colour = DotColor.empty }
+                let x = (c + r * cos(angle) - size / 2).rounded()
+                let y = (c + r * sin(angle) - size / 2).rounded()
+                paths[colour, default: Path()].addRect(CGRect(x: x, y: y, width: size, height: size))
             }
-            for (rgb, p) in paths { ctx.fill(p, with: .color(Color(hex: rgb))) }
+            for (colour, path) in paths { ctx.fill(path, with: .color(Color(hex: colour))) }
             ctx.fill(Path(CGRect(x: c - 1, y: c - r - size * 1.9, width: 2, height: size * 1.15)), with: .color(D.accentText))
         }
         .accessibilityElement()

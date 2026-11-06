@@ -7,7 +7,7 @@ This is a monorepo. Each top-level dir has its own README; the high level:
 ```
 apps/              end-user clients
   web/             Vite + React web app (chat + pool map + contribute) → Vercel
-  macos/           native macOS app (early stub)
+  macos/           native SwiftUI macOS app (menu bar, ask panel, pools); see apps/macos/README.md
 core/              the Python engine — everything dots actually runs
   pyproject.toml   package + dep manifest (run uv from here)
   uv.lock
@@ -121,3 +121,18 @@ vercel login
 vercel link          # creates .vercel/project.json
 # Copy team_id → VERCEL_ORG_ID, projectId → VERCEL_PROJECT_ID into GitHub Secrets
 ```
+
+## Building the Mac app
+
+```bash
+brew install xcodegen
+cd apps/macos
+xcodegen generate
+xcodebuild -project dots.xcodeproj -scheme dots -configuration Debug -derivedDataPath build \
+  -destination 'platform=macOS,arch=arm64' CODE_SIGN_IDENTITY="-" DEVELOPMENT_TEAM="" CODE_SIGN_STYLE=Manual build
+open build/Build/Products/Debug/dots.app
+build/Build/Products/Debug/dots.app/Contents/MacOS/dots --selftest   # 110 checks against a mock cloud
+```
+
+`project.yml` signs with Sourabh's team. The flags above build it ad hoc on any Mac.
+The app talks to a mock cloud until the real one exists; its contract is `apps/macos/API.md`.
