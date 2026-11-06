@@ -1,6 +1,31 @@
 # macos
 
-Native macOS client for dots — chat and contribute compute with no terminal.
+Native macOS client for dots, designed by Sourabh Daroji
+(https://sourabhdaroji.com/work/dots-decentralized-inference). Lend this Mac to
+a pool, ask the pool, and use it as an OpenAI endpoint, with no terminal.
+
+## What is in it
+
+- **Menu bar dropdown**: a dot in the menu bar (hollow when idle, a breathing
+  orange dot while lending). Click it to turn lending on/off, set how much memory
+  to lend (the share kept for the owner is hatched), lend only when plugged in,
+  pause while the Mac is in use, pause for an hour, and watch credits. Backed by
+  the real worker: the bridge starts, stops and resizes it (`--max-ram`).
+- **Ask** (Option-Space): a panel over whatever you are reading, with a receipt of
+  which Macs answered and why it ran there. Drop a text file on it for context.
+- **Explore / Pool / Profile / API** screens, and the join moment.
+- Closing the window keeps the app (and lending) alive in the menu bar.
+
+## Data: real vs preview
+
+The UI renders only what the bridge returns (`catalog`, `lend_get`, `usage`).
+Real hub data (the pool's Macs, credits, device, memory, join token) is always
+used. Features the hub does not serve yet (public pool directory, endorsements,
+badges, per-key API access, credits per hour history) come from
+`backend/preview.json`, served by the bridge so the whole design is populated.
+Turn that off with `preview_data = false` in `config.toml`. Nothing is hardcoded
+in the UI. Tuning values live in `config.toml`.
+
 
 ## How it works
 

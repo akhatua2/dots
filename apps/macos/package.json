@@ -6,8 +6,9 @@
     "ui:install": "cd ui && npm install",
     "ui:build": "cd ui && npm run build",
     "tauri": "tauri",
-    "dev": "npm run ui:build && DOTS_BRIDGE_CMD=\"$PWD/../../core/.venv/bin/python $PWD/backend/bridge.py\" tauri dev",
-    "build": "npm run ui:build && tauri build"
+    "dev": "DOTS_BRIDGE_CMD=\"$PWD/../../core/.venv/bin/python $PWD/backend/bridge.py\" tauri dev",
+    "build": "npm run ui:build && tauri build",
+    "ui:dev": "cd ui && npm run dev -- --port 5173 --strictPort"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

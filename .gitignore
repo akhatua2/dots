@@ -45,3 +45,4 @@ core/scripts/sim_results/
 
 # vendored reference repos (read-only, never committed)
 _external/
+apps/macos/mockups/

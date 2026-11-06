@@ -8,7 +8,6 @@ import laptop from './assets/devices/laptop.svg?raw'
 import monitor from './assets/devices/monitor.svg?raw'
 import hardDrive from './assets/devices/hard-drive.svg?raw'
 import smartphone from './assets/devices/smartphone.svg?raw'
-import xIcon from './assets/devices/x.svg?raw'
 import { Icon } from './components/Icon'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN as string
@@ -113,7 +112,7 @@ export function MapPanel({
     if (!el || map.current) return
     const m = new mapboxgl.Map({
       container: el,
-      style: 'mapbox://styles/mapbox/light-v11',
+      style: 'mapbox://styles/mapbox/dark-v11',
       center: [-30, 25],
       zoom: 1.3,
       attributionControl: false,
@@ -195,15 +194,15 @@ export function MapPanel({
       <div ref={() => sync()} className="hidden" />
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between px-5 py-3">
-        <span className="label">
+        <span className="label rounded-full bg-bg/80 px-2.5 py-1">
           {located} {located === 1 ? 'node' : 'nodes'} on the map
         </span>
         <button
           onClick={onClose}
           aria-label="Close map"
-          className="pointer-events-auto grid size-7 place-items-center rounded-full bg-bg/90 text-dim shadow-sm hover:text-ink [&>span>svg]:size-3.5"
+          className="pointer-events-auto grid size-7 place-items-center rounded-full bg-bg/90 text-dim shadow-sm hover:text-ink"
         >
-          <Icon svg={xIcon} />
+          <Icon name="x" size={14} />
         </button>
       </div>
 

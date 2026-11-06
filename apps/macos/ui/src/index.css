@@ -1,28 +1,30 @@
 @import 'tailwindcss';
 
 /*
-  dots — minimal, light, editorial (shared with the web app).
-  Clean white canvas, near-black ink, hairline borders, generous whitespace.
-  One restrained accent (burnt sienna) for active/live signals; green only for
-  "online". Mono (IBM Plex Mono) is the instrument voice for labels/data;
-  Hanken Grotesk carries readable prose.
+  dots — dark graphite with one electric orange (Sourabh Daroji's design).
+  Orange only ever marks: you, what is live, and the one main action on screen.
 */
 @theme {
-  --color-bg: #ffffff;
-  --color-surface: #ffffff;
-  --color-surface-2: #f4f4f3;
-  --color-line: #ececeb;
-  --color-line-2: #dcdcda;
-  --color-ink: #1a1a1a;
-  --color-dim: #8a8a87;
-  --color-faint: #b6b5b1;
-  --color-signal: #c6571f; /* burnt sienna — the one accent */
-  --color-signal-dim: #ecd2bf;
-  --color-live: #2f8f5b; /* green — online only */
-  --color-warn: #bd3b2c;
+  --color-bg: #191919;
+  --color-sidebar: #141414;
+  --color-card: #1f1f1f;
+  --color-surface-2: #262626;
+  --color-active: #2a2a2a;
+  --color-btn: #303030;
+  --color-input: #0e0e0e;
+  --color-line: #2a2a2a;
+  --color-line-2: #3a3a3a;
+  --color-ink: #f4f4f4;
+  --color-dim: #8f8f8f;
+  --color-faint: #5e5e5e;
+  --color-signal: #ff5a1f; /* the one accent */
+  --color-signal-soft: #3a2218;
+  --color-signal-text: #ff7a45;
+  --color-live: #ff5a1f;
+  --color-warn: #e5484d;
 
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
-  --font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
 }
 
 html,
@@ -35,26 +37,46 @@ body {
   margin: 0;
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-size: 13px;
+  letter-spacing: -0.003em;
   background-color: var(--color-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  cursor: default;
 }
 
-/* Native window chrome: header/rail drag the window; interactive bits don't. */
-.drag {
-  -webkit-app-region: drag;
-}
-.no-drag {
-  -webkit-app-region: no-drag;
+/* Floating panels (menu bar dropdown, Ask) draw their own rounded surface. */
+[data-surface='tray'] body,
+[data-surface='ask'] body,
+[data-surface='tray'] html,
+[data-surface='ask'] html {
+  background: transparent;
 }
 
-/* Instrument micro-label: uppercase mono with wide tracking. */
+button {
+  cursor: default;
+  font: inherit;
+}
+input,
+textarea {
+  user-select: text;
+  font: inherit;
+}
+
+/* Small uppercase section label. */
 .label {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--color-dim);
+}
+
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
+  border-radius: 16px;
 }
 
 /* Blinking caret for streaming output. */
@@ -78,6 +100,46 @@ body {
   animation: blink 1.1s step-end infinite;
 }
 
+/* Slow turn for the dithered swirl in the join moments. */
+@keyframes turn {
+  to {
+    rotate: 360deg;
+  }
+}
+.swirl-turn {
+  animation: turn 60s linear infinite;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    translate: 0 10px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+.rise {
+  animation: rise 0.5s ease-out both;
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+.fade {
+  animation: fade 0.3s ease-out both;
+}
+
+/* Hatched region of the memory slider: memory always kept for the owner. */
+.hatch {
+  background: repeating-linear-gradient(
+    -45deg,
+    #4a4a4a 0 3px,
+    #262626 3px 7px
+  );
+}
+
 /* Soft pulse for the live status dot — opacity only, no shadow (stays flat). */
 @keyframes pulse {
   0%,
@@ -98,6 +160,7 @@ body {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-line-2);
+  border-radius: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -105,7 +168,7 @@ body {
 
 ::selection {
   background: var(--color-signal);
-  color: var(--color-bg);
+  color: #fff;
 }
 
 /* Worker map markers: a location pin whose head is a conic green/red ring

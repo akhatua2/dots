@@ -4,27 +4,43 @@
   "version": "0.1.0",
   "identifier": "computer.dots.app",
   "build": {
-    "frontendDist": "../ui/dist"
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run ui:dev"
   },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "dots",
-        "width": 920,
-        "height": 700,
-        "minWidth": 560,
-        "minHeight": 440
+        "width": 1080,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 560,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 22,
+          "y": 24
+        },
+        "theme": "Dark",
+        "backgroundColor": "#191919"
       }
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/icon.png"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
     "category": "Utility",
     "shortDescription": "Run an LLM across your Macs",
     "externalBin": []

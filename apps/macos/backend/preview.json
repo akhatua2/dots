@@ -1,0 +1,409 @@
+{
+  "macs_lending_now": 2914,
+  "filters": [
+    "All",
+    "Code",
+    "Research",
+    "Writing",
+    "Nearby"
+  ],
+  "models": [
+    "Qwen3 235B",
+    "Llama 3.3 70B",
+    "DeepSeek V3.1",
+    "Kimi K2",
+    "Qwen3 Coder 480B"
+  ],
+  "joined_default": [
+    "studio-9",
+    "home"
+  ],
+  "pools": [
+    {
+      "id": "open-science",
+      "name": "Open Science",
+      "model": "Kimi K2",
+      "macs": 348,
+      "blurb": "Researchers pooling Macs for long papers and messy data.",
+      "lending": 212,
+      "tps": 9,
+      "earn": 11,
+      "friends": [
+        "Maya",
+        "Jun"
+      ],
+      "endorsements": 2400,
+      "endorsements_label": "2.4k",
+      "tags": [
+        "Research"
+      ],
+      "public": true,
+      "capacity_gb": 2200,
+      "lenders": [
+        "M",
+        "J",
+        "A",
+        "S",
+        "T",
+        "R"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396
+        },
+        {
+          "name": "Kimi K2",
+          "at_gb": 620
+        }
+      ]
+    },
+    {
+      "id": "night-owls-berlin",
+      "name": "Night Owls Berlin",
+      "model": "DeepSeek V3.1",
+      "macs": 88,
+      "blurb": "Idle Macs across Berlin, quick for anyone nearby.",
+      "lending": 61,
+      "tps": 14,
+      "earn": 9,
+      "friends": [],
+      "endorsements": 640,
+      "endorsements_label": "640",
+      "tags": [
+        "Nearby"
+      ],
+      "public": true,
+      "capacity_gb": 640,
+      "lenders": [
+        "N",
+        "O",
+        "B",
+        "L"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396
+        },
+        {
+          "name": "Kimi K2",
+          "at_gb": 620
+        }
+      ]
+    },
+    {
+      "id": "indie-hackers",
+      "name": "Indie Hackers",
+      "model": "Qwen3 Coder 480B",
+      "macs": 126,
+      "blurb": "Builders sharing a coding model around the clock.",
+      "lending": 94,
+      "tps": 13,
+      "earn": 10,
+      "friends": [
+        "Theo"
+      ],
+      "endorsements": 1100,
+      "endorsements_label": "1.1k",
+      "tags": [
+        "Code"
+      ],
+      "public": true,
+      "capacity_gb": 900,
+      "lenders": [
+        "T",
+        "I",
+        "H",
+        "K"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "Qwen3 Coder 480B",
+          "at_gb": 300
+        },
+        {
+          "name": "Kimi K2",
+          "at_gb": 620
+        }
+      ]
+    },
+    {
+      "id": "film-school",
+      "name": "Film School",
+      "model": "Kimi K2",
+      "macs": 64,
+      "blurb": "Editors' Mac Studios, lent out between renders.",
+      "lending": 38,
+      "tps": 12,
+      "earn": 14,
+      "friends": [],
+      "endorsements": 510,
+      "endorsements_label": "510",
+      "tags": [
+        "Writing"
+      ],
+      "public": true,
+      "capacity_gb": 700,
+      "lenders": [
+        "F",
+        "S",
+        "E"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396
+        },
+        {
+          "name": "Kimi K2",
+          "at_gb": 620
+        }
+      ]
+    },
+    {
+      "id": "writers-room",
+      "name": "Writers' Room",
+      "model": "Qwen3 235B",
+      "macs": 14,
+      "blurb": "Novelists and editors, with room for a whole manuscript.",
+      "lending": 9,
+      "tps": 24,
+      "earn": 7,
+      "friends": [
+        "Priya"
+      ],
+      "endorsements": 380,
+      "endorsements_label": "380",
+      "tags": [
+        "Writing"
+      ],
+      "public": true,
+      "capacity_gb": 180,
+      "lenders": [
+        "P",
+        "W",
+        "R"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396
+        }
+      ]
+    },
+    {
+      "id": "student-union",
+      "name": "Student Union",
+      "model": "Qwen3 235B",
+      "macs": 9,
+      "blurb": "Campus Macs, lent between classes.",
+      "lending": 6,
+      "tps": 19,
+      "earn": 5,
+      "friends": [],
+      "note": "New this week. Back it early.",
+      "endorsements": 42,
+      "endorsements_label": "42",
+      "tags": [
+        "Research"
+      ],
+      "public": true,
+      "capacity_gb": 360,
+      "lenders": [
+        "A",
+        "K",
+        "R",
+        "D",
+        "L",
+        "E"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396,
+          "unlock_on_join": true,
+          "params": "671 billion"
+        },
+        {
+          "name": "Kimi K2",
+          "at_gb": 620
+        }
+      ]
+    },
+    {
+      "id": "studio-9",
+      "name": "Studio 9",
+      "model": "Qwen3 235B",
+      "macs": 4,
+      "blurb": "Our studio's Macs.",
+      "lending": 4,
+      "tps": 24,
+      "earn": 0,
+      "friends": [],
+      "endorsements": 0,
+      "endorsements_label": "0",
+      "tags": [],
+      "public": false,
+      "capacity_gb": 180,
+      "lenders": [
+        "M",
+        "T",
+        "J",
+        "P"
+      ],
+      "can_run": [
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136
+        }
+      ]
+    },
+    {
+      "id": "home",
+      "name": "Home",
+      "model": "Llama 3.3 70B",
+      "macs": 3,
+      "blurb": "Our household Macs.",
+      "lending": 3,
+      "tps": 18,
+      "earn": 0,
+      "friends": [],
+      "endorsements": 0,
+      "endorsements_label": "0",
+      "tags": [],
+      "public": false,
+      "capacity_gb": 96,
+      "lenders": [
+        "A",
+        "B",
+        "C"
+      ],
+      "can_run": [
+        {
+          "name": "Llama 3.3 70B",
+          "at_gb": 48
+        }
+      ]
+    }
+  ],
+  "badges": [
+    {
+      "id": "unlocker",
+      "icon": "bolt",
+      "title": "Unlocker",
+      "body": "Took Student Union to DeepSeek V3.1",
+      "when": "Tonight",
+      "new": true
+    },
+    {
+      "id": "early-backer",
+      "icon": "shield",
+      "title": "Early backer",
+      "body": "Endorsed Student Union at 10 Macs",
+      "when": "Tonight"
+    },
+    {
+      "id": "30-nights",
+      "icon": "moon",
+      "title": "30 nights",
+      "body": "Lent 30 nights in a row",
+      "when": "September"
+    },
+    {
+      "id": "1000-answers",
+      "icon": "chat",
+      "title": "1,000 answers",
+      "body": "Helped answer 1,000 questions",
+      "when": "August"
+    }
+  ],
+  "profile": {
+    "questions_helped": 12406,
+    "since": "March"
+  },
+  "key_scopes": [
+    {
+      "id": "pools",
+      "title": "Your pools",
+      "body": "Private, and free for you",
+      "default": true
+    },
+    {
+      "id": "public",
+      "title": "Public pools",
+      "body": "Spends credits",
+      "default": true
+    },
+    {
+      "id": "frontier",
+      "title": "Frontier models",
+      "body": "Spends credits, and leaves your pools",
+      "default": false
+    }
+  ],
+  "default_monthly_limit": 500,
+  "keys_default": [
+    {
+      "id": "k1",
+      "name": "Sourabh's laptop",
+      "scope": "Everything",
+      "tail": "9f3a",
+      "usage": "612 credits this month",
+      "meta": "used today"
+    },
+    {
+      "id": "k2",
+      "name": "Raycast",
+      "scope": "Your pools only",
+      "tail": "4c1e",
+      "usage": "Free this month",
+      "meta": "used 2 hours ago"
+    }
+  ],
+  "request_split": [
+    {
+      "label": "Your pools",
+      "pct": 71,
+      "note": "free",
+      "shade": "#d6d6d6"
+    },
+    {
+      "label": "Public pools",
+      "pct": 19,
+      "note": "186 credits",
+      "shade": "#8c8c8c"
+    },
+    {
+      "label": "Frontier models",
+      "pct": 10,
+      "note": "426 credits",
+      "shade": "#5e5e5e"
+    }
+  ],
+  "_note": "Preview content from Sourabh's design, served by the bridge so the UI is fully populated before the hub has these features. Real hub data is merged in on top (see bridge.catalog). Set preview_data = false in config.toml to drop it."
+}

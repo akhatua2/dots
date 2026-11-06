@@ -7,3 +7,29 @@ model = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 # Hub HTTP API base (worker map data).   override: DOTS_HUB_HTTP
 hub_http = "https://delpha-perse-granville.ngrok-free.dev"
+
+# Name shown for the pool this Mac lends to.   override: DOTS_POOL_NAME
+pool_name = "Home"
+
+# Share of this Mac's memory always kept for its owner (never lendable).
+# override: DOTS_RESERVE_FRACTION
+reserve_fraction = 0.25
+
+# Credits shown per compute unit (CU) the ledger counts.   override: DOTS_CREDITS_PER_CU
+credits_per_cu = 1000
+
+# Seconds without input before the Mac counts as idle ("Pause while I'm using it").
+# override: DOTS_IDLE_SECONDS
+idle_seconds = 60
+
+# How often the lending policy re-checks power / activity / pause (seconds).
+# override: DOTS_LEND_POLL_SECONDS
+lend_poll_seconds = 5
+
+# Models offered when starting a pool.
+models = ["Qwen3 235B", "Llama 3.3 70B", "DeepSeek V3.1", "Kimi K2"]
+
+# Serve the design's preview content (pools, badges, keys…) from the bridge so
+# the whole UI is populated before the hub has those features. Real hub data is
+# always merged in first.   override: DOTS_PREVIEW_DATA
+preview_data = true
