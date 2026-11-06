@@ -166,6 +166,21 @@ final class AskController {
         var step = 0
         var of = 0
         var done = false
+        /// Which step came first and when, and when the latest came, to tell how long the rest will take
+        var firstStep: (step: Int, at: Date)?
+        var latestAt: Date?
+
+        static func == (a: Self, b: Self) -> Bool {
+            a.image == b.image && a.step == b.step && a.of == b.of && a.done == b.done && a.latestAt == b.latestAt
+        }
+
+        /// Seconds left at `now`: the steps still to come at the pace of those so far, less the time since the
+        /// latest. Nil until two steps have come.
+        func secondsLeft(at now: Date) -> Double? {
+            guard !done, let first = firstStep, let latest = latestAt, step > first.step, of > step else { return nil }
+            let perStep = latest.timeIntervalSince(first.at) / Double(step - first.step)
+            return max(1, perStep * Double(of - step) - now.timeIntervalSince(latest))
+        }
     }
 
     struct SecondOpinion: Equatable {
@@ -266,7 +281,9 @@ final class AskController {
                         if Task.isCancelled { return }
                         switch event {
                         case let .step(step, of, preview):
-                            self.picture = PictureProgress(image: preview, step: step, of: of)
+                            let now = Date()
+                            self.picture = PictureProgress(image: preview, step: step, of: of,
+                                                           firstStep: self.picture?.firstStep ?? (step, now), latestAt: now)
                         case .done(var png):
                             // An edit of your photo goes back into the photo itself, at its own size
                             if let a = attachment, let sent = a.picture {

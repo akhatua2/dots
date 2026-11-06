@@ -85,7 +85,7 @@ private struct Conversation: View {
                                 if picture.image != nil { PictureAnswer(image: picture.image) }
                                 Text(why).font(D.ui(13)).foregroundStyle(D.t3)
                             } else {
-                                PictureAnswer(image: picture.image, step: picture.step, of: picture.of, done: picture.done)
+                                PictureAnswer(image: picture.image, progress: picture)
                             }
                         } else {
                             AskBody(compact: true)

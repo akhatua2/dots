@@ -112,7 +112,9 @@ enum Snapshots {
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-photo", fitHeight: true)
         ask.clear()
         // A picture as an answer, three steps into its drawing
-        save(PictureAnswer(image: SampleData.photo, step: 3, of: 8, done: false).padding(28).background(D.bg2),
+        let forming = AskController.PictureProgress(image: SampleData.photo, step: 3, of: 8,
+                                                    firstStep: (1, Date(timeIntervalSinceNow: -40)), latestAt: Date(timeIntervalSinceNow: -5))
+        save(PictureAnswer(image: SampleData.photo, progress: forming).padding(28).background(D.bg2),
              model, CGSize(width: 540, height: 600), dir, "07-ask-drawing", fitHeight: true)
 
         // 5. A week of work, and your profile with this week's note
