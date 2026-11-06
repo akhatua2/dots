@@ -29,7 +29,7 @@ struct AskScreen: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(D.accent, lineWidth: 1.5).padding(12)
                 }
             }
-            .modifier(FileDrop(enabled: true, targeted: $dropTargeted) { url in model.ask.attach(url) })
+            .modifier(FileDrop(enabled: true, targeted: $dropTargeted) { url in model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) })
         }
     }
 
@@ -102,7 +102,8 @@ private struct QuestionBubble: View {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 4) {
                 if let attachment {
-                    Label(attachment, systemImage: "doc").font(D.ui(11.5)).foregroundStyle(D.t4)
+                    Label(attachment, systemImage: Pictures.isPicture(URL(fileURLWithPath: attachment)) ? "photo" : "doc")
+                        .font(D.ui(11.5)).foregroundStyle(D.t4)
                 }
                 Text(text).font(D.ui(15)).foregroundStyle(D.t1).textSelection(.enabled)
             }
@@ -112,7 +113,7 @@ private struct QuestionBubble: View {
     }
 }
 
-/// The question box: a paperclip or the attached file, the text, the route, and send.
+/// The question box: a paperclip or the attached file or picture, the text, the route, and send.
 struct AskComposer: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focused: Bool
@@ -122,15 +123,7 @@ struct AskComposer: View {
         @Bindable var ask = model.ask
         VStack(alignment: .leading, spacing: 10) {
             if let attachment = ask.attachment {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc").font(.system(size: 11, weight: .medium))
-                    Text(attachment.name).font(D.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
-                    Button { ask.attachment = nil } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                        .buttonStyle(.plain).foregroundStyle(D.t4)
-                }
-                .foregroundStyle(D.t2)
-                .padding(.horizontal, 10).frame(height: 26)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
+                AttachmentChip(attachment: attachment, height: 30) { ask.attachment = nil }
             }
             TextField(placeholder, text: $ask.input, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -168,9 +161,9 @@ struct AskComposer: View {
 
     private func pickFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText]
+        panel.allowedContentTypes = AskController.attachable
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url) }
+        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) }
     }
 }
 

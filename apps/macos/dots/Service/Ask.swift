@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
 /// A receipt for one answer: where it ran, on which Macs, why, and what it cost.
 struct Receipt: Codable, Equatable {
@@ -133,14 +134,16 @@ enum AnswerRunner {
                        isPrivate: decision.isPrivate && c.isPrivate, isSimulated: false, reasons: reasons, paidWithKey: paidWithKey)
     }
 
-    /// The request for a question: the system prompt, the conversation so far, then the question.
+    /// The request for a question: the system prompt, the conversation so far, then the question, with its
+    /// picture if one is attached. An attached document's text goes in the system prompt.
     static func messages(question: String, attachment: AskController.Attachment?, history: [ChatTurn] = []) -> [ChatMessage] {
         var system = "You are answering through dots, a pool of Macs. Be direct and concise."
-        if let a = attachment {
+        if let a = attachment, a.picture == nil {
             system += "\n\nThe user attached \(a.name). Its text:\n\n\(a.text)"
         }
         let earlier = history.flatMap { [ChatMessage(role: "user", content: $0.question), ChatMessage(role: "assistant", content: $0.answer)] }
-        return [ChatMessage(role: "system", content: system)] + earlier + [ChatMessage(role: "user", content: question)]
+        let asked = ChatMessage(role: "user", content: question, images: attachment?.picture.map { [$0] } ?? [])
+        return [ChatMessage(role: "system", content: system)] + earlier + [asked]
     }
 }
 
@@ -154,6 +157,8 @@ final class AskController {
         var name: String
         var text: String
         var url: URL
+        /// A picture, shrunk and ready to send; nil for a document
+        var picture: Data?
     }
 
     struct SecondOpinion: Equatable {
@@ -185,7 +190,15 @@ final class AskController {
 
     var isBusy: Bool { phase == .routing || phase == .streaming }
 
-    func attach(_ url: URL) {
+    /// What can be attached to a question: documents, read as text, and pictures
+    static let attachable: [UTType] = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText, .image]
+
+    func attach(_ url: URL, maxPixels: Int) {
+        if Pictures.isPicture(url) {
+            guard let picture = Pictures.jpeg(from: url, maxPixels: maxPixels) else { return }
+            attachment = Attachment(name: url.lastPathComponent, text: "", url: url, picture: picture)
+            return
+        }
         guard let text = Documents.text(from: url), !text.isEmpty else { return }
         attachment = Attachment(name: url.lastPathComponent, text: text, url: url)
     }
@@ -200,7 +213,8 @@ final class AskController {
         let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         let messages = AnswerRunner.messages(question: question, attachment: attachment, history: model.chats.current?.turns ?? [])
-        let facts = RequestFacts(inputTokens: messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 })
+        let facts = RequestFacts(inputTokens: messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 },
+                                 hasImages: attachment?.picture != nil)
         let decision = Router.decide(question: question, hasDocument: attachment != nil, state: model.state,
                                      rules: model.settings.rules, forcedID: forcedID, facts: facts, thisMac: model.thisMacRoute)
         run(question: question, decision: decision, model: model)

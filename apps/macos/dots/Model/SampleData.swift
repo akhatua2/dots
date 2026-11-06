@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// The world the simulation starts in. Your Mac is the real one (its actual memory and model);
 /// everyone else is sample data, the same people and pools as the case study.
@@ -133,5 +133,31 @@ enum SampleData {
             out.append(String(letters[Int(seed >> 33) % letters.count]))
         }
         return out
+    }
+}
+
+extension SampleData {
+    /// A photo for the snapshots of asking about one: a road under hills at dusk, drawn here, as a JPEG
+    static var photo: Data? {
+        let size = NSSize(width: 640, height: 480)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSGradient(starting: NSColor(calibratedRed: 0.55, green: 0.65, blue: 0.8, alpha: 1),
+                       ending: NSColor(calibratedRed: 0.95, green: 0.8, blue: 0.6, alpha: 1))?.draw(in: rect, angle: 90)
+            let hills = NSBezierPath()
+            hills.move(to: .zero)
+            hills.line(to: NSPoint(x: 0, y: 220)); hills.line(to: NSPoint(x: 220, y: 300))
+            hills.line(to: NSPoint(x: 400, y: 200)); hills.line(to: NSPoint(x: 640, y: 280)); hills.line(to: NSPoint(x: 640, y: 0))
+            NSColor(calibratedWhite: 0.15, alpha: 1).setFill()
+            hills.fill()
+            let road = NSBezierPath()
+            road.move(to: NSPoint(x: 260, y: 0)); road.curve(to: NSPoint(x: 330, y: 210), controlPoint1: NSPoint(x: 520, y: 80),
+                                                              controlPoint2: NSPoint(x: 300, y: 160))
+            road.lineWidth = 6
+            NSColor(calibratedWhite: 0.85, alpha: 1).setStroke()
+            road.stroke()
+            return true
+        }
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
     }
 }

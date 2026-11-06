@@ -104,6 +104,13 @@ enum Snapshots {
         ask.draft = ""
         ask.checks = []
         ask.phase = .done
+        // A photo waiting to be asked about
+        ask.clear()
+        ask.input = "Which way does the road go?"
+        ask.attachment = .init(name: "big-sur-road.jpg", text: "", url: URL(fileURLWithPath: "/tmp/big-sur-road.jpg"),
+                               picture: SampleData.photo)
+        save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-photo", fitHeight: true)
+        ask.clear()
 
         // 5. A week of work, and your profile with this week's note
         await model.backend.beatNow(active: true, adding: 31 * 3_600)

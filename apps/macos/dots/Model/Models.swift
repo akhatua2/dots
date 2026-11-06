@@ -14,6 +14,7 @@ struct ModelTier: Codable, Hashable, Identifiable {
     var credits: Int            // what an answer costs on a public pool
     var layers: Int             // transformer layers, shared out across the pool's Macs
     var activeB: Double         // parameters used for each token, in billions (fewer than the total for mixture-of-experts models)
+    var readsImages: Bool? = nil  // the cloud says so for models whose vision encoder a pool runs
 }
 
 enum Ladder {

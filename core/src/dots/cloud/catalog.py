@@ -29,6 +29,9 @@ _LADDER = [
     ("mlx-community/Kimi-K2.5", "Kimi K2.5", 720, "1T", 61, 32, 8, 4),
 ]
 _SPECIAL: list[tuple] = []
+# Models whose vision encoder dots runs on the head Mac (backends/mlx/vision.py): they read images
+_READS_IMAGES = {"mlx-community/Qwen3.5-0.8B-4bit", "mlx-community/Qwen3.5-2B-MLX-4bit",
+                 "mlx-community/Qwen3.5-4B-MLX-4bit", "mlx-community/Qwen3.5-9B-MLX-4bit"}
 
 _LONG = {"T": "trillion", "B": "billion", "M": "million"}
 
@@ -60,6 +63,7 @@ def _tier(entry: tuple) -> dict:
         "credits": credits,
         "layers": layers,
         "activeB": active_b,
+        "readsImages": model_id in _READS_IMAGES,
     }
 
 
@@ -87,6 +91,7 @@ def served_tier(model_id: str, layers: int, tok_per_sec: float) -> dict:
         "credits": 0,
         "layers": layers,
         "activeB": billions,
+        "readsImages": model_id in _READS_IMAGES,
     }
 
 

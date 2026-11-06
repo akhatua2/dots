@@ -51,7 +51,7 @@ struct AskPanelView: View {
             if !isSnapshot { AskPanelController.shared.fit(height: height) }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .modifier(FileDrop(enabled: !isSnapshot, targeted: $dropTargeted) { url in model.ask.attach(url) })
+        .modifier(FileDrop(enabled: !isSnapshot, targeted: $dropTargeted) { url in model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) })
         .onAppear { focused = true }
         .onChange(of: ask.focusToken) { _, _ in focused = true }
         .preferredColorScheme(.dark)
@@ -70,17 +70,7 @@ struct AskPanelView: View {
             .frame(width: 18)
 
             if let a = ask.attachment {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc").font(.system(size: 11, weight: .medium))
-                    Text(a.name).font(D.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 170, alignment: .leading).fixedSize()
-                    Button { ask.attachment = nil } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                        .buttonStyle(.plain).foregroundStyle(D.t4)
-                }
-                .foregroundStyle(D.t2)
-                .padding(.horizontal, 10).frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
-                .fixedSize()
+                AttachmentChip(attachment: a, height: 28) { ask.attachment = nil }
             } else {
                 Button(action: pickFile) { Image(systemName: "paperclip").font(.system(size: 13, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(D.t4).help("Ask about a file")
@@ -116,9 +106,9 @@ struct AskPanelView: View {
 
     private func pickFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText]
+        panel.allowedContentTypes = AskController.attachable
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url) }
+        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) }
         AskPanelController.shared.show()
     }
 }

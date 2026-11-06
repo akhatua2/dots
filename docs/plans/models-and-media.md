@@ -94,13 +94,16 @@ Images are capped at a million pixels (`DOTS_IMAGE_MAX_PIXELS`): a 3200x2000 scr
 whole and took 16 s on 0.8B; at the cap it was 1029 tokens, 2 s, and the same answer. The encoder matched
 mlx-vlm's to the bit on the same pixels, and the pixels matched its preprocessing within 1e-7.
 
+**In the app.** Ask takes a picture by the paperclip or by dropping it on the window, shrinks it to the
+pool's cap on this Mac (`imageMaxPixels`), and sends it as a JPEG part of the question. A photo is personal,
+like a document, so it stays on this Mac and in your own pools, and only goes to a pool whose model reads
+images: the cloud marks those on the ladder (`readsImages`). With none, Ask says so and asks first.
+
 ## Next
 
-1. **Images in the app.** Ask takes an image (paste, drop or pick), shrinks it to the pool's cap before
-   sending, and shows it in the conversation.
-2. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
+1. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
    so the pool sends the whole job to a Mac that has the model (MLX ports such as mflux). Personal
    photos stay private by default, the way Ask keeps personal documents in your own pools: an edit runs
    on your own Mac unless you say otherwise.
-3. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
+2. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
    is set up as a worker (`infra/remote-worker.sh`).

@@ -84,6 +84,8 @@ The second half of this page covers the API dots serves to your own apps on `loc
 - A Mac's `state` is `lending`, `online` or `asleep`.
 - A public pool counts its Macs in `crowdMacs`, `crowdLending` and `crowdGB` rather than listing them.
 - What a pool runs follows from the memory its lending Macs pool together. The ladder is in `dots/Model/Models.swift`: Qwen3 235B at 136 GB, DeepSeek V3.1 at 396 and Kimi K2 at 620. `servesModelID` lets a pool prefer a model, such as a coding model.
+- Each line of the ladder says whether its model reads images (`readsImages`): a question with an image only goes
+  to a pool whose model does.
 - `unlocks` records each model the pool reached: `{id, modelID, byMacID, fromGB, toGB, date}`. `byMacID` is the Mac that tipped it over.
 - `phase` shapes the pool's emblem. `speedFactor` scales the speed you get, and `demand` scales what a lending Mac earns.
 - `boost` is a window, at any time of day, when the pool's members commit their Macs at once, to reach a bigger model for a few hours. Its target is that model's line on the ladder. A pledge from someone outside the pool is a `guest`, boosting just that once. Through the window, the app keeps a pledged Mac awake and lending its pledge to that pool, then puts its lending back as it was.
@@ -138,6 +140,8 @@ data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"promp
 data: [DONE]
 ```
 
+- A question can carry images as OpenAI-style parts, `{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}`,
+  sent inline. The app shrinks them to `imageMaxPixels` first.
 - `macs` comes first and lists the Macs answering.
 - `asleep` and `resumed` mark a Mac that went to sleep mid-answer while the others carried on.
 - The last chunk has the usage and what the answer cost.
@@ -221,7 +225,8 @@ The app serves one API on `localhost:8787`, in OpenAI's format and Anthropic's. 
 `model: "auto"` lets dots pick where each request runs. It considers places in this order:
 
 1. **Privacy.** A personal question, or any request from a private key, stays on this Mac or in your own pools.
-2. **Tools and images.** These only go to a frontier model.
+2. **Tools and images.** Tools only go to a frontier model. Images go to a model that reads them: Claude, or a pool
+   whose model has `readsImages` on its line of the ladder.
 3. **This Mac.** It takes everyday questions that fit its 32,000-token context.
 4. **Your own pools.** They're free, when their model is big enough for the request.
 5. **Paid places.** Public pools, then Claude. When the request is hard or you prefer quality, Claude comes first.

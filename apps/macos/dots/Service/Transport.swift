@@ -1,9 +1,59 @@
 import Foundation
+import ImageIO
 import PDFKit
+import UniformTypeIdentifiers
 
 struct ChatMessage: Codable, Hashable {
     var role: String
     var content: String
+    /// Images asked about with the text, as JPEG. They go out as OpenAI image parts before it.
+    var images: [Data] = []
+
+    init(role: String, content: String, images: [Data] = []) {
+        self.role = role
+        self.content = content
+        self.images = images
+    }
+
+    private enum CodingKeys: String, CodingKey { case role, content }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(role, forKey: .role)
+        if images.isEmpty {
+            try c.encode(content, forKey: .content)
+        } else {
+            let pictures = images.map { ContentPart.image("data:image/jpeg;base64," + $0.base64EncodedString()) }
+            try c.encode(pictures + [.text(content)], forKey: .content)
+        }
+    }
+}
+
+/// One part of a message that mixes text and images, in OpenAI's format.
+private enum ContentPart: Encodable {
+    case text(String)
+    case image(String)
+
+    private enum Keys: String, CodingKey { case type, text, image_url }
+    private struct ImageURL: Encodable { var url: String }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .text(let text):
+            try c.encode("text", forKey: .type)
+            try c.encode(text, forKey: .text)
+        case .image(let url):
+            try c.encode("image_url", forKey: .type)
+            try c.encode(ImageURL(url: url), forKey: .image_url)
+        }
+    }
 }
 
 /// What an answer stream carries: text, and the moments a Mac leaves or the others take over.
@@ -280,6 +330,32 @@ enum SimulatedAnswers {
 }
 
 /// Text from a document you give the ask panel, sent along with the question.
+/// Pictures someone asks about, shrunk before they leave this Mac: a pool reads at most so many pixels anyway.
+enum Pictures {
+    static func isPicture(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+    }
+
+    /// The picture upright, scaled to at most `maxPixels`, as a JPEG.
+    static func jpeg(from url: URL, maxPixels: Int) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return nil }
+        let scale = min(1, (Double(maxPixels) / Double(width * height)).squareRoot())
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(Double(max(width, height)) * scale),
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? out as Data : nil
+    }
+}
+
 enum Documents {
     static func text(from url: URL, limit: Int = 24_000) -> String? {
         if url.pathExtension.lowercased() == "pdf" {

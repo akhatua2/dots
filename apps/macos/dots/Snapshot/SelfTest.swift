@@ -84,6 +84,29 @@ enum SelfTest {
         return failures == 0
     }
 
+    /// A question about a photo is personal, so it stays in your pools, and only goes to a model that reads images.
+    private static func pictureStories(_ model: AppModel) {
+        let photo = RequestFacts(inputTokens: 40, hasImages: true)
+        let studio = model.state.myPools.first { $0.name == "Studio 9" }
+        let ask = { Router.decide(question: "What's in this photo?", hasDocument: true, state: model.state,
+                                  rules: model.settings.rules, facts: photo) }
+        let noReader = ask()
+        check("A photo stays private, and with no pool of yours that reads images it asks first",
+              noReader.chosen == nil && noReader.needsConsent?.contains("reads images") == true)
+        let saved = LadderData(tiers: Ladder.tiers, special: Ladder.special)
+        Ladder.adopt(LadderData(tiers: Ladder.tiers.map { var t = $0; t.readsImages = t.id == studio?.model?.id; return t },
+                                special: Ladder.special))
+        let reader = ask()
+        check("Once Studio 9's model reads images, the photo goes there, free and private",
+              reader.chosen?.poolID == studio?.id && reader.isPrivate && reader.chosen?.credits == 0)
+        Ladder.adopt(saved)
+        let sent = (try? JSONEncoder().encode(ChatMessage(role: "user", content: "What is this?", images: [Data([1, 2, 3])])))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let parts = sent?["content"] as? [[String: Any]]
+        check("A question with a photo goes out as an image part, then its text",
+              parts?.first?["type"] as? String == "image_url" && parts?.last?["text"] as? String == "What is this?")
+    }
+
     // MARK: Stories 1 to 6: the router and the endpoint
 
     private static func routerStories(_ rig: Rig) async {
@@ -137,6 +160,7 @@ enum SelfTest {
         check("Preferring the best answer sends it to Claude instead", best.code == 200 && best.text("ran_on") == "Anthropic" && best.int("credits") > 0)
         let tools = await call(base, "POST", "/chat/completions", key: secret, body: ask("What's the weather in Lisbon?", extra: ["tools": [weatherTool]]))
         check("A request with tools goes to a frontier model, the only kind that takes them", tools.code == 200 && tools.text("ran_on") == "Anthropic")
+        pictureStories(model)
         let kimi = await call(base, "POST", "/chat/completions", key: secret, body: ask("Summarise this paper.", model: "kimi-k2.5"))
         let fastest = model.state.publicPools.filter { $0.model?.id == "kimi-k2.5" && $0.lendingMacs > 0 }.max { $0.tokPerSec < $1.tokPerSec }
         check("Pinning kimi-k2.5 runs it in the fastest public pool that has it (\(fastest?.name ?? "none")), for its credits",

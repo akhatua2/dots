@@ -15,6 +15,7 @@ struct RouteCandidate: Identifiable, Hashable {
     var minGB: Int              // how big the model is, for comparisons
     var contextTokens = 128_000
     var canUseTools = false
+    var canReadImages = false
 }
 
 struct RouteReason: Codable, Hashable {
@@ -51,7 +52,6 @@ enum Router {
         let personal = looksPersonal(question)
         let isPrivate = hasDocument || personal || rules.privateByDefault
         let hard = looksHard(question) || facts.inputTokens > 24_000
-        let special = facts.needsTools || facts.hasImages
 
         // Everything that could take it
         let ownPools = state.myPools
@@ -60,7 +60,7 @@ enum Router {
                 guard let model = pool.model, pool.lendingMacs > 0 else { return nil }
                 return RouteCandidate(id: "pool:\(pool.id)", destination: .yourPool, place: pool.name, model: model.name,
                                       modelID: model.id, credits: 0, listCredits: 0, tokPerSec: Double(pool.tokPerSec),
-                                      isPrivate: true, poolID: pool.id, minGB: model.minGB)
+                                      isPrivate: true, poolID: pool.id, minGB: model.minGB, canReadImages: model.readsImages == true)
             }
             .sorted { $0.minGB == $1.minGB ? $0.tokPerSec > $1.tokPerSec : $0.minGB > $1.minGB }
         let publicPools = state.publicPools
@@ -68,7 +68,8 @@ enum Router {
                 guard let model = pool.model, pool.lendingMacs > 0 else { return nil }
                 return RouteCandidate(id: "pool:\(pool.id)", destination: .publicPool, place: pool.name, model: model.name,
                                       modelID: model.id, credits: model.credits, listCredits: model.credits,
-                                      tokPerSec: Double(pool.tokPerSec), isPrivate: false, poolID: pool.id, minGB: model.minGB)
+                                      tokPerSec: Double(pool.tokPerSec), isPrivate: false, poolID: pool.id, minGB: model.minGB,
+                                      canReadImages: model.readsImages == true)
             }
             .sorted { lhs, rhs in
                 if rules.prefer == .speed { return lhs.tokPerSec > rhs.tokPerSec }
@@ -79,12 +80,13 @@ enum Router {
                            credits: Pricing.credits(f.id, input: facts.inputTokens, output: facts.outputTokens),
                            listCredits: Pricing.listCredits(f.id, input: facts.inputTokens, output: facts.outputTokens),
                            tokPerSec: f.tokPerSec, isPrivate: false, poolID: nil, minGB: 10_000,
-                           contextTokens: 1_000_000, canUseTools: true)
+                           contextTokens: 1_000_000, canUseTools: true, canReadImages: true)
         }
 
         // Only places that can take this request at all
         func fits(_ c: RouteCandidate) -> Bool {
-            facts.inputTokens + facts.outputTokens <= c.contextTokens && (!special || c.canUseTools)
+            facts.inputTokens + facts.outputTokens <= c.contextTokens && (!facts.needsTools || c.canUseTools)
+                && (!facts.hasImages || c.canReadImages)
         }
         let mac = thisMac.flatMap { reach.contains(.yourPools) && fits($0) ? $0 : nil }
         let allowedOwn = reach.contains(.yourPools) ? ownPools.filter(fits) : []
@@ -130,7 +132,8 @@ enum Router {
                 why = RouteReason(symbol: "lock", text: "It's kept private, so it stayed on this Mac and in pools you're in.")
             }
             guard let pick = privateOrder.first else {
-                let why = special ? "Only a frontier model can take a request with tools or images, and this one is private."
+                let why = facts.needsTools ? "Only a frontier model can take a request with tools, and this one is private."
+                    : facts.hasImages ? "Nothing in your own pools reads images right now, and this question is private."
                     : "Nothing on this Mac or in your own pools is lending right now, and this question is private."
                 return RouteDecision(chosen: nil, candidates: shown, reasons: [], isPrivate: true, needsConsent: why)
             }
@@ -144,15 +147,14 @@ enum Router {
             return decision(pick, reasons, isPrivate: true, order: privateOrder)
         }
 
-        // 2. Tools and images: only a frontier model takes them
-        if special {
+        // 2. Tools: only a frontier model takes them. Images go on, to the places that read them.
+        if facts.needsTools {
             guard let f = allowedFrontier.first(where: affordable) ?? allowedFrontier.first else {
                 return RouteDecision(chosen: nil, candidates: shown, reasons: [], isPrivate: false,
-                                     needsConsent: "This request uses tools or images, and only a frontier model takes those. This key can't reach one.")
+                                     needsConsent: "This request uses tools, and only a frontier model takes those. This key can't reach one.")
             }
             return decision(f, [
-                RouteReason(symbol: "wrench.and.screwdriver", text: facts.needsTools ? "It uses tools, which only a frontier model takes."
-                            : "It includes images, which only a frontier model takes."),
+                RouteReason(symbol: "wrench.and.screwdriver", text: "It uses tools, which only a frontier model takes."),
                 RouteReason(symbol: "smallcircle.filled.circle", text: "About \(f.credits) credits, or what your key is billed."),
             ], isPrivate: false, order: allowedFrontier)
         }
