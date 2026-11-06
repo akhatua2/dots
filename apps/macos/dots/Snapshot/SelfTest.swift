@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// `dots --selftest` checks every user story end to end. It runs a mock cloud of its own (fresh, never saved),
 /// the local API on a spare port, and stand-ins for a model on this Mac and a provider behind your own key,
@@ -84,6 +84,37 @@ enum SelfTest {
         return failures == 0
     }
 
+    /// A 1600x1200 photo, edited as a small copy with a red square drawn in: the result is 1600x1200, red where
+    /// the square was, and the photo's own pixels far from it.
+    private static func putBackKeepsThePhoto() -> Bool {
+        func picture(_ size: NSSize, square: NSRect?) -> Data? {
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSGradient(starting: .systemTeal, ending: .systemIndigo)?.draw(in: rect, angle: 30)
+                if let square { NSColor.systemRed.setFill(); square.fill() }
+                return true
+            }
+            guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+            rep.size = size
+            return rep.representation(using: .png, properties: [:])
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-photo.png")
+        guard let full = picture(NSSize(width: 1600, height: 1200), square: nil), (try? full.write(to: url)) != nil,
+              let sent = picture(NSSize(width: 400, height: 300), square: nil),
+              let edited = picture(NSSize(width: 400, height: 300), square: NSRect(x: 50, y: 50, width: 80, height: 60)),
+              let out = Compositing.putBack(edited: edited, sent: sent, into: url),
+              let result = NSBitmapImageRep(data: out), let original = NSBitmapImageRep(data: full) else { return false }
+        func close(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.02 && abs(a.greenComponent - b.greenComponent) < 0.02
+                && abs(a.blueComponent - b.blueComponent) < 0.02
+        }
+        let red = result.colorAt(x: 360, y: 1200 - 360)?.usingColorSpace(.sRGB)
+        return result.pixelsWide == 1600 && result.pixelsHigh == 1200
+            && close(result.colorAt(x: 1400, y: 200), original.colorAt(x: 1400, y: 200))
+            && close(result.colorAt(x: 1200, y: 900), original.colorAt(x: 1200, y: 900))
+            && (red?.redComponent ?? 0) > 0.8 && (red?.greenComponent ?? 1) < 0.4
+    }
+
     /// A question about a photo is personal, so it stays in your pools, and only goes to a model that reads images.
     private static func pictureStories(_ model: AppModel) {
         let photo = RequestFacts(inputTokens: 40, hasImages: true)
@@ -112,6 +143,7 @@ enum SelfTest {
             ("Make it shorter", false, false), ("Explain how to draw a circle in SwiftUI", false, false),
             ("Describe the colors", true, false),
         ]
+        check("An edit goes back into the full-size photo, which keeps its own pixels everywhere else", putBackKeepsThePhoto())
         let wrong = asks.filter { Drawing.wantsPicture($0.0, hasPicture: $0.1) != $0.2 }.map(\.0)
         check("Asking for a picture draws one; asking about it answers in words\(wrong.isEmpty ? "" : " (wrong: \(wrong))")",
               wrong.isEmpty)

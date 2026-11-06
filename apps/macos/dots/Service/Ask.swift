@@ -261,7 +261,12 @@ final class AskController {
                         switch event {
                         case let .step(step, of, preview):
                             self.picture = PictureProgress(image: preview, step: step, of: of)
-                        case .done(let png):
+                        case .done(var png):
+                            // An edit of your photo goes back into the photo itself, at its own size
+                            if let a = attachment, let sent = a.picture {
+                                let edited = png
+                                png = await Task.detached { Compositing.putBack(edited: edited, sent: sent, into: a.url) }.value ?? png
+                            }
                             self.picture = PictureProgress(image: png, step: self.picture?.of ?? 0, of: self.picture?.of ?? 0, done: true)
                         }
                     }
