@@ -64,6 +64,11 @@ def _querier(request: web.Request) -> str:
     return named if _ACCOUNT_ID.match(named) else _API_ACCOUNT
 
 
+def _speculate(request: web.Request) -> bool:
+    """`X-Dots-Speculate: off` asks for one-token-at-a-time decoding, to compare against a draft model."""
+    return request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
+
+
 def _bearer(request: web.Request) -> str | None:
     """Extract the bearer token from `Authorization: Bearer <token>`."""
     header = request.headers.get("Authorization", "")
@@ -315,6 +320,7 @@ class HttpApi:
         created_at = int(time.time())
 
         account = _querier(request)
+        speculate = _speculate(request)
         try:
             if stream:
                 return await self._stream(
@@ -326,6 +332,7 @@ class HttpApi:
                     temperature,
                     model_id,
                     account,
+                    speculate,
                 )
             return await self._nonstream(
                 conv,
@@ -335,6 +342,7 @@ class HttpApi:
                 temperature,
                 model_id,
                 account,
+                speculate,
             )
         finally:
             # Drop the per-conv KV cache from every worker so stateless
@@ -358,6 +366,7 @@ class HttpApi:
         temperature: float,
         model_id: str,
         account: str,
+        speculate: bool = True,
     ) -> web.Response:
         try:
             text, stats = await self.hub.run_turn(
@@ -366,6 +375,7 @@ class HttpApi:
                 temperature=temperature,
                 querier_account=account,
                 model_id=model_id,
+                speculate=speculate,
             )
         except Exception as e:
             log.exception("turn failed")
@@ -404,6 +414,7 @@ class HttpApi:
         temperature: float,
         model_id: str,
         account: str,
+        speculate: bool = True,
     ) -> web.StreamResponse:
         response = web.StreamResponse(
             status=200,
@@ -453,6 +464,7 @@ class HttpApi:
                 querier_account=account,
                 model_id=model_id,
                 on_draft=emit_draft,
+                speculate=speculate,
             )
         except Exception as e:
             log.exception("streaming turn failed")

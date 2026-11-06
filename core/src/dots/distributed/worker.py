@@ -935,7 +935,8 @@ class Worker:
                     if chain
                     else None
                 )
-                generation = await self._generation_for(model_id, runtime, spans_macs=bool(chain))
+                generation = await self._generation_for(model_id, runtime, spans_macs=bool(chain),
+                                                        speculate=bool(msg.get("speculate", True)))
                 result = await generation.generate(
                     GenerationRequest(
                         runtime=runtime,
@@ -1082,7 +1083,8 @@ class Worker:
 
         return trim_through_chain
 
-    async def _generation_for(self, model_id: str, runtime: BackendRuntime, *, spans_macs: bool):
+    async def _generation_for(self, model_id: str, runtime: BackendRuntime, *, spans_macs: bool,
+                              speculate: bool = True):
         """Speculative decoding when the turn crosses the network and a fitting draft model is configured.
 
         It saves round trips, not compute: on one Mac verifying a draft costs more than it saves
@@ -1090,7 +1092,7 @@ class Worker:
         four draft tokens). So a turn that stays on this Mac decodes one token at a time.
         """
         draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
-        if not spans_macs or not draft_id or draft_id == model_id or not runtime.supports_speculation:
+        if not (speculate and spans_macs) or not draft_id or draft_id == model_id or not runtime.supports_speculation:
             return self.generation
         draft = await self._load_draft(draft_id)
         if draft is None or not same_tokenizer(draft, runtime):

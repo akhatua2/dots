@@ -1452,6 +1452,7 @@ class Hub:
         querier_account: str | None = None,
         model_id: str | None = None,
         on_draft=None,
+        speculate: bool = True,
     ) -> tuple[str, dict]:
         """Run one chat turn against `conv.history` via delegation.
 
@@ -1516,6 +1517,7 @@ class Hub:
                 history=conv.history,
                 max_tokens=max_new_tokens,
                 temperature=temperature,
+                speculate=speculate,
             )
             if chain_payload:
                 call_payload["my_layer_end"] = my_layer_end
