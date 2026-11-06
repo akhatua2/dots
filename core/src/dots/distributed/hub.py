@@ -57,6 +57,15 @@ _PLACEMENT_RAM_MARGIN_ENV = "DOTS_PLACEMENT_RAM_MARGIN_GB"
 _HEAD_WORKSPACE_RAM_ENV = "DOTS_HEAD_WORKSPACE_RAM_GB"
 
 
+def _head_flops(geometry: ModelGeometry) -> float:
+    """The head's own work per token: the output layer, a vocabulary-by-hidden matrix multiply.
+
+    For Qwen2.5 (152K words, hidden size 1536) it is about six decoder layers' worth, so where the head
+    sits changes how fast a token comes back.
+    """
+    return float(2 * geometry.vocab_size * geometry.hidden_size)
+
+
 def _note_speed(deployment: "ModelDeployment", resp: dict) -> None:
     """Folds a finished turn's decode speed into the model's recent speed."""
     decoded = int(resp.get("decode_tokens") or 0)
@@ -537,7 +546,8 @@ class Hub:
         # scheduler will only place it on a worker that can hold
         # embed + lm_head + working memory in addition to its layer share.
         # That's how we constrain "head must fit at segment 0" without
-        # the scheduler needing to know about head modules.
+        # the scheduler needing to know about head modules. Its compute
+        # rides on layer 0 the same way, so the head goes where it is fast.
         per_layer_flops = float(
             2 * TRANSFORMER_LAYER_FLOP_PARAM_FACTOR * (self._geometry.hidden_size**2)
         )
@@ -549,7 +559,7 @@ class Hub:
                 WorkUnit(
                     unit_id=f"block_{i}",
                     ram_required_gb=unit_ram + (margin_gb if i == 0 else 0),
-                    flops_per_token=per_layer_flops,
+                    flops_per_token=per_layer_flops + (_head_flops(self._geometry) if i == 0 else 0.0),
                 )
             )
 
@@ -1686,7 +1696,7 @@ class Hub:
             WorkUnit(
                 unit_id=f"block_{i}",
                 ram_required_gb=0.0,
-                flops_per_token=per_layer_flops,
+                flops_per_token=per_layer_flops + (_head_flops(geom) if i == 0 else 0.0),
             )
             for i in range(geom.n_layers)
         ]

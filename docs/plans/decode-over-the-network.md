@@ -66,13 +66,15 @@ asyncio handoffs). Hidden states already go as raw bytes.
   layers, and when one of them is four times faster the split is the same, with the head (which also runs
   the vocabulary-sized output layer) on the slower one. In the real two-worker test above, the 1 and 27
   split was forced by memory: the head also holds the embeddings and its working space.
+- **The head goes where it is fast.** The scheduler now counts the head's output layer (vocabulary by
+  hidden size, about six decoder layers for Qwen2.5) as work. With equal memory and one Mac four times
+  faster, the fast one becomes the head with 16 layers and the slow one takes 12; before, the slow one was
+  the head. By the scheduler's own estimate that is about 9% faster a token.
 
 ## Next
 
-1. **Put the head on the fastest Mac** that can hold it, and give faster Macs layers first. Small change
-   in the scheduler's ordering; the per-pass timing shows whether it helped.
-2. **Ring instead of star.** Today the head calls each peer in turn and every hidden state comes back
+1. **Ring instead of star.** Today the head calls each peer in turn and every hidden state comes back
    through it: two network legs per peer, 2n for n peers. Passing it peer to peer and back to the head
    once takes n + 1. It saves a leg per peer beyond the first, so it matters from three Macs up.
-3. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
-4. **Measure over a real WAN** with two Macs on different networks, with and without a draft model.
+2. **Trim the message path.** About 3 ms a hop on loopback. It matters on a LAN and not over the internet.
+3. **Measure over a real WAN** with two Macs on different networks, with and without a draft model.

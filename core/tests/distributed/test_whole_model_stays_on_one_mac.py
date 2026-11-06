@@ -59,3 +59,19 @@ def test_a_small_mac_joining_leaves_the_model_where_it_fits():
     hub._geometry = hub._deployment_for(MODEL).geometry
     hub.n_layers = LAYERS
     assert hub._assign_units_to_workers() == [("mac-a", 0, LAYERS, True)], "the small Mac stays idle"
+
+
+def test_when_a_model_must_be_split_the_head_goes_to_the_faster_mac():
+    """The head also runs the output layer, a vocabulary-sized multiply worth several decoder layers."""
+    hub = Hub(port=0, model_id=MODEL)
+    hub._activate_model(MODEL)
+    hub._selected_backend = "mlx"
+    hub._geometry = exact_geometry(n_layers=28, layer_ram_gb=0.5, embed_ram_gb=0.3, hidden_size=1536, vocab_size=151_936)
+    hub.n_layers = 28
+    for name, tflops in (("slow", 1.0), ("fast", 4.0)):
+        hub.participants[name] = Participant(id=name, addr=f"{name}:1", conn=_Conn(), compute=True,
+                                             peer_ticket=f"ticket-{name}", account_id=f"acc-{name}")
+        hub.pool_view.add_or_update(name, resource_decl(name, account_id=f"acc-{name}", ram_gb=10.0, tflops=tflops))
+    head, *rest = hub._assign_units_to_workers()
+    assert head[0] == "fast" and head[3] is True, "the head runs on the faster Mac"
+    assert [r[0] for r in rest] == ["slow"]
