@@ -78,7 +78,7 @@ class SpeculativeGeneration(GenerationStrategy):
             proposed += self.k
             if request.on_draft is not None:
                 # `token` isn't shown yet either: it is emitted once the pool has checked the proposal
-                await request.on_draft(_pending_text(target, out, [token, *proposal]))
+                await request.on_draft(_pending_text(target, out, _until_stop([token, *proposal], stop_ids)))
 
             # One pass of the big model over `token` and every proposal: row i predicts what follows input i.
             rows = await target.decode_many(conv, [token, *proposal], forward_hidden=request.forward_hidden)
@@ -136,6 +136,14 @@ class SpeculativeGeneration(GenerationStrategy):
                 "draft_accepted": accepted_total,
             },
         )
+
+
+def _until_stop(tokens: list[int], stop_ids: set[int]) -> list[int]:
+    """The tokens before the first stop token: a draft guesses past the end, and that isn't shown."""
+    for i, t in enumerate(tokens):
+        if t in stop_ids:
+            return tokens[:i]
+    return tokens
 
 
 def _pending_text(runtime: "BackendRuntime", emitted: list[int], pending: list[int]) -> str:

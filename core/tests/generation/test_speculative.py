@@ -174,3 +174,11 @@ async def test_falls_back_when_a_backend_cannot_verify_several_tokens():
     draft.supports_speculation = False
     result = await SpeculativeGeneration(draft).generate(request(target, max_tokens=100))
     assert result.text == expected.text and "verify_passes" not in result.stats
+
+
+def test_a_draft_is_not_shown_past_a_stop_token():
+    from dots.generation.speculative import _until_stop
+
+    assert _until_stop([5, 6, 2, 7], {2}) == [5, 6]
+    assert _until_stop([2, 7], {2}) == []
+    assert _until_stop([5, 6], {2}) == [5, 6]

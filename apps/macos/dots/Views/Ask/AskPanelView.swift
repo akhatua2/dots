@@ -148,11 +148,15 @@ struct RoutePicker: View {
         let pub = s.publicPools.filter { $0.model != nil }.sorted { ($0.model?.minGB ?? 0) > ($1.model?.minGB ?? 0) }.prefix(3)
         return Menu {
             Button("Auto: dots picks") { model.ask.forcedID = nil }
-            Section("Your pools, free") {
-                ForEach(own) { p in Button("\(p.name) · \(p.model!.name)") { model.ask.forcedID = "pool:\(p.id)" } }
+            if !own.isEmpty {
+                Section("Your pools, free") {
+                    ForEach(own) { p in Button("\(p.name) · \(p.model!.name)") { model.ask.forcedID = "pool:\(p.id)" } }
+                }
             }
-            Section("Public pools") {
-                ForEach(Array(pub)) { p in Button("\(p.name) · \(p.model!.name) · \(p.model!.credits) credits") { model.ask.forcedID = "pool:\(p.id)" } }
+            if !pub.isEmpty {
+                Section("Public pools") {
+                    ForEach(Array(pub)) { p in Button("\(p.name) · \(p.model!.name) · \(p.model!.credits) credits") { model.ask.forcedID = "pool:\(p.id)" } }
+                }
             }
             Section("Frontier, paid in credits") {
                 ForEach(FrontierModel.all) { f in Button("\(f.name) · \(f.credits) credits") { model.ask.forcedID = "frontier:\(f.id)" } }
