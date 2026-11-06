@@ -89,8 +89,8 @@ asyncio handoffs). Hidden states already go as raw bytes.
   | 64 tokens, 192 KB | 68.0 ms | 6.9 ms |
 
   On the live two-worker pool the wire went from 3.8 to 1.7 ms a pass and a 60-token answer from 1.50 to
-  1.25 s, with the same words. Prompts gain the most: a 1,000-token prompt's hidden states are 3 MB,
-  which used to cost about a second a hop just to hand to iroh.
+  1.25 s, with the same words. Prompts gain the most: a 1,000-token prompt's hidden states for a
+  1536-wide model are 3 MB, and a round trip of that measured 1,047 ms with the old copy and 111 ms now.
 
 - **Adaptive draft length**, on by default (`DOTS_DRAFT_ADAPTIVE=0` turns it off). After a check that
   threw guesses away the draft guesses fewer (as many as were kept, plus one), and after one that kept
