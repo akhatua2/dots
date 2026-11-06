@@ -184,8 +184,8 @@ struct AskBody: View {
         if ask.phase == .routing, let decision = ask.decision {
             RoutingRow(decision: decision)
         }
-        if !ask.answer.isEmpty {
-            MarkdownText(text: ask.answer)
+        if !ask.answer.isEmpty || !ask.draft.isEmpty {
+            MarkdownText(text: ask.answer, draft: ask.draft)
         }
         switch ask.phase {
         case .needsConsent(let why):

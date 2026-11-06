@@ -90,6 +90,17 @@ enum Snapshots {
             ask.second = .init(candidate: decision.candidates.first { $0.destination == .frontier }!)
         }
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask", fitHeight: true)
+        // The same answer mid-stream, with the draft model's next words waiting on the pool, greyed out
+        let full = ask.answer
+        let confirmed = full.index(full.startIndex, offsetBy: min(150, full.count))
+        let proposed = full.index(confirmed, offsetBy: min(28, full.distance(from: confirmed, to: full.endIndex)))
+        ask.answer = String(full[..<confirmed])
+        ask.draft = String(full[confirmed..<proposed])
+        ask.phase = .streaming
+        save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-drafting", fitHeight: true)
+        ask.answer = full
+        ask.draft = ""
+        ask.phase = .done
 
         // 5. A week of work, and your profile with this week's note
         await model.backend.beatNow(active: true, adding: 31 * 3_600)

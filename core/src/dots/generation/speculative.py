@@ -76,6 +76,8 @@ class SpeculativeGeneration(GenerationStrategy):
                 proposal.append(sample(draft, await draft.decode_one(conv, fed), out + [token] + proposal))
                 fed = proposal[-1]
             proposed += self.k
+            if request.on_draft is not None:
+                await request.on_draft(target.decode_tokens(proposal))
 
             # One pass of the big model over `token` and every proposal: row i predicts what follows input i.
             rows = await target.decode_many(conv, [token, *proposal], forward_hidden=request.forward_hidden)
@@ -115,6 +117,8 @@ class SpeculativeGeneration(GenerationStrategy):
         tail = detok.finalize()
         if request.on_token is not None and tail:
             await request.on_token(tail)
+        if request.on_draft is not None:
+            await request.on_draft("")
         draft.reset_conversation(conv)
         elapsed_ms = (time.perf_counter() - decode_start) * 1000
         return GenerationResult(

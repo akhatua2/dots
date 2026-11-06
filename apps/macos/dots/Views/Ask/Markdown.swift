@@ -3,13 +3,19 @@ import SwiftUI
 
 /// An answer as it should read: headings, lists, code, quotes, tables and math, not the raw Markdown.
 /// It is parsed again on every streamed update, so an unclosed code fence runs to the end until it closes.
+/// `draft` is what a draft model proposed and the pool is still checking: it follows the answer, greyed out,
+/// and turns into answer text as the pool confirms it.
 struct MarkdownText: View {
     var text: String
+    var draft = ""
 
     var body: some View {
+        let blocks = Markdown.blocks(draft.isEmpty ? text : text + Markdown.draftMark + draft)
+        let firstDraft = draft.isEmpty ? nil : blocks.firstIndex { $0.texts.contains { $0.contains(Markdown.draftMark) } }
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                 BlockView(block: block)
+                    .opacity(firstDraft.map { i > $0 } == true ? Markdown.draftOpacity : 1)
             }
         }
         .textSelection(.enabled)
@@ -30,19 +36,22 @@ private struct BlockView: View {
         case .paragraph(let text):
             Text(Markdown.inline(text)).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5)
         case .list(let items):
+            // Items after the one where the draft begins are all draft
+            let firstDraft = items.firstIndex { $0.text.contains(Markdown.draftMark) }
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(item.marker).font(D.ui(15).monospacedDigit()).foregroundStyle(D.t4)
                         Text(Markdown.inline(item.text)).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5)
                     }
                     .padding(.leading, CGFloat(item.depth) * 18)
+                    .opacity(firstDraft.map { i > $0 } == true ? Markdown.draftOpacity : 1)
                 }
             }
         case .code(let language, let code):
             CodeBlock(language: language, code: code)
         case .math(let latex):
-            Text(LaTeX.plain(latex))
+            Text(LaTeX.plain(latex.replacingOccurrences(of: Markdown.draftMark, with: "")))
                 .font(.system(size: 17, design: .serif))
                 .foregroundStyle(D.t1)
                 .frame(maxWidth: .infinity)
@@ -83,7 +92,7 @@ private struct CodeBlock: View {
             .frame(height: 32)
             Rectangle().fill(D.line).frame(height: 1)
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
+                Text(Markdown.withDraft(code))
                     .font(D.mono(13))
                     .foregroundStyle(D.t2)
                     .lineSpacing(3)
@@ -96,7 +105,7 @@ private struct CodeBlock: View {
 
     private func copy() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(code, forType: .string)
+        NSPasteboard.general.setString(code.components(separatedBy: Markdown.draftMark)[0], forType: .string)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
     }
@@ -131,6 +140,10 @@ private struct MarkdownTable: View {
 // MARK: - Parsing
 
 enum Markdown {
+    /// Marks where the confirmed answer ends and the draft begins. A private-use character no model writes.
+    static let draftMark = "\u{E000}"
+    static let draftOpacity = 0.4
+
     enum Block: Equatable {
         case heading(level: Int, text: String)
         case paragraph(String)
@@ -140,6 +153,17 @@ enum Markdown {
         case quote(String)
         case table(header: [String], rows: [[String]])
         case rule
+
+        /// Every piece of text the block holds
+        var texts: [String] {
+            switch self {
+            case .heading(_, let t), .paragraph(let t), .math(let t), .quote(let t): [t]
+            case .code(_, let code): [code]
+            case .list(let items): items.map(\.text)
+            case .table(let header, let rows): header + rows.flatMap { $0 }
+            case .rule: []
+            }
+        }
     }
 
     struct ListItem: Equatable {
@@ -259,6 +283,20 @@ enum Markdown {
                 out[run.range].foregroundColor = D.accentText
             }
         }
+        return greyDraft(out)
+    }
+
+    /// Plain text with the draft, if any, greyed out.
+    static func withDraft(_ text: String) -> AttributedString {
+        greyDraft(AttributedString(text))
+    }
+
+    /// Everything after the draft mark in grey, and the mark itself gone.
+    private static func greyDraft(_ text: AttributedString) -> AttributedString {
+        var out = text
+        guard let mark = out.range(of: draftMark) else { return out }
+        out[mark.upperBound...].foregroundColor = D.t2.opacity(draftOpacity)
+        out.removeSubrange(mark)
         return out
     }
 

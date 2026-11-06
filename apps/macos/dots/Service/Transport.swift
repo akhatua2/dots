@@ -9,6 +9,8 @@ struct ChatMessage: Codable, Hashable {
 /// What an answer stream carries: text, and the moments a Mac leaves or the others take over.
 enum AnswerEvent {
     case text(String)
+    /// What a draft model has proposed and the pool is still checking; "" once there is none. Never the answer.
+    case draft(String)
     case macAsleep(macID: String, name: String)
     case resumed
     case model(String)      // the model an endpoint says it used
@@ -95,6 +97,7 @@ enum OpenAIClient {
             var macs: [Mac]?
             var mac_id: String?
             var name: String?
+            var text: String?
             var credits: Int?
             var simulated: Bool?
         }
@@ -147,6 +150,7 @@ enum OpenAIClient {
                             }
                             if d.event == "asleep", let id = d.mac_id { continuation.yield(.macAsleep(macID: id, name: d.name ?? "A Mac")) }
                             if d.event == "resumed" { continuation.yield(.resumed) }
+                            if d.event == "draft" { continuation.yield(.draft(d.text ?? "")) }
                             if let c = d.credits { continuation.yield(.charged(c)) }
                             if let sim = d.simulated { continuation.yield(.simulated(sim)) }
                         }

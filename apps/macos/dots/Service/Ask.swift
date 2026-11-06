@@ -152,6 +152,8 @@ final class AskController {
     var asked = ""
     var decision: RouteDecision?
     var answer = ""
+    /// The draft model's proposal while the pool checks it, shown greyed out after the answer
+    var draft = ""
     var receipt: Receipt?
     var second: SecondOpinion?
     var focusToken = 0
@@ -219,6 +221,7 @@ final class AskController {
                     receipt.fallbackNote = "\(missed.joined(separator: " and ")) didn't answer, so it went to \(candidate.place)."
                 }
                 self.answer = ""
+                self.draft = ""
                 self.receipt = receipt
                 self.phase = .streaming
                 let started = Date()
@@ -230,6 +233,9 @@ final class AskController {
                         switch event {
                         case .text(let t):
                             self.answer += t
+                            self.draft = ""
+                        case .draft(let d):
+                            self.draft = d
                             let elapsed = Date().timeIntervalSince(started)
                             if elapsed > 0.5 { receipt.tokPerSec = Double(Pricing.tokens(self.answer)) / elapsed }
                         case let .macAsleep(macID, name):
@@ -256,6 +262,7 @@ final class AskController {
                         self.receipt = receipt
                     }
                 } catch {
+                    self.draft = ""
                     // Nothing came back yet: try the next place, within the same rules
                     if self.answer.isEmpty {
                         if candidate.destination == .thisMac { model.noteLocalDown() }
@@ -265,6 +272,7 @@ final class AskController {
                     self.phase = .failed(error.localizedDescription)
                     return
                 }
+                self.draft = ""
                 // An answer that ended without a word didn't answer either
                 if self.answer.isEmpty {
                     missed.append(candidate.place)

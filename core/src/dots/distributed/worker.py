@@ -862,6 +862,15 @@ class Worker:
             except Exception:
                 log.debug("delegate_token notify failed", exc_info=True)
 
+        async def on_draft(text: str) -> None:
+            """The draft model's unconfirmed proposal, for the asker to see while the pool checks it."""
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify("delegate_token", conv_id=conv_id, text=text, draft=True)
+            except Exception:
+                log.debug("draft notify failed", exc_info=True)
+
         async with lock:
             try:
                 forward_hidden = (
@@ -889,6 +898,7 @@ class Worker:
                         max_tokens=max_tokens,
                         temperature=temperature,
                         on_token=on_token,
+                        on_draft=on_draft,
                         forward_hidden=forward_hidden,
                         trim_remote=trim_remote,
                     )

@@ -438,6 +438,12 @@ class HttpApi:
         async def emit(text: str) -> None:
             await response.write(chunk({"content": text}))
 
+        async def emit_draft(text: str) -> None:
+            # Not part of the answer: OpenAI clients ignore the extra field; the dots app shows it greyed out
+            payload = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                       "dots": {"event": "draft", "text": text}}
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+
         try:
             _, stats = await self.hub.run_turn(
                 conv,
@@ -446,6 +452,7 @@ class HttpApi:
                 on_token=emit,
                 querier_account=account,
                 model_id=model_id,
+                on_draft=emit_draft,
             )
         except Exception as e:
             log.exception("streaming turn failed")

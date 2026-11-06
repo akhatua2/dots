@@ -533,6 +533,10 @@ enum SelfTest {
         ])
         check("A code fence still streaming runs to the end", Markdown.blocks("```\nlet x = 1") == [.code(language: "", code: "let x = 1")])
         check("Math reads as symbols", LaTeX.plain("\\frac{a+b}{2} \\times x^2 \\leq \\sqrt{y_1} + \\alpha") == "(a+b)/2 × x² ≤ √y₁ + α")
+        let drafted = Markdown.inline("The sky is" + Markdown.draftMark + " blue because")
+        check("A draft follows the answer, greyed out, with no trace of its mark",
+              String(drafted.characters) == "The sky is blue because"
+              && drafted.runs.filter { $0.foregroundColor != nil }.map { String(drafted[$0.range].characters) } == [" blue because"])
         check("Inline math is converted and a price is left alone",
               String(Markdown.inline("costs $5 and \\(x^2\\) grows").characters) == "costs $5 and x² grows")
     }

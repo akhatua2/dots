@@ -242,6 +242,8 @@ class Hub:
         # client during a delegate_turn. Populated in `run_turn` and
         # consulted in `_on_delegate_token`.
         self._token_routers: dict[str, "asyncio.Future | object"] = {}
+        # Where a turn's unconfirmed draft text goes, when the asker wants to see it
+        self._draft_routers: dict[str, object] = {}
         # Per-conv counter for tokens emitted so far. Used by the
         # run_turn watchdog to log progress on long turns + by
         # _on_delegate_token to detect the first-token arrival.
@@ -1438,6 +1440,7 @@ class Hub:
         is_alive=None,
         querier_account: str | None = None,
         model_id: str | None = None,
+        on_draft=None,
     ) -> tuple[str, dict]:
         """Run one chat turn against `conv.history` via delegation.
 
@@ -1473,6 +1476,8 @@ class Hub:
         # routing key is the chat client's conv.id.
         if on_token is not None:
             self._token_routers[conv.id] = on_token
+        if on_draft is not None:
+            self._draft_routers[conv.id] = on_draft
 
         # Diagnostic: print the chain we're about to drive so an
         # observer can tell which workers are involved. Multi-worker
@@ -1548,6 +1553,7 @@ class Hub:
             await asyncio.sleep(0)
         finally:
             self._token_routers.pop(conv.id, None)
+            self._draft_routers.pop(conv.id, None)
             self._turn_token_counts.pop(conv.id, None)
             self._serving.pop(conv.id, None)
 
@@ -1999,6 +2005,14 @@ class Hub:
         conv_id = msg.get("conv_id")
         text = msg.get("text", "")
         if not conv_id:
+            return None
+        if msg.get("draft"):  # a proposal, not a token: show it, don't count it
+            draft_cb = self._draft_routers.get(conv_id)
+            if draft_cb is not None:
+                try:
+                    await draft_cb(text)
+                except Exception:
+                    self._draft_routers.pop(conv_id, None)
             return None
         # Increment per-conv token counter so the run_turn watchdog can
         # report progress (e.g. "still in flight · 30s · tokens=12").
