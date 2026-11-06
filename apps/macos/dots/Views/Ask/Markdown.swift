@@ -11,10 +11,11 @@ struct MarkdownText: View {
 
     var body: some View {
         let blocks = Markdown.blocks(draft.isEmpty ? text : text + Markdown.draftMark + draft)
-        let firstDraft = draft.isEmpty ? nil : blocks.firstIndex { $0.texts.contains { $0.contains(Markdown.draftMark) } }
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                BlockView(block: block)
+        let pieces = Markdown.pieces(blocks)
+        let firstDraft = draft.isEmpty ? nil : pieces.firstIndex(where: \.holdsDraft)
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(pieces.enumerated()), id: \.offset) { i, piece in
+                PieceView(piece: piece)
                     .opacity(firstDraft.map { i > $0 } == true ? Markdown.draftOpacity : 1)
             }
         }
@@ -23,45 +24,21 @@ struct MarkdownText: View {
     }
 }
 
-private struct BlockView: View {
-    var block: Markdown.Block
+/// Prose is one text, so a selection runs across its paragraphs, headings and lists; code, tables and
+/// rules are views of their own.
+private struct PieceView: View {
+    var piece: Markdown.Piece
 
     var body: some View {
-        switch block {
-        case .heading(let level, let text):
-            Text(Markdown.inline(text))
-                .font(D.ui(level == 1 ? 20 : level == 2 ? 17.5 : 15.5, .semibold))
-                .foregroundStyle(D.t1)
-                .padding(.top, 4)
-        case .paragraph(let text):
-            Text(Markdown.inline(text)).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5)
-        case .list(let items):
-            // Items after the one where the draft begins are all draft
-            let firstDraft = items.firstIndex { $0.text.contains(Markdown.draftMark) }
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(item.marker).font(D.ui(15).monospacedDigit()).foregroundStyle(D.t4)
-                        Text(Markdown.inline(item.text)).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5)
-                    }
-                    .padding(.leading, CGFloat(item.depth) * 18)
-                    .opacity(firstDraft.map { i > $0 } == true ? Markdown.draftOpacity : 1)
-                }
-            }
+        switch piece {
+        case .prose(let blocks):
+            Text(Markdown.prose(blocks))
+                .font(D.ui(15))
+                .foregroundStyle(D.t2)
+                .lineSpacing(3.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
         case .code(let language, let code):
             CodeBlock(language: language, code: code)
-        case .math(let latex):
-            Text(LaTeX.plain(latex.replacingOccurrences(of: Markdown.draftMark, with: "")))
-                .font(.system(size: 17, design: .serif))
-                .foregroundStyle(D.t1)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 2)
-        case .quote(let text):
-            HStack(spacing: 12) {
-                Rectangle().fill(D.btn).frame(width: 2)
-                Text(Markdown.inline(text)).font(D.ui(15)).foregroundStyle(D.t3).lineSpacing(3.5)
-            }
-            .fixedSize(horizontal: false, vertical: true)
         case .table(let header, let rows):
             MarkdownTable(header: header, rows: rows)
         case .rule:
@@ -164,6 +141,78 @@ enum Markdown {
             case .rule: []
             }
         }
+    }
+
+    /// What the answer is drawn as: runs of prose, and the blocks that can't be part of a text.
+    enum Piece: Equatable {
+        case prose([Block])
+        case code(language: String, code: String)
+        case table(header: [String], rows: [[String]])
+        case rule
+
+        var holdsDraft: Bool {
+            switch self {
+            case .prose(let blocks): blocks.contains { $0.texts.contains { $0.contains(Markdown.draftMark) } }
+            case .code(_, let code): code.contains(Markdown.draftMark)
+            case .table(let header, let rows): (header + rows.flatMap { $0 }).contains { $0.contains(Markdown.draftMark) }
+            case .rule: false
+            }
+        }
+    }
+
+    static func pieces(_ blocks: [Block]) -> [Piece] {
+        var out: [Piece] = []
+        var prose: [Block] = []
+        func flush() {
+            if !prose.isEmpty { out.append(.prose(prose)) }
+            prose = []
+        }
+        for block in blocks {
+            switch block {
+            case .code(let language, let code): flush(); out.append(.code(language: language, code: code))
+            case .table(let header, let rows): flush(); out.append(.table(header: header, rows: rows))
+            case .rule: flush(); out.append(.rule)
+            default: prose.append(block)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// Paragraphs, headings, lists, quotes and math as one styled text, a blank line between blocks.
+    static func prose(_ blocks: [Block]) -> AttributedString {
+        var out = AttributedString()
+        for (i, block) in blocks.enumerated() {
+            if i > 0 { out += AttributedString("\n\n") }
+            switch block {
+            case .heading(let level, let text):
+                var heading = inline(text, greyingDraft: false)
+                heading.font = D.ui(level == 1 ? 20 : level == 2 ? 17.5 : 15.5, .semibold)
+                heading.foregroundColor = D.t1
+                out += heading
+            case .paragraph(let text):
+                out += inline(text, greyingDraft: false)
+            case .list(let items):
+                for (j, item) in items.enumerated() {
+                    if j > 0 { out += AttributedString("\n") }
+                    var marker = AttributedString(String(repeating: "    ", count: item.depth) + item.marker + "  ")
+                    marker.foregroundColor = D.t4
+                    out += marker + inline(item.text, greyingDraft: false)
+                }
+            case .quote(let text):
+                var quote = inline(text, greyingDraft: false)
+                quote.foregroundColor = D.t3
+                out += quote
+            case .math(let latex):
+                var math = AttributedString(LaTeX.plain(latex))
+                math.font = .system(size: 17, design: .serif)
+                math.foregroundColor = D.t1
+                out += math
+            case .code, .table, .rule:
+                break
+            }
+        }
+        return greyDraft(out)
     }
 
     struct ListItem: Equatable {
@@ -269,7 +318,7 @@ enum Markdown {
     }
 
     /// Bold, italics, inline code, links and inline math, styled for the answer.
-    static func inline(_ text: String) -> AttributedString {
+    static func inline(_ text: String, greyingDraft: Bool = true) -> AttributedString {
         let source = inlineMath(text)
         var out = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(source)
@@ -283,7 +332,7 @@ enum Markdown {
                 out[run.range].foregroundColor = D.accentText
             }
         }
-        return greyDraft(out)
+        return greyingDraft ? greyDraft(out) : out
     }
 
     /// Plain text with the draft, if any, greyed out.

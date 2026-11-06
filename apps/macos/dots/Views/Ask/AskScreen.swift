@@ -67,12 +67,20 @@ private struct Conversation: View {
                     // The turn being shown live below is drawn there, with its second opinion.
                     if !(live && turn.id == ask.recordedTurnID) {
                         QuestionBubble(text: turn.question, attachment: turn.attachment)
-                        MarkdownText(text: turn.answer)
+                        VStack(alignment: .leading, spacing: 8) {
+                            MarkdownText(text: turn.answer)
+                            AnswerActions(turn: turn)
+                        }
                     }
                 }
                 if live {
                     QuestionBubble(text: ask.asked, attachment: ask.attachment?.name)
-                    AskBody(compact: true)
+                    VStack(alignment: .leading, spacing: 8) {
+                        AskBody(compact: true)
+                        if ask.phase == .done, let turn = model.chats.current?.turns.first(where: { $0.id == ask.recordedTurnID }) {
+                            AnswerActions(turn: turn)
+                        }
+                    }
                 }
                 Color.clear.frame(height: 1).id("end")
             }

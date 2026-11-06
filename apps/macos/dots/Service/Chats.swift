@@ -9,6 +9,8 @@ struct ChatTurn: Codable, Equatable, Identifiable {
     var receipt: Receipt?
     var attachment: String?
     var date: Date
+    /// Your thumbs up (1) or down (-1) on the answer. Kept with the chat on this Mac.
+    var rating: Int?
 }
 
 /// A conversation: its turns, oldest first. Its title is its first question.
@@ -50,6 +52,14 @@ final class ChatStore {
         chats.removeAll { $0.id == chat.id }
         chats.insert(chat, at: 0)
         currentID = chat.id
+        save()
+    }
+
+    /// Thumbs up or down on an answer; the same again takes it back.
+    func rate(_ turnID: UUID, _ rating: Int) {
+        guard let c = chats.firstIndex(where: { $0.turns.contains { $0.id == turnID } }),
+              let t = chats[c].turns.firstIndex(where: { $0.id == turnID }) else { return }
+        chats[c].turns[t].rating = chats[c].turns[t].rating == rating ? nil : rating
         save()
     }
 
