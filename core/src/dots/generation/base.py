@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from ..backends.base import BackendRuntime, ForwardHidden
 
 TokenCallback = Callable[[str], Awaitable[None]]
+# Drops the last n tokens from the caches of the pool's other Macs (see speculative decoding).
+TrimRemote = Callable[[int], Awaitable[None]]
 
 
 @dataclass
@@ -22,6 +24,7 @@ class GenerationRequest:
     temperature: float = 0.7
     on_token: TokenCallback | None = None
     forward_hidden: "ForwardHidden | None" = None
+    trim_remote: TrimRemote | None = None
     # Penalize tokens seen in the last `repetition_context` generated
     # tokens by dividing their logit (HF-style). 1.0 disables it. Small
     # quantized models loop hard without this; ~1.3 breaks the loops

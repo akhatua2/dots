@@ -51,6 +51,12 @@ def make_prompt_cache(*args, **kwargs):
     return _real(*args, **kwargs)
 
 
+def trim_prompt_cache(*args, **kwargs):
+    from mlx_lm.models.cache import trim_prompt_cache as _real
+
+    return _real(*args, **kwargs)
+
+
 def load_partial(*args, **kwargs):
     from .partial_loader import load_partial as _real
 
@@ -156,6 +162,15 @@ class FullModelHost:
     def reset_conversation(self, conv_id: str) -> None:
         self._caches.pop(conv_id, None)
         self._token_counts.pop(conv_id, None)
+
+    def trim(self, conv_id: str, n: int) -> None:
+        """Rolls the conversation's KV cache back by `n` tokens (a draft's rejected tail)."""
+        if n <= 0:
+            return
+        cache = self._caches.get(conv_id)
+        if cache is not None:
+            trim_prompt_cache(cache, n)
+        self._token_counts[conv_id] = max(0, self._token_counts.get(conv_id, 0) - n)
 
     def _get_cache(self, conv_id: str):
         cache = self._caches.get(conv_id)
@@ -446,6 +461,33 @@ class MlxBackendRuntime(BackendRuntime):
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + 1
         return logits[0, -1]
 
+    @property
+    def supports_speculation(self) -> bool:
+        return True
+
+    async def decode_many(
+        self,
+        conv_id: str,
+        tokens: list[int],
+        *,
+        forward_hidden: ForwardHidden | None = None,
+    ):
+        """One pass over `tokens`: through every layer here and down the chain, once for all of them.
+
+        Over a pool this costs one round trip per hop whatever the number of tokens, which is what makes
+        verifying a draft cheaper than decoding its tokens one by one.
+        """
+        host = self._require_host()
+        hidden = host.model.model.embed_tokens(array([tokens]))
+        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
+        hidden = host.model.model.norm(hidden)
+        logits = host._project_logits(hidden)
+        host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + len(tokens)
+        return logits[0]
+
+    def trim(self, conv_id: str, n: int) -> None:
+        self._require_host().trim(conv_id, n)
+
     def forward_segment(self, conv_id: str, hidden, start: int, end: int):
         return self._require_host().forward_segment(conv_id, hidden, start, end)
 
@@ -545,4 +587,5 @@ __all__ = [
     "_stop_ids",
     "create_attention_mask",
     "make_prompt_cache",
+    "trim_prompt_cache",
 ]

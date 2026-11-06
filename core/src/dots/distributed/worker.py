@@ -27,8 +27,10 @@ from typing import Callable
 from .. import ui
 from ..backends.base import BackendRuntime, ModelAssignment
 from ..backends.registry import get_backend_runtime
+from ..backends.mlx.draft import load_draft_runtime, same_tokenizer
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
+from ..generation.speculative import SpeculativeGeneration
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import resource_decl_to_hello_field
@@ -119,6 +121,8 @@ class Worker:
         self.backend: BackendRuntime | None = None
         self.backends: dict[str, BackendRuntime] = {}
         self.generation = get_generation_strategy()
+        # Draft models for speculative decoding, by repo id (None: it failed to load).
+        self._drafts: dict[str, BackendRuntime | None] = {}
         self._host_ready = asyncio.Event()
         self._host_ready_by_model: dict[str, asyncio.Event] = {}
         self._host_load_task: asyncio.Task | None = None
@@ -346,7 +350,21 @@ class Worker:
             return {"kind": "peer_pong", "ts_ns": msg.get("ts_ns")}
         if kind == "compute_unit":
             return await self._handle_compute_unit(msg)
+        if kind == "trim_cache":
+            return self._handle_trim_cache(msg)
         return {"kind": "error", "error": f"unknown peer kind: {kind!r}"}
+
+    def _handle_trim_cache(self, msg: dict) -> dict:
+        """The head rejected some draft tokens: drop them from this worker's slice of the cache too."""
+        runtime = self._runtime_for_model(msg.get("model_id") or self.model_id or "")
+        if runtime is None:
+            return {"kind": "error", "error": "backend not selected"}
+        try:
+            runtime.trim(str(msg["conv_id"]), int(msg["n"]))
+        except Exception as e:
+            log.exception("trim_cache failed")
+            return {"kind": "error", "error": str(e)}
+        return {"kind": "trim_cache_ok"}
 
     async def _handle_compute_unit(self, msg: dict) -> dict:
         """Run a single hidden-state forward through this worker's
@@ -857,7 +875,13 @@ class Worker:
                     if chain
                     else None
                 )
-                result = await self.generation.generate(
+                trim_remote = (
+                    await self._build_chain_trimmer(conv_id=conv_id, model_id=model_id, chain=chain)
+                    if chain
+                    else None
+                )
+                generation = await self._generation_for(model_id, runtime, spans_macs=bool(chain))
+                result = await generation.generate(
                     GenerationRequest(
                         runtime=runtime,
                         conv_id=conv_id,
@@ -866,6 +890,7 @@ class Worker:
                         temperature=temperature,
                         on_token=on_token,
                         forward_hidden=forward_hidden,
+                        trim_remote=trim_remote,
                     )
                 )
                 text, stats = result.text, result.stats
@@ -928,6 +953,46 @@ class Worker:
             return hidden
 
         return forward_through_chain
+
+    async def _build_chain_trimmer(self, *, conv_id: str, model_id: str, chain: list):
+        """Drops rejected draft tokens from every chain member's cache, reusing the turn's connections."""
+        conns = [
+            await self._get_or_open_peer(str(entry["worker_id"]), str(entry["ticket"]))
+            for entry in chain
+        ]
+
+        async def trim_through_chain(n: int) -> None:
+            for conn in conns:
+                resp = await conn.call("trim_cache", model_id=model_id, conv_id=conv_id, n=n)
+                if resp.get("kind") != "trim_cache_ok":
+                    raise RuntimeError(f"trim_cache failed: {resp.get('error', resp)}")
+
+        return trim_through_chain
+
+    async def _generation_for(self, model_id: str, runtime: BackendRuntime, *, spans_macs: bool):
+        """Speculative decoding when the turn crosses the network and a fitting draft model is configured.
+
+        It saves round trips, not compute: on one Mac verifying a draft costs more than it saves
+        (scripts/bench_decode.py measured 0.6x at no latency, 1.35x at 50 ms and 1.76x at 100 ms with
+        four draft tokens). So a turn that stays on this Mac decodes one token at a time.
+        """
+        draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
+        if not spans_macs or not draft_id or draft_id == model_id or not runtime.supports_speculation:
+            return self.generation
+        draft = await self._load_draft(draft_id)
+        if draft is None or not same_tokenizer(draft, runtime):
+            return self.generation
+        return SpeculativeGeneration(draft, draft_tokens=int(os.environ.get("DOTS_DRAFT_TOKENS", "4")))
+
+    async def _load_draft(self, draft_id: str) -> BackendRuntime | None:
+        """The draft model, loaded whole on this Mac the first time it is needed. None if it won't load."""
+        if draft_id not in self._drafts:
+            try:
+                self._drafts[draft_id] = await asyncio.to_thread(load_draft_runtime, draft_id)
+            except Exception:
+                log.exception("draft model %s failed to load; decoding one token at a time", draft_id)
+                self._drafts[draft_id] = None
+        return self._drafts[draft_id]
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
         """Hub-triggered probe: open (or reuse) a connection to the target

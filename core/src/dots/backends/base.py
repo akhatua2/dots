@@ -126,6 +126,28 @@ class BackendRuntime(ABC):
         forward_hidden: ForwardHidden | None = None,
     ) -> Any: ...
 
+    # ---- speculative decoding --------------------------------------------
+    # A backend that can verify several tokens in one pass and roll its cache back supports a draft
+    # model. The defaults say it can't, so a backend opts in by overriding all three.
+
+    @property
+    def supports_speculation(self) -> bool:
+        return False
+
+    async def decode_many(
+        self,
+        conv_id: str,
+        tokens: list[int],
+        *,
+        forward_hidden: ForwardHidden | None = None,
+    ) -> Any:
+        """Feeds `tokens` in one pass and returns the logits after each, one row per token."""
+        raise NotImplementedError(f"{type(self).__name__} can't verify several tokens at once")
+
+    def trim(self, conv_id: str, n: int) -> None:
+        """Drops the last `n` tokens from the conversation's cache, as if they had never been fed."""
+        raise NotImplementedError(f"{type(self).__name__} can't roll its cache back")
+
     @abstractmethod
     def forward_segment(
         self, conv_id: str, hidden: Any, start: int, end: int
