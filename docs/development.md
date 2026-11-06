@@ -90,6 +90,38 @@ All endpoints except `/healthz` require `Authorization: Bearer <DOTS_JOIN_TOKEN>
 | GET | `/v1/download/worker` | Pre-built macOS worker binary |
 | GET | `/healthz` | Liveness + worker count |
 
+Two request headers change how a turn runs: `X-Dots-Account` charges it to an account (otherwise `api`),
+and `X-Dots-Speculate: off` makes it decode one token at a time. A streamed answer carries extra `dots`
+events that OpenAI clients ignore: `draft` (words guessed ahead, not yet checked), `verified` (how many
+guesses a check kept) and `speed` (this answer's speed over the same pool without guessing).
+
+## How a token is written
+
+A turn runs on one Mac when the model fits there, and is split into layer ranges across Macs when it
+doesn't. The head Mac holds the first layers and the output layer, and drives every token; each other Mac
+runs its layers on the hidden state it is sent (`distributed/worker.py`).
+
+Guessing ahead (`generation/speculative.py`) gets several tokens out of one pass of the big model. Guesses
+come from looking the last few tokens up earlier in the conversation, which is free and on for every
+turn, and, when a turn crosses the network, from a small draft model on the head Mac. One pass checks
+them all and keeps the ones the big model would have written itself. Checking a few tokens at once goes
+through a Metal kernel (`backends/mlx/small_batch.py`) that reads each 4-bit weight once for all of them.
+The measurements behind each choice are in [`plans/decode-over-the-network.md`](plans/decode-over-the-network.md).
+
+| Setting | Where | Default | What it does |
+|---|---|---|---|
+| `DOTS_DRAFT_MODEL` | worker | none | A small model with the same tokenizer to guess ahead when a turn crosses Macs |
+| `DOTS_DRAFT_TOKENS` | worker | 4 | Most tokens the draft guesses before a check |
+| `DOTS_DRAFT_ADAPTIVE` | worker | on | Guess fewer after misses, more after a full hit |
+| `DOTS_PROMPT_LOOKUP` | worker | on | Look guesses up in the conversation |
+| `DOTS_SMALL_BATCH_KERNEL` | worker | on | The Metal kernel for checking 2 to 5 tokens |
+| `DOTS_CHAIN` | worker | `star` | `ring` passes the hidden state Mac to Mac instead of back through the head |
+| `DOTS_PLACEMENT_RAM_MARGIN_GB` | hub | 1.0 | Memory the head Mac keeps free beyond its share |
+| `DOTS_HEAD_WORKSPACE_RAM_GB` | hub | 0.5 | Working memory counted for the head's output layer |
+
+`scripts/bench_decode.py` compares these on a simulated two-Mac pool, and `scripts/bench_wire.py` times
+round trips over the peer transport.
+
 ## CI/CD
 
 | Workflow | Trigger | What it does |
