@@ -115,6 +115,7 @@ The measurements behind each choice are in [`plans/decode-over-the-network.md`](
 | `DOTS_DRAFT_ADAPTIVE` | worker | on | Guess fewer after misses, more after a full hit |
 | `DOTS_PROMPT_LOOKUP` | worker | on | Look guesses up in the conversation |
 | `DOTS_SMALL_BATCH_KERNEL` | worker | on | The Metal kernel for checking 2 to 5 tokens |
+| `DOTS_PREFILL_CHUNK` | worker | 1024 | Long prompts cross Macs in chunks of this many tokens, overlapping compute and network; 0 sends them whole |
 | `DOTS_CHAIN` | worker | `star` | `ring` passes the hidden state Mac to Mac instead of back through the head |
 | `DOTS_PLACEMENT_RAM_MARGIN_GB` | hub | 1.0 | Memory the head Mac keeps free beyond its share |
 | `DOTS_HEAD_WORKSPACE_RAM_GB` | hub | 0.5 | Working memory counted for the head's output layer |

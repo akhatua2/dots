@@ -167,6 +167,13 @@ asyncio handoffs). Hidden states already go as raw bytes.
   forty-token answers word for word the same. Plain 8-bit (worst KL 2.2) and fp8 (KL 2.1) are not
   usable: a few residual channels are huge. Worth turning on for slow uplinks once a WAN run says so.
 
+- **Long prompts go in chunks** (`DOTS_PREFILL_CHUNK`, 1,024 tokens; 0 turns it off), as the Project Maya
+  fork does: while the peers work on one chunk the head computes and sends the next, and chunks before
+  the last send nothing back. Each Mac takes a conversation's hidden states one at a time in arrival
+  order and refuses a chunk out of order. Same answers; on one Mac it is slower (6.95 s against 6.25 s
+  for 2,900 tokens), since both workers share a GPU and there is no network to overlap. Untested across
+  real Macs, which is where it should pay.
+
 ## Next
 
 1. **Measure over a real WAN** (with three or more Macs, star against ring) with two Macs on different networks, with and without a draft model.

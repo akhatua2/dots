@@ -148,6 +148,10 @@ class Worker:
         self._peer_conns: dict[str, PeerConnection] = {}
         # Passes sent round a ring, waiting for the hidden state to come home
         self._ring_waiters: dict[str, asyncio.Future] = {}
+        # Hidden states for one conversation are run one at a time, in the order they arrived: a prompt
+        # sent in chunks must reach the cache in order. `_next_chunk` is the chunk each expects next.
+        self._segment_locks: dict[str, asyncio.Lock] = {}
+        self._next_chunk: dict[str, int] = {}
         # Per-conversation handler lock: two delegate_turn calls for the
         # same conv would corrupt the KV cache.
         self._turn_locks: dict[str, asyncio.Lock] = {}
@@ -381,7 +385,16 @@ class Worker:
         """Run a single hidden-state forward through this worker's
         assigned layer range. Used by head workers chaining work
         through multi-worker placements."""
-        wire, compute_ms, error = await self._run_segment(msg, keep_last=msg.get("keep_last"))
+        conv_id = str(msg.get("conv_id"))
+        # Taken before anything else awaits, so requests for a conversation queue in the order they came
+        async with self._segment_locks.setdefault(conv_id, asyncio.Lock()):
+            chunk = msg.get("chunk")
+            if chunk is not None:
+                expected = 0 if chunk == 0 else self._next_chunk.get(conv_id)
+                if chunk != expected:  # never let a chunk into the cache out of order
+                    return {"kind": "error", "error": f"prompt chunk {chunk} arrived, expected {expected}"}
+                self._next_chunk[conv_id] = chunk + 1
+            wire, compute_ms, error = await self._run_segment(msg, keep_last=msg.get("keep_last"))
         if error is not None:
             return {"kind": "error", "error": error}
         return {
@@ -410,8 +423,8 @@ class Worker:
         try:
             hidden_in = runtime.decode_hidden(msg["hidden"])
             hidden_out = runtime.forward_segment(msg["conv_id"], hidden_in, int(msg["layer_start"]), int(msg["layer_end"]))
-            if keep_last:
-                hidden_out = hidden_out[:, -int(keep_last):, :]
+            if keep_last is not None:  # 0 sends nothing back: a prompt chunk before the last
+                hidden_out = hidden_out[:, hidden_out.shape[1] - int(keep_last):, :]
             wire = runtime.encode_hidden(hidden_out)  # MLX computes the layers here
         except Exception as e:
             log.exception("compute_unit failed")
@@ -720,6 +733,8 @@ class Worker:
                 else:
                     for runtime in self.backends.values():
                         runtime.reset_conversation(conv_id)
+                self._segment_locks.pop(conv_id, None)
+                self._next_chunk.pop(conv_id, None)
             return {"kind": "ok"}
         if kind == "token":
             # Notification — route through whichever consumer is installed
@@ -1011,8 +1026,38 @@ class Worker:
                                         my_layer_end=my_layer_end, chain=chain, first=peer_conns[0][0])
 
         timing = ChainTiming(peers=len(peer_conns))
+        chunk_tokens = int(os.environ.get("DOTS_PREFILL_CHUNK", "1024"))
+
+        async def through_peers(wire, chunk: int | None, keep_last: int | None):
+            """One hidden state through every peer in turn; returns what the last one sends back."""
+            for i, (conn, start, end) in enumerate(peer_conns):
+                last = i == len(peer_conns) - 1
+                resp = await conn.call("compute_unit", model_id=model_id, conv_id=conv_id, layer_start=start,
+                                       layer_end=end, hidden=wire, chunk=chunk, keep_last=keep_last if last else None)
+                if resp.get("kind") != "compute_unit_out":
+                    raise RuntimeError(f"compute_unit failed: {resp.get('error', resp)}")
+                wire = resp["hidden"]
+            return wire
+
+        async def prefill_in_chunks(hidden, keep_last: int):
+            """A long prompt in chunks: while the peers work on one chunk, this Mac computes and sends the
+            next, so compute and network overlap instead of taking turns. Only the last chunk's last rows
+            come back; the earlier ones return nothing."""
+            n = hidden.shape[1]
+            starts = list(range(0, n, chunk_tokens))
+            in_flight = []
+            for c, start in enumerate(starts):
+                piece = runtime.forward_segment(conv_id, hidden[:, start:start + chunk_tokens, :], 0, my_layer_end)
+                last = c == len(starts) - 1
+                wire = runtime.encode_hidden(piece)
+                in_flight.append(asyncio.create_task(through_peers(wire, c, keep_last if last else 0)))
+                await asyncio.sleep(0)  # let this chunk's send go out before computing the next
+            results = await asyncio.gather(*in_flight)
+            return runtime.decode_hidden(results[-1])
 
         async def forward_through_chain(hidden, keep_last: int | None = None):
+            if keep_last and chunk_tokens > 0 and hidden.shape[1] > chunk_tokens:
+                return await prefill_in_chunks(hidden, keep_last)
             # Our local segment first.
             started = time.perf_counter()
             hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
