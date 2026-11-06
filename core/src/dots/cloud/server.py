@@ -66,6 +66,7 @@ class Cloud:
         r.add_post("/v1/invites/{code}/accept", self.accept_invite)
         r.add_post("/hub/v1/heartbeat", self.heartbeat)
         r.add_post("/hub/v1/pools/{pool}/chat/completions", self.pool_answer)
+        r.add_post("/hub/v1/pools/{pool}/images/{kind:generations|edits}", self.pool_picture)
         r.add_post("/gateway/v1/chat/completions", self.gateway_chat)
         r.add_post("/gateway/v1/messages", self.gateway_messages)
         app.on_cleanup.append(lambda _app: self.hub.close())
@@ -298,6 +299,21 @@ class Cloud:
         speculate = request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
         return await _relay(request, self.hub.stream(body, self.me, speculate), first={"event": "macs", "macs": macs, **receipt},
                             last=receipt)
+
+    async def pool_picture(self, request: web.Request) -> web.StreamResponse:
+        """A picture from a pool, streamed as it forms. Only the hub's pool draws today."""
+        if request.match_info["pool"] != HUB_POOL:
+            return error(404, "This pool doesn't draw pictures yet.", "not_found_error")
+        body = await _body(request)
+        out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await out.prepare(request)
+        try:
+            async for line in self.hub.picture(request.match_info["kind"], body, self.me):
+                await out.write(line)
+        except HubError as e:
+            await out.write(f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n".encode())
+        await out.write_eof()
+        return out
 
     # ---- the gateway -----------------------------------------------------------
 

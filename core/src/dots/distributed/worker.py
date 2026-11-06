@@ -1198,12 +1198,20 @@ class Worker:
             image = msg.get("image")
             job = ImageJob(prompt=str(msg.get("prompt", "")), width=msg.get("width"), height=msg.get("height"),
                            steps=msg.get("steps"), seed=msg.get("seed"),
-                           image=base64.b64decode(image) if image else None, strength=msg.get("strength"))
+                           image=base64.b64decode(image) if image else None, strength=msg.get("strength"),
+                           keep_unchanged=bool(msg.get("keep_unchanged", True)))
         except (ValueError, TypeError, binascii.Error) as e:
             return {"kind": "error", "error": str(e)}
+        job_id = msg.get("job_id")
+
+        async def on_step(step: int, total: int, preview: bytes) -> None:
+            if job_id and self.conn is not None:
+                await self.conn.notify("image_step", job_id=job_id, step=step, of=total,
+                                       preview=base64.b64encode(preview).decode())
+
         async with self._drawing:
             try:
-                png, ms = await self.image_tool.draw(job)
+                png, ms = await self.image_tool.draw(job, on_step if job_id else None)
             except RuntimeError as e:
                 log.warning("image job failed: %s", e)
                 return {"kind": "error", "error": str(e)}

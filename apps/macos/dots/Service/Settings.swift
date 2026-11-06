@@ -113,6 +113,8 @@ struct AppSettings: Codable, Equatable {
     var draftAhead = true
     /// Pictures are shrunk to this many pixels before they're sent: what a pool reads at most (DOTS_IMAGE_MAX_PIXELS)
     var imageMaxPixels = 1_048_576
+    /// How big pictures are drawn, the longer side in pixels: sharper, or quicker (`Drawing.sides`)
+    var pictureSide = 1024
 
     init() {}
     /// Settings saved by an older dots load with defaults for anything new.
@@ -130,6 +132,7 @@ struct AppSettings: Codable, Equatable {
         savingsBaseline = try c.decodeIfPresent(String.self, forKey: .savingsBaseline) ?? d.savingsBaseline
         draftAhead = try c.decodeIfPresent(Bool.self, forKey: .draftAhead) ?? d.draftAhead
         imageMaxPixels = try c.decodeIfPresent(Int.self, forKey: .imageMaxPixels) ?? d.imageMaxPixels
+        pictureSide = try c.decodeIfPresent(Int.self, forKey: .pictureSide) ?? d.pictureSide
     }
 
     private static let defaultsKey = "dots.settings.v1"

@@ -11,6 +11,10 @@ struct ChatTurn: Codable, Equatable, Identifiable {
     var date: Date
     /// Your thumbs up (1) or down (-1) on the answer. Kept with the chat on this Mac.
     var rating: Int?
+    /// When the answer is a picture: its file, among the chats' pictures on this Mac
+    var picture: String?
+
+    var hasAnswer: Bool { picture != nil || !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 /// A conversation: its turns, oldest first. Its title is its first question.
@@ -34,6 +38,8 @@ final class ChatStore {
     /// The chat new questions continue. Nil starts a new one with the next question.
     private(set) var currentID: UUID?
     @ObservationIgnored private let url: URL?
+    /// Pictures of a store that isn't saved (the self-test's), kept in memory instead
+    @ObservationIgnored private var unsaved: [String: Data] = [:]
 
     init(persists: Bool) {
         url = persists ? Simulation.supportURL("chats.json") : nil
@@ -41,7 +47,7 @@ final class ChatStore {
             // An answer that never came (an older dots saved those) isn't worth showing
             chats = saved.map { chat in
                 var chat = chat
-                chat.turns.removeAll { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                chat.turns.removeAll { !$0.hasAnswer }
                 return chat
             }.filter { !$0.turns.isEmpty }
         }
@@ -51,7 +57,7 @@ final class ChatStore {
 
     /// Adds a finished turn to the current chat, or starts a chat with it, and moves that chat to the top.
     func record(_ turn: ChatTurn) {
-        guard !turn.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard turn.hasAnswer else { return }
         var chat = current ?? Chat(turns: [], updated: turn.date)
         chat.turns.append(turn)
         chat.updated = turn.date
@@ -67,6 +73,25 @@ final class ChatStore {
               let t = chats[c].turns.firstIndex(where: { $0.id == turnID }) else { return }
         chats[c].turns[t].rating = chats[c].turns[t].rating == rating ? nil : rating
         save()
+    }
+
+    /// Keeps a picture an answer drew, beside the chats on this Mac, and says what to call it in the turn.
+    func keepPicture(_ png: Data) -> String {
+        let name = UUID().uuidString + ".png"
+        if let url { try? writePicture(png, to: url.deletingLastPathComponent().appendingPathComponent("pictures/" + name)) }
+        else { unsaved[name] = png }
+        return name
+    }
+
+    func picture(_ name: String) -> Data? {
+        if let png = unsaved[name] { return png }
+        guard let url else { return nil }
+        return try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("pictures/" + name))
+    }
+
+    private func writePicture(_ png: Data, to file: URL) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try png.write(to: file, options: .atomic)
     }
 
     func open(_ id: UUID) { currentID = id }

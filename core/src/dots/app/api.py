@@ -192,15 +192,18 @@ class HttpApi:
             width, height = parse_size(body.get("size"))
             job = ImageJob(prompt=str(body.get("prompt", "")), width=width, height=height,
                            steps=_int_or_none(body.get("steps")), seed=_int_or_none(body.get("seed")), image=image,
-                           strength=float(body["strength"]) if body.get("strength") is not None else None)
+                           strength=float(body["strength"]) if body.get("strength") is not None else None,
+                           keep_unchanged=str(body.get("keep_unchanged", True)).lower() not in ("false", "0", "no"))
         except (ValueError, TypeError) as e:
             return _error(400, str(e))
         if editing and job.image is None:
             return _error(400, "an edit needs the picture to start from, as `image`")
         payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
-                   "seed": job.seed, "strength": job.strength}
+                   "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged}
         if job.image is not None:
             payload["image"] = base64.b64encode(job.image).decode()
+        if str(body.get("stream", False)).lower() in ("true", "1"):
+            return await self._stream_image(request, payload, "image_edit" if editing else "image_generation")
         try:
             drawn = await self.hub.make_image(**payload)
         except NoImageMac as e:
@@ -212,6 +215,32 @@ class HttpApi:
             "data": [{"b64_json": drawn["png"]}],
             "dots": {"model": drawn.get("model"), "ms": round(drawn.get("ms", 0)), "worker_id": drawn["worker_id"]},
         })
+
+    async def _stream_image(self, request: web.Request, payload: dict, kind: str) -> web.StreamResponse:
+        """The picture as it forms, a preview after each step, then the picture itself, as server-sent events
+        named as OpenAI's streamed images are (`image_generation.partial_image`, `...completed`)."""
+        from ..distributed.hub import NoImageMac
+
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await response.prepare(request)
+
+        async def send(event: str, data: dict) -> None:
+            await response.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
+
+        async def on_step(step: int, of: int, preview: str) -> None:
+            await send(f"{kind}.partial_image", {"type": f"{kind}.partial_image", "partial_image_index": step - 1,
+                                                 "b64_json": preview, "dots": {"step": step, "of": of}})
+
+        try:
+            drawn = await self.hub.make_image(on_step=on_step, **payload)
+        except (NoImageMac, RuntimeError) as e:
+            await send("error", {"type": "error", "error": {"message": str(e)}})
+        else:
+            await send(f"{kind}.completed", {"type": f"{kind}.completed", "b64_json": drawn["png"],
+                                             "dots": {"model": drawn.get("model"), "ms": round(drawn.get("ms", 0)),
+                                                      "worker_id": drawn["worker_id"]}})
+        await response.write_eof()
+        return response
 
     async def _credits_all(self, _request: web.Request) -> web.Response:
         return web.json_response(self.hub.ledger.as_dict())

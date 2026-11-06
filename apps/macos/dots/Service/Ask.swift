@@ -161,6 +161,13 @@ final class AskController {
         var picture: Data?
     }
 
+    struct PictureProgress: Equatable {
+        var image: Data?
+        var step = 0
+        var of = 0
+        var done = false
+    }
+
     struct SecondOpinion: Equatable {
         var candidate: RouteCandidate
         var phase: Phase = .idle
@@ -180,6 +187,8 @@ final class AskController {
     /// Each check of the draft so far, oldest first. Empty when the answer isn't speculative.
     var checks: [DraftCheck] = []
     var receipt: Receipt?
+    /// When the answer is a picture: the picture so far, and how far its drawing has come
+    var picture: PictureProgress?
     var second: SecondOpinion?
     var focusToken = 0
     /// The chat turn this exchange was saved as, once its answer finished.
@@ -206,7 +215,7 @@ final class AskController {
     func clear() {
         task?.cancel(); secondTask?.cancel()
         input = ""; asked = ""; attachment = nil; forcedID = nil
-        phase = .idle; decision = nil; answer = ""; receipt = nil; second = nil; recordedTurnID = nil
+        phase = .idle; decision = nil; answer = ""; receipt = nil; second = nil; recordedTurnID = nil; picture = nil
     }
 
     func submit(model: AppModel) {
@@ -217,7 +226,63 @@ final class AskController {
                                  hasImages: attachment?.picture != nil)
         let decision = Router.decide(question: question, hasDocument: attachment != nil, state: model.state,
                                      rules: model.settings.rules, forcedID: forcedID, facts: facts, thisMac: model.thisMacRoute)
-        run(question: question, decision: decision, model: model)
+        if Drawing.wantsPicture(question, hasPicture: attachment?.picture != nil) {
+            draw(question: question, decision: decision, model: model)
+        } else {
+            run(question: question, decision: decision, model: model)
+        }
+    }
+
+    /// The answer is a picture: drawn in a pool, a preview after each step, then the picture, kept with the chat.
+    /// A photo of yours is changed only in your own pools.
+    private func draw(question: String, decision: RouteDecision, model: AppModel) {
+        task?.cancel(); secondTask?.cancel()
+        asked = question
+        answer = ""; receipt = nil; second = nil; draft = ""; checks = []; recordedTurnID = nil
+        self.decision = decision
+        picture = PictureProgress()
+        phase = .routing
+        let attachment = self.attachment
+        let side = attachment?.picture == nil ? model.settings.pictureSide : nil
+        let places = ([decision.chosen].compactMap { $0 } + decision.fallbacks + decision.candidates)
+            .filter { $0.destination == .yourPool || (!decision.isPrivate && $0.destination == .publicPool) }
+        task = Task { [weak self] in
+            guard let self else { return }
+            var seen = Set<String>()
+            for candidate in places where seen.insert(candidate.id).inserted {
+                guard let target = AnswerRunner.target(for: candidate, model: model) else { continue }
+                var receipt = AnswerRunner.receipt(for: candidate, decision: decision, via: target.via, paidWithKey: false)
+                receipt.reasons.insert(RouteReason(symbol: "paintbrush", text: "It asked for a picture, so one Mac in \(candidate.place) drew it."), at: 0)
+                self.receipt = receipt
+                self.phase = .streaming
+                do {
+                    for try await event in Drawing.stream(target.endpoint, prompt: question, picture: attachment?.picture, side: side) {
+                        if Task.isCancelled { return }
+                        switch event {
+                        case let .step(step, of, preview):
+                            self.picture = PictureProgress(image: preview, step: step, of: of)
+                        case .done(let png):
+                            self.picture = PictureProgress(image: png, step: self.picture?.of ?? 0, of: self.picture?.of ?? 0, done: true)
+                        }
+                    }
+                } catch {
+                    if self.picture?.image == nil { continue }  // nothing came back: the next place
+                    self.phase = .failed(error.localizedDescription)
+                    return
+                }
+                guard let png = self.picture?.image, self.picture?.done == true else { continue }
+                receipt.finished = true
+                self.receipt = receipt
+                self.phase = .done
+                var turn = ChatTurn(question: question, answer: "", receipt: receipt, attachment: attachment?.name, date: .now)
+                turn.picture = model.chats.keepPicture(png)
+                model.chats.record(turn)
+                self.recordedTurnID = turn.id
+                return
+            }
+            self.phase = .failed(decision.isPrivate ? "No pool of yours draws pictures right now, and this photo stays private."
+                                                    : "No pool draws pictures right now.")
+        }
     }
 
     /// For a private question nothing private can take: the user says send it to a frontier model anyway.

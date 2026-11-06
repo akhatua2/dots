@@ -68,7 +68,11 @@ private struct Conversation: View {
                     if !(live && turn.id == ask.recordedTurnID) {
                         QuestionBubble(text: turn.question, attachment: turn.attachment)
                         VStack(alignment: .leading, spacing: 8) {
-                            MarkdownText(text: turn.answer)
+                            if let name = turn.picture {
+                                PictureAnswer(image: model.chats.picture(name))
+                            } else {
+                                MarkdownText(text: turn.answer)
+                            }
                             AnswerActions(turn: turn)
                         }
                     }
@@ -76,7 +80,14 @@ private struct Conversation: View {
                 if live {
                     QuestionBubble(text: ask.asked, attachment: ask.attachment?.name)
                     VStack(alignment: .leading, spacing: 8) {
-                        AskBody(compact: true)
+                        if let picture = ask.picture {
+                            PictureAnswer(image: picture.image, step: picture.step, of: picture.of, done: picture.done)
+                            if case .failed(let why) = ask.phase {
+                                Text(why).font(D.ui(13)).foregroundStyle(D.t3)
+                            }
+                        } else {
+                            AskBody(compact: true)
+                        }
                         if ask.phase == .done, let turn = model.chats.current?.turns.first(where: { $0.id == ask.recordedTurnID }) {
                             AnswerActions(turn: turn)
                         }
@@ -127,7 +138,7 @@ struct AskComposer: View {
             }
             TextField(placeholder, text: $ask.input, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(D.ui(16)).foregroundStyle(D.t1)
+                .font(D.ui(14)).foregroundStyle(D.t1)
                 .lineLimit(1...8)
                 .focused($focused)
                 .onSubmit(send)
@@ -136,6 +147,9 @@ struct AskComposer: View {
                     .buttonStyle(.plain).foregroundStyle(D.t4)
                 Spacer()
                 LastRun()
+                if Drawing.wantsPicture(ask.input, hasPicture: false) && ask.attachment?.picture == nil {
+                    PictureSizePicker()
+                }
                 DraftAheadToggle()
                 RoutePicker()
                 SendButton(enabled: canSend, busy: ask.isBusy, action: send)

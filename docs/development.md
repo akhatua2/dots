@@ -86,6 +86,10 @@ All endpoints except `/healthz` require `Authorization: Bearer <DOTS_JOIN_TOKEN>
 | POST | `/v1/chat/completions` | OpenAI-compatible chat |
 | POST | `/v1/images/generations` | Draw a picture from words (OpenAI's image API) |
 | POST | `/v1/images/edits` | Draw from a starting picture and words, as JSON or a multipart form |
+
+With `"stream": true` an image request streams the picture as it forms: an `image_generation.partial_image`
+event (`image_edit.` for edits) after each step, then `...completed` with the picture. An edit keeps the starting
+picture's own pixels wherever it didn't mean to change anything, unless the request says `"keep_unchanged": false`.
 | GET | `/v1/models` | Available models |
 | GET | `/v1/credits` | CU balances |
 | GET | `/v1/pool/nodes` | Worker map data |
@@ -124,6 +128,8 @@ The measurements behind each choice are in [`plans/decode-over-the-network.md`](
 | `DOTS_IMAGE_MAX_PIXELS` | worker | 1048576 | Images larger than this are scaled down before the model reads them |
 | `DOTS_IMAGE_MODEL` | worker | none | An image model this Mac draws with, whole; unset, it offers none (`images.py`) |
 | `DOTS_IMAGE_COMMAND`, `DOTS_IMAGE_EDIT_COMMAND` | worker | mflux's FLUX 3 commands | The tool that draws, and the one that edits |
+| `DOTS_IMAGE_STEPS` | worker | 8 | Denoising steps when a job doesn't say |
+| `DOTS_IMAGE_EDIT_PIXELS` | worker | 1048576 | A larger picture is edited at this size and the edit put back into the full-size picture |
 | `DOTS_PLACEMENT_RAM_MARGIN_GB` | hub | 1.0 | Memory the head Mac keeps free beyond its share |
 | `DOTS_HEAD_WORKSPACE_RAM_GB` | hub | 0.5 | Working memory counted for the head's output layer |
 

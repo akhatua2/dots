@@ -140,6 +140,9 @@ data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"promp
 data: [DONE]
 ```
 
+- A pool draws pictures at `POST /hub/v1/pools/:id/images/generations` and changes them at `.../images/edits`, in
+  OpenAI's image API, streamed as they form (`image_generation.partial_image` after each step, then `...completed`).
+  Ask sends a question there when it asks for a picture, and shows each step as it comes.
 - A question can carry images as OpenAI-style parts, `{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}`,
   sent inline. The app shrinks them to `imageMaxPixels` first.
 - `macs` comes first and lists the Macs answering.

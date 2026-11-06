@@ -278,6 +278,8 @@ class Hub:
         self._token_routers: dict[str, "asyncio.Future | object"] = {}
         # Where a turn's unconfirmed draft text goes, when the asker wants to see it
         self._draft_routers: dict[str, object] = {}
+        # job id -> where an image job's step previews go, while it is drawn
+        self._image_watchers: dict[str, object] = {}
         # Per-conv counter for tokens emitted so far. Used by the
         # run_turn watchdog to log progress on long turns + by
         # _on_delegate_token to detect the first-token arrival.
@@ -359,19 +361,25 @@ class Hub:
     def image_models(self) -> list[str]:
         return sorted({p.images for p in self.participants.values() if p.compute and p.images})
 
-    async def make_image(self, **job) -> dict:
+    async def make_image(self, on_step=None, **job) -> dict:
         """Draws a picture, whole, on a Mac that offers an image model, one not busy with a turn if there is
-        one. Returns the worker's answer: base64 `png`, `model`, `ms`, and which Mac drew it."""
+        one. Returns the worker's answer: base64 `png`, `model`, `ms`, and which Mac drew it. `on_step(step,
+        of, preview)` gets the picture as it forms, a base64 JPEG after each step."""
         offering = [p for p in self.participants.values() if p.compute and p.images]
         if not offering:
             raise NoImageMac("no Mac in the pool offers images right now")
         idle = [p for p in offering if not self.is_serving(p.id)]
         worker = (idle or offering)[0]
         ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
+        job_id = uuid.uuid4().hex
+        if on_step is not None:
+            self._image_watchers[job_id] = on_step
         try:
-            resp = await worker.conn.call("make_image", **job)
+            resp = await worker.conn.call("make_image", job_id=job_id, **job)
         except ConnectionError as e:
             raise RuntimeError(f"the Mac drawing it dropped: {e}") from e
+        finally:
+            self._image_watchers.pop(job_id, None)
         if resp.get("kind") != "image_ok":
             raise RuntimeError(resp.get("error", "the image failed"))
         return {**resp, "worker_id": worker.id}
@@ -848,6 +856,11 @@ class Hub:
                 return self._on_worker_ready(wid, msg)
             if kind == "delegate_token" and wid is not None:
                 return await self._on_delegate_token(wid, msg)
+            if kind == "image_step":
+                watcher = self._image_watchers.get(msg.get("job_id"))
+                if watcher is not None:
+                    await watcher(int(msg.get("step", 0)), int(msg.get("of", 0)), msg.get("preview", ""))
+                return None
             if kind == "load_progress" and wid is not None:
                 model_id = msg.get("model_id")
                 if not isinstance(model_id, str) or not model_id:

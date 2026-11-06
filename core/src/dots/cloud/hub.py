@@ -82,6 +82,21 @@ class HubClient:
             raise HubError(503, f"the hub didn't answer: {e}") from e
 
 
+    async def picture(self, kind: str, body: dict, account: str) -> AsyncIterator[bytes]:
+        """A picture as it forms, charged to `account`: the hub's events for `kind` (generations or edits),
+        passed through as they come."""
+        try:
+            async with self.session.post(f"{self.base_url}/v1/images/{kind}", json={**body, "stream": True},
+                                         headers={"X-Dots-Account": account},
+                                         timeout=aiohttp.ClientTimeout(total=1800)) as r:
+                if r.status >= 400:
+                    raise HubError(r.status, _message(await r.json(content_type=None), r.status))
+                async for line in r.content:
+                    yield line
+        except aiohttp.ClientError as e:
+            raise HubError(503, f"the hub didn't answer: {e}") from e
+
+
 def _message(body: object, status: int) -> str:
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         return str(body["error"].get("message", status))
