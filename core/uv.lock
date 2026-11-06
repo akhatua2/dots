@@ -419,6 +419,7 @@ dev = [
 mac = [
     { name = "mlx" },
     { name = "mlx-lm" },
+    { name = "pillow" },
 ]
 sim = [
     { name = "matplotlib" },
@@ -440,6 +441,7 @@ requires-dist = [
     { name = "mlx-lm", marker = "extra == 'mac'", specifier = ">=0.20.0" },
     { name = "msgpack", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.26.0" },
+    { name = "pillow", marker = "extra == 'mac'", specifier = ">=10.3" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

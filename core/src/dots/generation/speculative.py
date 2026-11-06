@@ -67,7 +67,8 @@ class ModelDraft(Draft):
         return self.runtime.supports_speculation
 
     async def start(self, conv_id, request, prefill) -> None:
-        await self.runtime.prefill(conv_id, request.history, template_kwargs=request.template_kwargs)
+        # It reads the words only: guessing them doesn't need the images, and the big model checks
+        await self.runtime.prefill(conv_id, _without_images(request.history), template_kwargs=request.template_kwargs)
 
     async def propose(self, conv_id, token, k, recent=(), penalty=1.0):
         # Greedy whatever the temperature: the big model decides what is kept
@@ -252,6 +253,15 @@ class NGramLookup:
                 if start is not None:
                     return self.tokens[start + n:start + n + k]
         return []
+
+
+def _without_images(history: list[dict]) -> list[dict]:
+    def words(content):
+        if not isinstance(content, list):
+            return content
+        return [part for part in content if not (isinstance(part, dict) and part.get("type") == "image_url")]
+
+    return [{**message, "content": words(message.get("content"))} for message in history]
 
 
 def _until_stop(tokens: list[int], stop_ids: set[int]) -> list[int]:

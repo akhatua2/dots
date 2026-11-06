@@ -11,6 +11,7 @@ drops the cache; the next prefill rebuilds it.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -390,15 +391,20 @@ class MlxBackendRuntime(BackendRuntime):
         self._geometry: ModelGeometry | None = None
         # Each conversation's last pass, as final hidden states: a model's own draft head reads them
         self._rows: dict[str, Any] = {}
+        # Where the model's files are, for parts loaded later (the vision encoder)
+        self.source: str | None = None
+        self._vision = None
+        self._vision_loaded = False
         # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't
         from .small_batch import install
 
         install()
 
     @classmethod
-    def from_host(cls, host: FullModelHost) -> "MlxBackendRuntime":
+    def from_host(cls, host: FullModelHost, source: str | None = None) -> "MlxBackendRuntime":
         runtime = cls()
         runtime.host = host
+        runtime.source = source
         runtime._geometry = geometry_from_mlx_model(host.model)
         return runtime
 
@@ -431,6 +437,7 @@ class MlxBackendRuntime(BackendRuntime):
                     pass
 
         self.model_id = prepared.source_id
+        self.source = prepared.runtime_id
         self.assignment = assignment
         self.host = FullModelHost(model, tokenizer)
         self._geometry = geometry_from_mlx_model(model)
@@ -545,6 +552,20 @@ class MlxBackendRuntime(BackendRuntime):
         self._require_host().reset_conversation(conv_id)
         self._rows.pop(conv_id, None)
 
+    async def _reads_images(self):
+        """The model's vision encoder, loaded the first time someone sends an image."""
+        from .vision import load_vision
+
+        if not self._vision_loaded:
+            if self.source is None:
+                raise ValueError("this model was loaded without its files, so it can't read images")
+            max_pixels = int(os.environ.get("DOTS_IMAGE_MAX_PIXELS", str(1024 * 1024)))
+            self._vision = await asyncio.to_thread(load_vision, self.source, max_pixels)
+            self._vision_loaded = True
+        if self._vision is None:
+            raise ValueError(f"{self.model_id or 'this model'} doesn't read images")
+        return self._vision
+
     def last_rows(self, conv_id: str):
         """The final hidden states (after the last norm) of the conversation's latest pass, one per position."""
         return self._rows[conv_id]
@@ -570,14 +591,21 @@ class MlxBackendRuntime(BackendRuntime):
         template_kwargs: dict | None = None,
         keep_rows: int = 1,
     ) -> PrefillOutput:
+        from .vision import take_images
+
         host = self._require_host()
+        messages, images = take_images(history)
         full_ids = host.tokenizer.apply_chat_template(
-            history,
+            messages,
             add_generation_prompt=True,
             **(template_kwargs or {}),
         )
+        spans: list[tuple[int, int]] = []
+        if images:
+            vision = await self._reads_images()
+            full_ids, spans = vision.expand(full_ids, images)
         already_seen = host._token_counts.get(conv_id, 0)
-        if already_seen > len(full_ids):
+        if already_seen > len(full_ids) or any(start < already_seen < end for start, end in spans):
             host.reset_conversation(conv_id)
             already_seen = 0
         new_ids = full_ids[already_seen:]
@@ -586,6 +614,10 @@ class MlxBackendRuntime(BackendRuntime):
 
         t0 = time.perf_counter()
         hidden = host.embed(array([new_ids]))
+        # Images in the new part of the conversation take their placeholders' places
+        new_images = [(start - already_seen, data) for (start, _), data in zip(spans, images) if start >= already_seen]
+        if new_images:
+            hidden = vision.place(hidden, new_images)
         # The last row picks a token; the pool sends back only the rows wanted
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=max(1, keep_rows))
         hidden = host.norm(hidden[:, -max(1, keep_rows):, :])
@@ -724,6 +756,7 @@ class MlxBackendRuntime(BackendRuntime):
         self.host = None
         self._geometry = None
         self._rows.clear()
+        self._vision, self._vision_loaded = None, False
         if host is not None:
             host._caches.clear()
             host._token_counts.clear()

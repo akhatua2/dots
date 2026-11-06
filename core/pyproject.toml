@@ -30,6 +30,7 @@ dependencies = [
 mac = [
     "mlx>=0.20.0",
     "mlx-lm>=0.20.0",
+    "pillow>=10.3",  # reads the images people ask about
 ]
 dev = [
     "pytest>=8.0",

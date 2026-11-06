@@ -77,10 +77,27 @@ Outputs match one-token decoding up to rounding: wherever they differed, the two
 one bf16 step of each other (0.125 or less). Checking several tokens at once sums in a different order, so
 such near-ties can go either way; looking guesses up, with no draft at all, shows the same.
 
+**Images in.** Qwen3.5 reads images natively, and mlx-community's 4-bit builds keep the vision encoder
+(unquantized, 153 tensors on 0.8B). The head Mac runs it, loaded the first time an image comes
+(`backends/mlx/vision.py`, following mlx-vlm's port, which pulls in torch, opencv and an audio stack, too
+much for a worker). Each image becomes one row per 32x32 pixels, in the place of its placeholder tokens, and
+from there the prompt crosses Macs like any other: split and whole gave the same answer token for token.
+
+Qwen3.5 was trained with 3D positions for image tokens (frame, row, column), where mlx-lm runs one sequence.
+On 0.8B, five questions about a screenshot and a photo (the pool's name and models, credits and Macs
+lending, which way a road curves and where the sun is, what is in a corner) got the same facts with plain
+positions as with 3D ones in mlx-vlm, so the Macs running later layers need nothing new. Bigger models and
+tasks that point at places in an image (boxes, coordinates) may need the 3D positions; that would mean
+sending them along with the hidden state.
+
+Images are capped at a million pixels (`DOTS_IMAGE_MAX_PIXELS`): a 3200x2000 screenshot was 6229 tokens
+whole and took 16 s on 0.8B; at the cap it was 1029 tokens, 2 s, and the same answer. The encoder matched
+mlx-vlm's to the bit on the same pixels, and the pixels matched its preprocessing within 1e-7.
+
 ## Next
 
-1. **Images in.** Qwen3.5 is natively multimodal; we skip its vision encoder today. The head Mac would
-   run the encoder and feed image features in with the text; the rest of the split is unchanged.
+1. **Images in the app.** Ask takes an image (paste, drop or pick), shrinks it to the pool's cap before
+   sending, and shows it in the conversation.
 2. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
    so the pool sends the whole job to a Mac that has the model (MLX ports such as mflux). Personal
    photos stay private by default, the way Ask keeps personal documents in your own pools: an edit runs

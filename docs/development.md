@@ -119,8 +119,15 @@ The measurements behind each choice are in [`plans/decode-over-the-network.md`](
 | `DOTS_SMALL_BATCH_KERNEL` | worker | on | The Metal kernel for checking 2 to 5 tokens |
 | `DOTS_PREFILL_CHUNK` | worker | 1024 | Long prompts cross Macs in chunks of this many tokens, overlapping compute and network; 0 sends them whole |
 | `DOTS_CHAIN` | worker | `star` | `ring` passes the hidden state Mac to Mac instead of back through the head |
+| `DOTS_IMAGE_MAX_PIXELS` | worker | 1048576 | Images larger than this are scaled down before the model reads them |
 | `DOTS_PLACEMENT_RAM_MARGIN_GB` | hub | 1.0 | Memory the head Mac keeps free beyond its share |
 | `DOTS_HEAD_WORKSPACE_RAM_GB` | hub | 0.5 | Working memory counted for the head's output layer |
+
+Models that read images (Qwen3.5) take them as OpenAI-style message parts, `{"type": "image_url",
+"image_url": {"url": "data:image/png;base64,..."}}`. Only inline images are read; a worker never fetches a
+URL. The head Mac runs the vision encoder (`backends/mlx/vision.py`), loaded the first time an image comes,
+and the image's rows take the places of its placeholder tokens, so the rest of the pool sees a prompt like
+any other.
 
 `scripts/bench_decode.py` compares these on a simulated two-Mac pool, and `scripts/bench_wire.py` times
 round trips over the peer transport.
