@@ -423,7 +423,11 @@ async def catalog() -> dict:
     """Everything the UI renders: real hub data first, then (if enabled) the
     preview fixture so the full design is populated before the hub serves
     pools, endorsements, badges and per-key API access."""
-    nodes = (await pool_nodes())["nodes"]
+    try:
+        nodes = (await pool_nodes())["nodes"]
+    except Exception as e:  # noqa: BLE001 - hub unreachable: still serve the rest
+        log("catalog: hub nodes unavailable:", e)
+        nodes = []
     lenders = [
         {
             "name": n.get("alias") or (n.get("id") or "?")[:8],
@@ -479,6 +483,41 @@ async def catalog() -> dict:
         fixture["preview"] = True
         data = fixture
     return data
+
+
+
+def _frontier_call(prompt: str, context: dict | None) -> dict:
+    """One paid call to a frontier model, only when the user clicks Ask Claude."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    text = prompt
+    if context and context.get("text"):
+        text = f"{context.get('name', 'file')}:\n{context['text']}\n\n{prompt}"
+    body = json.dumps(
+        {
+            "model": _conf("frontier_model", "DOTS_FRONTIER_MODEL"),
+            "max_tokens": int(_conf_num("frontier_max_tokens", "DOTS_FRONTIER_MAX_TOKENS")),
+            "messages": [{"role": "user", "content": text}],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310
+        out = json.loads(r.read().decode("utf-8"))
+    usage = out.get("usage") or {}
+    return {
+        "text": "".join(b.get("text", "") for b in out.get("content", [])),
+        "label": _conf("frontier_label", "DOTS_FRONTIER_LABEL"),
+        "tokens": int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)),
+    }
 
 
 async def build_receipt(private: bool, model_id: str | None, tps: float | None) -> dict:
@@ -626,7 +665,14 @@ async def dispatch(req: dict) -> None:
                 "api_base": _conf("hub_http", "DOTS_HUB_HTTP").rstrip("/") + "/v1",
                 "pool_name": _conf("pool_name", "DOTS_POOL_NAME"),
                 "credits_per_cu": _conf_num("credits_per_cu", "DOTS_CREDITS_PER_CU"),
+                "frontier": {
+                    "label": _conf("frontier_label", "DOTS_FRONTIER_LABEL"),
+                    "enabled": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                },
             }
+        elif method == "frontier":
+            p = req.get("params") or {}
+            data = await asyncio.to_thread(_frontier_call, p.get("prompt", ""), p.get("context"))
         elif method == "catalog":
             data = await catalog()
         elif method == "api_key":

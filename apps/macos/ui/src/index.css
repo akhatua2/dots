@@ -399,3 +399,21 @@ textarea {
   background: var(--color-surface-2);
   font-weight: 600;
 }
+
+/* "+N" beside the credits when the balance rises: floats up and fades out. */
+@keyframes pop {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  15% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+.pop {
+  animation: pop 3.2s ease-out both;
+}

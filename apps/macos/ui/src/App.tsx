@@ -7,7 +7,6 @@ import { Explore } from './screens/Explore'
 import { PoolPage } from './screens/PoolPage'
 import { Profile } from './screens/Profile'
 import { Api } from './screens/Api'
-import { AskView } from './screens/AskView'
 import { MapPanel } from './MapPanel'
 
 const HAS_MAP = !!import.meta.env.VITE_MAPBOX_TOKEN
@@ -51,7 +50,6 @@ export function App() {
             {r.name === 'pool' && <PoolPage s={s} id={r.id} />}
             {r.name === 'profile' && <Profile s={s} />}
             {r.name === 'api' && <Api s={s} />}
-            {r.name === 'ask' && <AskView s={s} />}
           </div>
           {HAS_MAP && mapMounted && (
             <aside

@@ -33,3 +33,9 @@ models = ["Qwen3 235B", "Llama 3.3 70B", "DeepSeek V3.1", "Kimi K2"]
 # the whole UI is populated before the hub has those features. Real hub data is
 # always merged in first.   override: DOTS_PREVIEW_DATA
 preview_data = true
+
+# Frontier model offered as a second opinion (paid; only called when the user
+# clicks Ask Claude, and only if ANTHROPIC_API_KEY is set in .env).
+frontier_model = "claude-opus-5-5"          # override: DOTS_FRONTIER_MODEL
+frontier_label = "Claude Opus 5.5"          # override: DOTS_FRONTIER_LABEL
+frontier_max_tokens = 1024                  # override: DOTS_FRONTIER_MAX_TOKENS

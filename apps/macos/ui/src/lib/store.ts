@@ -1,6 +1,7 @@
 // All bridge state + side effects live here, outside React. Components read it
 // with useSyncExternalStore and call methods on it — no effects in the UI.
 import {
+  askFrontier,
   getAccount,
   getCatalog,
   getConfig,
@@ -35,12 +36,12 @@ export interface Msg {
   tps?: number | null
   receipt?: Receipt | null
   attachment?: string | null
+  frontier?: { label: string; tokens: number } | null
 }
 
 export type Phase = 'connecting' | 'ready' | 'error'
 export type Route =
   | { name: 'explore' }
-  | { name: 'ask' }
   | { name: 'api' }
   | { name: 'profile' }
   | { name: 'pool'; id: string }
@@ -91,6 +92,7 @@ export interface BridgeState {
   busy: boolean
   attachment: ChatContext | null
   focusTick: number
+  creditPulse: { amount: number; at: number } | null
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -126,6 +128,7 @@ class BridgeStore {
     busy: false,
     attachment: null,
     focusTick: 0,
+    creditPulse: null,
   }
   private listeners = new Set<() => void>()
   private started = false
@@ -239,7 +242,16 @@ class BridgeStore {
 
   async refresh() {
     const usage = await getUsage().catch(() => null)
-    if (usage) this.set({ usage })
+    if (usage) {
+      // A rise in the balance flashes "+N" beside it in the menu bar dropdown.
+      const per = usage.credits_per_cu ?? this.state.config?.credits_per_cu ?? 0
+      const before = this.state.usage?.balance_cu
+      const rise =
+        typeof before === 'number' && typeof usage.balance_cu === 'number'
+          ? Math.round((usage.balance_cu - before) * per)
+          : 0
+      this.set({ usage, creditPulse: rise > 0 ? { amount: rise, at: Date.now() } : this.state.creditPulse })
+    }
     const lend = await getLend().catch(() => null)
     if (lend) this.set({ lend })
   }
@@ -426,6 +438,26 @@ class BridgeStore {
       ],
     })
     this.fire()
+  }
+
+  /** Second opinion from a frontier model: paid, runs outside the pools. */
+  async askClaude() {
+    const msgs = this.state.msgs
+    const q = [...msgs].reverse().find((m) => m.role === 'user')
+    if (!q || this.state.busy) return
+    this.set({
+      busy: true,
+      msgs: [...msgs, { role: 'assistant', text: 'Choosing where to run it', pending: true }],
+    })
+    try {
+      const r = await askFrontier(q.text, this.state.attachment)
+      this.setLastAssistant(
+        { text: r.text, pending: false, frontier: { label: r.label, tokens: r.tokens } },
+        { busy: false },
+      )
+    } catch (e) {
+      this.setLastAssistant({ text: `Error: ${String(e)}`, pending: false }, { busy: false })
+    }
   }
 
   // The Ask panel starts fresh each time it opens.

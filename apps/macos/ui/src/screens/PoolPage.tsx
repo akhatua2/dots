@@ -19,13 +19,13 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
   const progress = next ? Math.max(0.04, Math.min(1, p.capacity_gb / next.at_gb)) : 1
 
   return (
-    <div className="px-10 pb-10 pt-8">
+    <div className="px-[34px] pb-9 pt-[38px]">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-5">
-          <Swirl seed={p.id} size={52} cells={26} />
+        <div className="flex items-center gap-4">
+          <Swirl seed={p.id} size={64} cells={32} />
           <div>
-            <h1 className="text-[32px] font-bold leading-tight tracking-[-0.025em]">{p.name}</h1>
-            <p className="text-[15px] text-dim">
+            <h1 className="text-[26px] font-bold leading-[1.15] tracking-[-0.025em]">{p.name}</h1>
+            <p className="text-[13.5px] text-dim">
               {p.public ? 'Public pool' : 'Private pool'} · {p.model} · {p.macs} Macs · {p.capacity_gb} GB
             </p>
           </div>
@@ -33,51 +33,51 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
         {p.public && (
           <button
             onClick={() => store.toggleEndorse(id)}
-            className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-[14.5px] font-medium ${
+            className={`flex items-center gap-2 rounded-[10px] px-3.5 py-2 text-[14px] font-semibold ${
               endorsed ? 'bg-btn text-ink' : 'bg-signal text-[#1a0a03]'
             }`}
           >
-            <Icon name="shield" size={17} /> {endorsed ? 'Endorsed' : 'Endorse'}
+            <Icon name="shield" size={16} /> {endorsed ? 'Endorsed' : 'Endorse'}
           </button>
         )}
       </div>
 
       {unlocked && (
-        <div className="card mt-6 flex items-center justify-between px-5 py-4 text-[15.5px]">
+        <div className="card mt-5 flex items-center justify-between px-[18px] py-[17px] text-[15.5px]">
           <p className="flex items-center gap-3 font-medium">
             <span className="size-2 rounded-full bg-signal" />
             Your {device} unlocked {unlocked.name} here tonight.
           </p>
-          <p className="text-[14px] text-dim">
+          <p className="text-[13.5px] text-dim">
             It took the pool from {raw.capacity_gb} to {p.capacity_gb} GB
           </p>
         </div>
       )}
 
-      <p className="label mt-8">Macs lending now · {p.lenders.length}</p>
-      <div className="mt-3 flex flex-wrap gap-2.5">
+      <p className="label mt-[26px] !text-[12px]">Macs lending now · {p.lenders.length}</p>
+      <div className="mt-3 flex flex-wrap gap-2">
         {p.lenders.map((l, i) => (
-          <Avatar key={i} letter={l} size={l === 'You' ? 52 : 52} className="!text-[16px]" />
+          <Avatar key={i} letter={l} size={34} className="!text-[13px]" />
         ))}
       </div>
 
-      <p className="label mt-8">What it can run</p>
-      <div className="mt-3 space-y-3">
+      <p className="label mt-[26px] !text-[12px]">What it can run</p>
+      <div className="mt-3 space-y-2.5">
         {models.map((m) => (
-          <div key={m.name} className="card flex items-center gap-5 px-5 py-4">
+          <div key={m.name} className="card flex items-center gap-4 px-[18px] py-[14px]">
             <span className="grid w-5 place-items-center text-ink">
               <Icon name={m.unlocked ? 'check' : 'lock'} size={17} className={m.unlocked ? '' : 'text-dim'} />
             </span>
-            <span className={`w-[170px] text-[16px] font-semibold ${m.unlocked ? '' : 'text-[#cfcfcf]'}`}>
+            <span className={`w-[150px] text-[15px] font-semibold ${m.unlocked ? '' : 'text-[#cfcfcf]'}`}>
               {m.name}
             </span>
             {m.unlocked ? (
-              <span className="text-[15px] text-[#cfcfcf]">
+              <span className="text-[14.5px] text-[#cfcfcf]">
                 {m.unlock_on_join && joined ? 'Unlocked tonight' : 'Unlocked'} at {m.at_gb} GB
               </span>
             ) : (
               <>
-                <span className="text-[15px] text-[#cfcfcf]">{toGo} GB to go</span>
+                <span className="text-[14.5px] text-[#cfcfcf]">{toGo} GB to go</span>
                 <span className="ml-auto h-1.5 w-[28%] overflow-hidden rounded-full bg-surface-2">
                   <span className="block h-full rounded-full bg-[#8c8c8c]" style={{ width: `${progress * 100}%` }} />
                 </span>
@@ -89,12 +89,12 @@ export function PoolPage({ s, id }: { s: BridgeState; id: string }) {
 
       {p.public && (
         <>
-          <p className="mt-8 flex items-center gap-2 text-[15px]">
+          <p className="mt-[22px] flex items-center gap-2 text-[14.5px]">
             <Icon name="shield" size={17} className="text-dim" />
             {p.endorsements + (endorsed ? 1 : 0)} endorsements
           </p>
           {endorsed && joined && (
-            <p className="mt-3 inline-flex items-center gap-2.5 rounded-full border border-line-2 px-4 py-2.5 text-[14.5px] font-medium">
+            <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-line-2 px-3.5 py-2 text-[14px] font-medium">
               <Icon name="shield" size={16} /> You&apos;re an early backer. It&apos;s on your profile.
             </p>
           )}

@@ -21,7 +21,7 @@ export function AskPanel() {
       <AskInput key={s.focusTick} />
       {asked && answer?.role === 'assistant' && (
         <div className="max-h-[520px] overflow-y-auto border-t border-line px-5 py-4">
-          <Answer m={answer} />
+          <Answer m={answer} s={s} />
         </div>
       )}
     </div>

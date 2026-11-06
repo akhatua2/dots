@@ -163,7 +163,7 @@ const ICON_LIT: [&[u8]; 4] = [
 
 const TRAY_W: f64 = 316.0;
 const TRAY_H: f64 = 360.0;
-const ASK_W: f64 = 680.0;
+const ASK_W: f64 = 620.0;
 const ASK_H: f64 = 64.0;
 
 fn now_ms() -> u64 {
@@ -201,6 +201,11 @@ fn read_text_file(path: String) -> Result<String, String> {
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let text = String::from_utf8(bytes).map_err(|_| "not a text file".to_string())?;
     Ok(text.chars().take(MAX).collect())
+}
+
+#[tauri::command]
+fn open_ask(app: AppHandle) {
+    toggle_ask(&app);
 }
 
 #[tauri::command]
@@ -373,7 +378,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![call, chat, read_text_file, open_main])
+        .invoke_handler(tauri::generate_handler![call, chat, read_text_file, open_main, open_ask])
         .build(tauri::generate_context!())
         .expect("error while building the dots app");
 

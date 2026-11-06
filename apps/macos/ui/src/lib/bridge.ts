@@ -31,6 +31,7 @@ export interface AppConfig {
   api_base: string
   pool_name: string
   credits_per_cu: number
+  frontier: { label: string; enabled: boolean }
 }
 
 export interface LendState {
@@ -125,3 +126,6 @@ export const onFileDrop = (handler: (paths: string[]) => void): Promise<Unlisten
 
 export const readTextFile = (path: string) => invoke<string>('read_text_file', { path })
 export const openMain = () => invoke('open_main')
+export const openAsk = () => invoke('open_ask')
+export const askFrontier = (prompt: string, context?: ChatContext | null) =>
+  call<{ text: string; label: string; tokens: number }>('frontier', { prompt, context })

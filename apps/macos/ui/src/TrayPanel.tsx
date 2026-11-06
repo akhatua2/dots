@@ -75,8 +75,15 @@ export function TrayPanel() {
       <section className="flex items-start gap-3 px-4 py-3.5">
         <Icon name="credits" size={17} className="mt-1" />
         <div>
-          <p key={credits.balance === null ? 'n' : Math.round(credits.balance)} className="fade text-[15px] font-bold leading-tight">
-            {credits.balance === null ? '—' : fmt(credits.balance)}
+          <p className="relative text-[15px] font-bold leading-tight">
+            <span key={credits.balance === null ? 'n' : Math.round(credits.balance)} className="fade">
+              {credits.balance === null ? '—' : fmt(credits.balance)}
+            </span>
+            {s.creditPulse && Date.now() - s.creditPulse.at < 4000 && (
+              <span key={s.creditPulse.at} className="pop absolute -top-1 left-14 text-[12px] font-semibold text-dim">
+                +{s.creditPulse.amount}
+              </span>
+            )}
           </p>
           <p className="text-[11.5px] text-dim">
             credits

@@ -31,35 +31,35 @@ export function Api({ s }: { s: BridgeState }) {
   }
 
   return (
-    <div className="px-10 pb-10 pt-8">
+    <div className="px-[34px] pb-9 pt-[38px]">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-[32px] font-bold leading-tight tracking-[-0.025em]">API</h1>
-          <p className="mt-1.5 text-[15px] text-dim">
+          <h1 className="text-[25px] font-bold leading-[1.15] tracking-[-0.025em]">API</h1>
+          <p className="mt-1 text-[13.5px] text-dim">
             One endpoint for every model you can reach. Works with anything that speaks the OpenAI API.
           </p>
         </div>
         {c.key_scopes.length > 0 && (
         <button
           onClick={() => setCreating(true)}
-          className="flex items-center gap-2 rounded-xl bg-signal px-4 py-2.5 text-[14.5px] font-semibold text-[#1a0a03]"
+          className="flex items-center gap-2 rounded-[10px] bg-signal px-3.5 py-2 text-[14px] font-semibold text-[#1a0a03]"
         >
-          <Icon name="plus" size={17} strokeWidth={2.4} /> Create key
+          <Icon name="plus" size={16} strokeWidth={2.4} /> Create key
         </button>
         )}
       </div>
 
-      <div className="card mt-6 flex items-center justify-between px-5 py-4">
+      <div className="card mt-5 flex items-center justify-between px-[18px] py-[14px]">
         <div className="min-w-0">
           <p className="label !text-[10.5px]">Base URL</p>
-          <p className="mt-1 truncate font-mono text-[16px]">{base || '—'}</p>
+          <p className="mt-1 truncate font-mono text-[15.5px]">{base || '—'}</p>
         </div>
         <button onClick={() => copy('base', base)} className="rounded-lg bg-btn px-4 py-2 text-[14px] font-medium">
           {copied === 'base' ? 'Copied' : 'Copy'}
         </button>
       </div>
 
-      <div className="mt-8 flex items-baseline justify-between">
+      <div className="mt-[22px] flex items-baseline justify-between">
         <p className="label">Keys</p>
         <p className="text-[13.5px] text-dim">
           Use model <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[12.5px] text-ink">&quot;auto&quot;</span>{' '}
@@ -68,7 +68,7 @@ export function Api({ s }: { s: BridgeState }) {
       </div>
       <div className="card mt-3 divide-y divide-line">
         {s.local.keys.map((k) => (
-          <div key={k.id} className="grid grid-cols-[1.4fr_1fr_1fr_auto] items-center gap-4 px-5 py-3.5">
+          <div key={k.id} className="grid grid-cols-[1.4fr_1fr_1fr_auto] items-center gap-4 px-[18px] py-[11px]">
             <div className="min-w-0">
               <p className="flex items-center gap-2.5 text-[16px] font-semibold">
                 {k.name}
@@ -93,7 +93,7 @@ export function Api({ s }: { s: BridgeState }) {
         {s.local.keys.length === 0 && <p className="px-5 py-6 text-center text-dim">No keys yet.</p>}
       </div>
 
-      {c.request_split.length > 0 && <p className="label mt-8">Where your requests ran this month</p>}
+      {c.request_split.length > 0 && <p className="label mt-[22px] !text-[12px]">Where your requests ran this month</p>}
       <div className="mt-3 flex h-2.5 gap-0.5 overflow-hidden rounded-full">
         {c.request_split.map((r) => (
           <span key={r.label} style={{ width: `${r.pct}%`, background: r.shade }} />
@@ -111,7 +111,7 @@ export function Api({ s }: { s: BridgeState }) {
         ))}
       </div>
 
-      <div className="card mt-8 overflow-hidden">
+      <div className="card mt-[22px] overflow-hidden">
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
           <div className="flex gap-6 text-[14.5px]">
             {(['curl', 'Python', 'JavaScript'] as Lang[]).map((l) => (
@@ -131,7 +131,7 @@ export function Api({ s }: { s: BridgeState }) {
             {copied === 'code' ? 'Copied' : 'Copy'}
           </button>
         </div>
-        <pre className="select-text overflow-x-auto px-5 py-4 font-mono text-[13.5px] leading-7 text-[#cfcfcf]">
+        <pre className="select-text overflow-x-auto px-[18px] py-[14px] font-mono text-[13.5px] leading-[26px] text-[#cfcfcf]">
           {snippet(lang, base)}
         </pre>
       </div>
