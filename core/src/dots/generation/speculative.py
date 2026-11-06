@@ -91,12 +91,9 @@ class SpeculativeGeneration(GenerationStrategy):
             elif draft is None:  # nothing to look up and no draft: this round is one token, as without guessing
                 proposal = []
             else:
-                # The draft proposes k tokens after `token`, feeding `token` and its own proposals as it goes.
-                proposal = []
-                fed = token
-                for _ in range(k):
-                    proposal.append(sample(draft, await draft.decode_one(conv, fed), out + [token] + proposal))
-                    fed = proposal[-1]
+                # The draft guesses k tokens after `token`, feeding `token` and its own guesses as it goes.
+                # Its guesses are greedy whatever the temperature: the big model decides what is kept.
+                proposal = await draft.propose(conv, token, k)
             n_guess = len(proposal)
             proposed += n_guess
             if request.on_draft is not None and proposal:

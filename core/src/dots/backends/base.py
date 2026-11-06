@@ -151,6 +151,19 @@ class BackendRuntime(ABC):
         """Drops the last `n` tokens from the conversation's cache, as if they had never been fed."""
         raise NotImplementedError(f"{type(self).__name__} can't roll its cache back")
 
+    async def propose(self, conv_id: str, token: int, k: int) -> list[int]:
+        """As a draft model: its k most likely next tokens after `token`, each fed back in, greedily.
+
+        The cache ends holding `token` and all but the last guess. A backend can do this faster than
+        k separate steps, for instance without stopping to read each guess back.
+        """
+        guesses: list[int] = []
+        fed = token
+        for _ in range(k):
+            guesses.append(self.sample_token(await self.decode_one(conv_id, fed), 0.0))
+            fed = guesses[-1]
+        return guesses
+
     @abstractmethod
     def forward_segment(
         self, conv_id: str, hidden: Any, start: int, end: int

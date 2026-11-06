@@ -55,6 +55,14 @@ class FakeModel:
         self.caches[conv].append(token)
         return self._row(self.caches[conv])
 
+    async def propose(self, conv, token, k):
+        guesses, fed = [], token
+        for _ in range(k):
+            row = await self.decode_one(conv, fed)
+            guesses.append(row.index(max(row)))
+            fed = guesses[-1]
+        return guesses
+
     async def decode_many(self, conv, tokens, *, forward_hidden=None):
         self.passes += 1
         rows = []

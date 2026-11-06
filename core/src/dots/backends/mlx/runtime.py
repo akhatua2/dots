@@ -469,6 +469,25 @@ class MlxBackendRuntime(BackendRuntime):
     def supports_speculation(self) -> bool:
         return True
 
+    async def propose(self, conv_id: str, token: int, k: int) -> list[int]:
+        """k greedy guesses as one lazy graph: each guess feeds the next on the GPU, and they are read
+        back together, instead of stopping after each to bring it into Python."""
+        import mlx.core as mx
+
+        host = self._require_host()
+        fed = array([[token]])
+        guesses = []
+        for _ in range(k):
+            hidden = host.model.model.embed_tokens(fed)
+            hidden = await self._forward_hidden(conv_id, hidden, None)
+            logits = host._project_logits(host.model.model.norm(hidden)[:, -1:, :])
+            fed = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+            guesses.append(fed)
+        host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + k
+        picked = mx.concatenate(guesses, axis=1)
+        mx.eval(picked)
+        return [int(t) for t in picked[0].tolist()]
+
     async def decode_many(
         self,
         conv_id: str,

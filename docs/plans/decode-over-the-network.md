@@ -141,6 +141,19 @@ asyncio handoffs). Hidden states already go as raw bytes.
   The kernel also takes a tied output layer (Qwen2.5's 152K-word projection, through
   `QuantizedEmbedding.as_linear`): 3.76 ms against 2.35 ms for five tokens.
 
+- **The draft guesses in one go.** Each guess used to be sampled and read back into Python before the
+  next could start: k stops a round. `propose` chains the k greedy guesses on the GPU and reads them back
+  together (greedy is safe: the big model decides what is kept). Draft model with adaptive length:
+
+  | Prompts | Round trip | Before | After |
+  |---|---|---|---|
+  | general | 0 ms | 0.76× | 1.00× |
+  | general | 25 ms | 1.27× | 1.39× |
+  | edit | 0 ms | 1.11× | 1.21× |
+  | edit | 25 ms | 1.97× | 2.24× |
+
+  With lookup as well, edits at 25 ms come 2.61× faster.
+
 - **The app shows it.** Ask's Draft ahead toggle sends `X-Dots-Speculate`; the hub keeps each model's
   plain speed per chain length and reports a drafted answer's speedup against it, slower included.
 
