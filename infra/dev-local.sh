@@ -4,11 +4,14 @@
 # It uses its own home directory (~/.dots-local), so it has its own identity and ledger and never
 # touches your real ~/.dots. It starts with no join token, so the HTTP API is open on localhost.
 #
-#   infra/dev-local.sh start    start the hub, a worker and the cloud (the small model loads on the first request)
-#   infra/dev-local.sh stop     stop all three
+#   infra/dev-local.sh start    start the hub and the cloud
+#   infra/dev-local.sh app      open the Mac app so its lending switch runs a real worker against them
+#   infra/dev-local.sh worker   or start a worker by hand, without the app
+#   infra/dev-local.sh stop     stop everything
 #   infra/dev-local.sh status   show what is running
 #
-# In the Mac app's Settings, turn off "Use the mock cloud" and connect to http://127.0.0.1:8800.
+# In the Mac app's Settings, turn off "Use the mock cloud" and connect to http://127.0.0.1:8800. Then lending
+# in the app starts this Mac's worker; the small model loads on the first answer.
 # The hub's own OpenAI API is http://127.0.0.1:8080/v1, serving mlx-community/Qwen2.5-0.5B-Instruct-4bit.
 set -euo pipefail
 
@@ -31,10 +34,6 @@ start() {
     run nohup "$PY" -m dots.cli hub --http-port "$HTTP_PORT" >"$LOGS/hub.log" 2>&1 &
     for _ in $(seq 1 30); do [ -s "$HOME_DIR/hub_ticket.txt" ] && break; sleep 1; done
   fi
-  if pgrep -f "dots.cli worker" >/dev/null; then echo "worker already running"; else
-    run nohup "$PY" -m dots.cli worker "$(tr -d ' \n' <"$HOME_DIR/hub_ticket.txt")" --max-ram "$MAX_RAM_GB" \
-      >"$LOGS/worker.log" 2>&1 &
-  fi
   if pgrep -f "dots.cli cloud" >/dev/null; then echo "cloud already running"; else
     run nohup "$PY" -m dots.cli cloud --port "$CLOUD_PORT" --hub-url "http://127.0.0.1:$HTTP_PORT" \
       >"$LOGS/cloud.log" 2>&1 &
@@ -42,6 +41,23 @@ start() {
   echo "hub:    http://127.0.0.1:$HTTP_PORT/v1   (logs in $LOGS)"
   echo "cloud:  http://127.0.0.1:$CLOUD_PORT"
   echo "model:  mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+}
+
+worker() {
+  if pgrep -f "dots.cli worker" >/dev/null; then echo "worker already running"; return; fi
+  run nohup "$PY" -m dots.cli worker "$(tr -d ' \n' <"$HOME_DIR/hub_ticket.txt")" --max-ram "$MAX_RAM_GB" \
+    >"$LOGS/worker.log" 2>&1 &
+  echo "worker started (logs in $LOGS/worker.log)"
+}
+
+# Opens the Mac app with what it needs to run a real worker: this home, and the engine's worker command.
+app() {
+  local bundle="$ROOT/apps/macos/build/Build/Products/Debug/dots.app"
+  [ -d "$bundle" ] || { echo "Build the app first (see docs/development.md)" >&2; exit 1; }
+  # Quit a running copy first and wait for it, or `open` hands the request to the old one.
+  pkill -x dots || true
+  while pgrep -x dots >/dev/null; do sleep 0.2; done
+  open --env "DOTS_HOME=$HOME_DIR" --env "DOTS_WORKER=$PY -m dots.cli worker" "$bundle"
 }
 
 stop() {
@@ -59,7 +75,9 @@ status() {
 
 case "${1:-}" in
   start) start ;;
+  app) app ;;
+  worker) worker ;;
   stop) stop ;;
   status) status ;;
-  *) echo "usage: $0 start|stop|status" >&2; exit 2 ;;
+  *) echo "usage: $0 start|app|worker|stop|status" >&2; exit 2 ;;
 esac

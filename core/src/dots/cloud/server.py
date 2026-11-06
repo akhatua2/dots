@@ -151,7 +151,6 @@ class Cloud:
         others = [m for m in self.sync.pool_macs(pool_id, hub) if m["macID"] != self.sync.this_mac]
         self.store.add_member(pool_id, self.me)
         self.store.lend_to(pool_id)
-        self.store.add_activity(pool_id, "joined", person_id=self.me, gb=lend_gb or None)
         unlock = self._unlock(pool_id, before, before + lend_gb, hub)
         return await self.whole(macNumber=len(others) + 1, poolID=pool_id, unlock=unlock)
 
@@ -254,8 +253,13 @@ class Cloud:
         return await self.whole(unlock=unlock)
 
     def _unlock(self, pool_id: str, before_gb: int, after_gb: int, hub: HubView) -> dict | None:
-        """When this Mac takes a pool over a line on the ladder, record it, credit the Mac, and give the badge."""
-        crossed = [t for t in self.sync.tiers(hub)["tiers"] if before_gb < t["minGB"] <= after_gb]
+        """When this Mac takes a pool over a line for a model it can really run, record it and give the badge.
+
+        Only models the pool's hub serves count: crossing a rung for a model nothing will load is not an unlock.
+        """
+        servable = {hub.model} if pool_id == HUB_POOL else set()
+        crossed = [t for t in self.sync.tiers(hub)["tiers"]
+                   if t["id"] in servable and before_gb < t["minGB"] <= after_gb]
         if not crossed:
             return None
         tier = crossed[-1]

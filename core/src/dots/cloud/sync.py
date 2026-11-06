@@ -109,7 +109,9 @@ class SyncBuilder:
         }
         if mine is not None:
             pool["endorsedAtMacs"] = mine["macs_at"]
-        if row["serves_model_id"]:
+        if pool_id == HUB_POOL and hub.model:
+            pool["servesModelID"] = hub.model  # what actually answers here
+        elif row["serves_model_id"]:
             pool["servesModelID"] = row["serves_model_id"]
         invite = s.one("select code, expires from invites where pool_id = ? order by expires desc", pool_id)
         if invite and not is_expired(invite["expires"]):
@@ -212,7 +214,7 @@ class SyncBuilder:
             "invites": [],
             "mock": False,
             "ladder": self.tiers(hub),
-            "hub": {"online": hub.online, "model": hub.model},
+            "hub": {"online": hub.online, "model": hub.model, "ticket": self.config.hub_ticket or None},
         }
         worker = self.worker(hub)
         if worker:

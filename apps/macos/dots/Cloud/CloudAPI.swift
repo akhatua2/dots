@@ -91,6 +91,14 @@ struct CloudSync: Codable {
     var mock: Bool
     /// The models pools can run, by the memory they need. Older clouds don't send it.
     var ladder: LadderData?
+    /// The hub behind the cloud: whether it answers, its model, and the ticket a worker dials to lend.
+    var hub: HubInfo?
+}
+
+struct HubInfo: Codable, Equatable {
+    var online: Bool
+    var model: String?
+    var ticket: String?
 }
 
 /// The cloud's model ladder: the models in order of the memory a pool needs, and the special ones.

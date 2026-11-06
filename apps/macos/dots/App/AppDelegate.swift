@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppModel.shared.workerProcess.stop()
         AppModel.shared.backend.saveNow()
     }
 }

@@ -84,6 +84,8 @@ final class AppModel {
 
     let backend: CloudBackend
     let signals = SignalMonitor()
+    /// This Mac's real worker, run while it lends to a real cloud.
+    @ObservationIgnored let workerProcess = WorkerProcess()
     let ask = AskController()
     /// The mock cloud, when it runs on this Mac
     private(set) var mock: MockCloud?
@@ -216,7 +218,12 @@ final class AppModel {
     /// Moves this Mac in or out of its pool, and shows the unlock if that tipped the pool over a line.
     @discardableResult
     func refreshLending() -> UnlockEvent? {
-        let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
+        let active = lendingStatus.isActive
+        // With a real cloud, lending runs the real worker; the mock simulates the work instead.
+        if !backend.isMock {
+            workerProcess.reconcile(lend: active, gb: state.lending.limitGB, ticket: backend.hub?.ticket)
+        }
+        let unlock = backend.applyLendingStatus(active: active)
         if let unlock, let pid = state.lendingPoolID { show(unlock, in: pid) }
         return unlock
     }

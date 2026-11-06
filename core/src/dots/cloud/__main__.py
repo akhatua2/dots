@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from aiohttp import web
 
 from ..system.util import dots_home, load_account_alias, load_account_name, load_or_create_account
@@ -21,6 +23,9 @@ def build(config: CloudConfig) -> web.Application:
 
 def main(config: CloudConfig | None = None) -> None:
     config = config or CloudConfig.from_env()
+    ticket_file = dots_home() / "hub_ticket.txt"
+    if not config.hub_ticket and ticket_file.is_file():
+        config = replace(config, hub_ticket="".join(ticket_file.read_text().split()))
     print(f"dots cloud on http://{config.host}:{config.port}, reading the hub at {config.hub_url}")
     web.run_app(build(config), host=config.host, port=config.port, print=None)
 

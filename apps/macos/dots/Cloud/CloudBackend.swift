@@ -20,6 +20,8 @@ final class CloudBackend: DotsBackend {
     var client: CloudClient
     private(set) var note: WeeklyNote?
     private(set) var worker: WorkerStatus?
+    /// The hub behind a real cloud, with the ticket this Mac's worker dials. Nil from the mock.
+    private(set) var hub: HubInfo?
     private(set) var invites: [InviteDetails] = []
     private(set) var isMock = true
     private(set) var isConnected = false
@@ -66,6 +68,7 @@ final class CloudBackend: DotsBackend {
         mirror.adopt(sync.state)
         Pricing.terms = sync.terms
         if let ladder = sync.ladder { Ladder.adopt(ladder) }
+        hub = sync.hub
         note = sync.note
         worker = sync.worker
         invites = sync.invites

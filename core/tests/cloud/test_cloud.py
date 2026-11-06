@@ -64,7 +64,7 @@ def fake_hub(*, nodes: list[dict] | None = None) -> web.Application:
 async def env(tmp_path):
     hub_server = TestServer(fake_hub())
     await hub_server.start_server()
-    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_name="Home lab", pool_model=MODEL)
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_name="Home lab", pool_model=MODEL, hub_ticket="node-ticket")
     cloud = Cloud(Store(tmp_path / "cloud.db"), HubClient(config.hub_url), config, me=ME, my_name="Arpan")
     client = TestClient(TestServer(cloud.app()))
     await client.start_server()
@@ -120,6 +120,7 @@ async def test_credits_and_the_worker_come_from_the_hub(env):
     assert s["creditLog"][0]["kind"] == "lend" and s["creditLog"][0]["amount"] == 6
     assert sync["worker"]["firstLayer"] == 0 and sync["worker"]["lastLayer"] == 23
     assert sync["ladder"]["tiers"][0]["id"] == MODEL, "the model the hub serves is on the ladder"
+    assert sync["hub"] == {"online": True, "model": MODEL, "ticket": "node-ticket"}, "a Mac's worker needs the ticket"
 
 
 async def test_start_join_and_leave_a_pool(env):
@@ -160,12 +161,10 @@ async def test_heartbeats_record_lending_and_an_unlock(env):
     body = await (await client.post("/hub/v1/heartbeat",
                                      json={"active": True, "lendGB": 10, "seconds": 120, "macKind": "MacBook Air", "memoryGB": 24})).json()
     s = body["sync"]["state"]
-    assert body["unlock"]["modelID"] == "llama-3.1-8b", "10 GB takes an empty pool past the 6 GB line"
+    assert body["unlock"] is None, "a pool with no model to serve unlocks nothing, whatever its memory"
     assert s["nights"][0]["minutes"] == 2 and s["hoursLent"] > 0
     assert any(d["kind"] == "MacBook Air" and d["memoryGB"] == 24 for d in s["devices"])
-    again = await (await client.post("/hub/v1/heartbeat",
-                                      json={"active": True, "lendGB": 10, "seconds": 60, "macKind": "MacBook Air", "memoryGB": 24})).json()
-    assert again["unlock"] is None, "an unlock happens once"
+
 
 
 async def test_a_pool_answer_comes_from_the_hub_with_its_macs(env):
@@ -216,3 +215,20 @@ def test_short_model_names(model_id, name):
     from dots.cloud.catalog import short_name
 
     assert short_name(model_id) == name
+
+
+async def test_the_hub_pool_unlocks_only_the_model_it_serves(tmp_path):
+    hub_server = TestServer(fake_hub(nodes=[]))
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        await client.post("/v1/pools/hub/join")
+        beat = {"active": True, "lendGB": 8, "seconds": 5, "macKind": "Mac", "memoryGB": 16}
+        first = await (await client.post("/hub/v1/heartbeat", json=beat)).json()
+        assert first["unlock"]["modelID"] == MODEL, "8 GB is enough for the served model; Llama's rung is not an unlock"
+        hub_pool = next(p for p in first["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert hub_pool["servesModelID"] == MODEL
+        again = await (await client.post("/hub/v1/heartbeat", json=beat)).json()
+        assert again["unlock"] is None, "an unlock happens once"
+    await hub_server.close()

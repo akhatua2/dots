@@ -22,6 +22,8 @@ class CloudConfig:
     # The model the pool asks the hub for. The hub serves whatever it is asked for, loading it on the
     # first request, so the cloud names one.
     pool_model: str = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+    # The hub's iroh join ticket, which a Mac's worker dials to lend. Read from the hub's home when unset.
+    hub_ticket: str = ""
     # Credits per compute unit (1 CU = 1 TFLOP) the hub measured. A credit is worth terms.credit_usd.
     credits_per_cu: float = 1000.0
 
@@ -36,5 +38,6 @@ class CloudConfig:
             token=env.get("DOTS_CLOUD_TOKEN", cls.token),
             pool_name=env.get("DOTS_POOL_NAME", cls.pool_name),
             pool_model=env.get("DOTS_POOL_MODEL", cls.pool_model),
+            hub_ticket=env.get("DOTS_HUB_TICKET", cls.hub_ticket),
             credits_per_cu=float(env.get("DOTS_CREDITS_PER_CU", cls.credits_per_cu)),
         )
