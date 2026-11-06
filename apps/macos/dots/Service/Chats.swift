@@ -38,7 +38,12 @@ final class ChatStore {
     init(persists: Bool) {
         url = persists ? Simulation.supportURL("chats.json") : nil
         if let url, let data = try? Data(contentsOf: url), let saved = try? JSONDecoder.dots.decode([Chat].self, from: data) {
-            chats = saved
+            // An answer that never came (an older dots saved those) isn't worth showing
+            chats = saved.map { chat in
+                var chat = chat
+                chat.turns.removeAll { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                return chat
+            }.filter { !$0.turns.isEmpty }
         }
     }
 
@@ -46,6 +51,7 @@ final class ChatStore {
 
     /// Adds a finished turn to the current chat, or starts a chat with it, and moves that chat to the top.
     func record(_ turn: ChatTurn) {
+        guard !turn.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         var chat = current ?? Chat(turns: [], updated: turn.date)
         chat.turns.append(turn)
         chat.updated = turn.date
