@@ -67,8 +67,7 @@ private struct Conversation: View {
                     // The turn being shown live below is drawn there, with its second opinion.
                     if !(live && turn.id == ask.recordedTurnID) {
                         QuestionBubble(text: turn.question, attachment: turn.attachment)
-                        Text(turn.answer).font(D.ui(15)).foregroundStyle(D.t2).lineSpacing(3.5).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        MarkdownText(text: turn.answer)
                     }
                 }
                 if live {

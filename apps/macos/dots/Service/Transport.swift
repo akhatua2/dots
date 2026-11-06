@@ -25,6 +25,8 @@ enum AnswerEvent {
 enum TransportError: LocalizedError {
     case badEndpoint
     case http(Int, String)
+    /// The endpoint started answering, then said it couldn't (a pool whose Macs aren't ready, say)
+    case failed(String)
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +34,7 @@ enum TransportError: LocalizedError {
         case .http where needsWorkspace:
             "This key works in more than one Anthropic workspace, so dots has to say which one to use. Pick it in Settings, under the key."
         case let .http(code, body): "The endpoint answered \(code). \(Self.message(in: body) ?? String(body.prefix(240)))"
+        case let .failed(message): message.prefix(1).uppercased() + message.dropFirst()
         }
     }
 
@@ -84,6 +87,7 @@ enum OpenAIClient {
             var delta: Delta?
         }
         struct Usage: Decodable { var prompt_tokens: Int?; var completion_tokens: Int? }
+        struct Failure: Decodable { var message: String }
         /// What the dots hub and gateway add: the Macs answering, a Mac falling asleep, credits charged
         struct Dots: Decodable {
             struct Mac: Decodable { var id: String; var name: String; var initial: String }
@@ -98,6 +102,7 @@ enum OpenAIClient {
         var choices: [Choice]?
         var usage: Usage?
         var dots: Dots?
+        var error: Failure?
     }
 
     static func stream(_ endpoint: EndpointConfig, messages: [ChatMessage]) -> AsyncThrowingStream<AnswerEvent, Error> {
@@ -132,6 +137,7 @@ enum OpenAIClient {
                         if payload == "[DONE]" { break }
                         guard let data = payload.data(using: .utf8),
                               let chunk = try? JSONDecoder().decode(Chunk.self, from: data) else { continue }
+                        if let failure = chunk.error { throw TransportError.failed(failure.message) }
                         if !sentModel, let m = chunk.model, !m.isEmpty { continuation.yield(.model(m)); sentModel = true }
                         if let text = chunk.choices?.first?.delta?.content, !text.isEmpty { continuation.yield(.text(text)) }
                         if let u = chunk.usage, let i = u.prompt_tokens, let o = u.completion_tokens { continuation.yield(.usage(input: i, output: o)) }

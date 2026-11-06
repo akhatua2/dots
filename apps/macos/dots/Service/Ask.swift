@@ -265,6 +265,11 @@ final class AskController {
                     self.phase = .failed(error.localizedDescription)
                     return
                 }
+                // An answer that ended without a word didn't answer either
+                if self.answer.isEmpty {
+                    missed.append(candidate.place)
+                    continue
+                }
                 let input = usage?.input ?? messages.reduce(0) { $0 + Pricing.tokens($1.content) + 4 }
                 let output = usage?.output ?? Pricing.tokens(self.answer)
                 receipt.inputTokens = input

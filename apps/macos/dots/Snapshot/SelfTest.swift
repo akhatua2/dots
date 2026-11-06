@@ -78,6 +78,7 @@ enum SelfTest {
             await realAnswers(url, rig)
         }
         await workspaceChecks()
+        answerFormatting()
 
         print("\n\(passes) passed, \(failures) failed.")
         return failures == 0
@@ -503,6 +504,37 @@ enum SelfTest {
         print("      \(real.text("ran_on")), \(chat): \(real.answer.prefix(90).replacingOccurrences(of: "\n", with: " "))")
         let stream = await call(rig.base, "POST", "/chat/completions", key: rig.secret, body: ask("And a cat? One line.", stream: true))
         check("Streaming passes its words through", !openAIText(stream.body).isEmpty)
+    }
+
+    /// Answers read as formatted text: Markdown blocks are found, and math becomes readable symbols.
+    private static func answerFormatting() {
+        print("\nAnswers are formatted")
+        let blocks = Markdown.blocks("""
+        ### Math
+        1. **Equation:**
+          \\[ x = a^2 + b \\]
+        2. Next
+
+        ```python
+        def f(x):
+            return x
+        ```
+        | a | b |
+        |---|---|
+        | 1 | 2 |
+        """)
+        check("A heading, a list, display math, code and a table are each a block", blocks == [
+            .heading(level: 3, text: "Math"),
+            .list([.init(marker: "1.", text: "**Equation:**", depth: 0)]),
+            .math("x = a^2 + b"),
+            .list([.init(marker: "2.", text: "Next", depth: 0)]),
+            .code(language: "python", code: "def f(x):\n    return x"),
+            .table(header: ["a", "b"], rows: [["1", "2"]]),
+        ])
+        check("A code fence still streaming runs to the end", Markdown.blocks("```\nlet x = 1") == [.code(language: "", code: "let x = 1")])
+        check("Math reads as symbols", LaTeX.plain("\\frac{a+b}{2} \\times x^2 \\leq \\sqrt{y_1} + \\alpha") == "(a+b)/2 × x² ≤ √y₁ + α")
+        check("Inline math is converted and a price is left alone",
+              String(Markdown.inline("costs $5 and \\(x^2\\) grows").characters) == "costs $5 and x² grows")
     }
 
     /// A key made for more than one Anthropic workspace has to name its workspace on every request.

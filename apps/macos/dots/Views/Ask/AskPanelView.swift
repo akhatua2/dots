@@ -176,7 +176,7 @@ struct RoutePicker: View {
 /// Everything under the question: routing, the answer, its receipt, and the second opinion.
 struct AskBody: View {
     @Environment(AppModel.self) private var model
-    /// In the main window the receipt lives in the composer and the second opinion is one quiet link.
+    /// In the main window the receipt lives in the composer and nothing is offered under the answer.
     var compact = false
 
     var body: some View {
@@ -185,12 +185,7 @@ struct AskBody: View {
             RoutingRow(decision: decision)
         }
         if !ask.answer.isEmpty {
-            Text(ask.answer)
-                .font(D.ui(15))
-                .foregroundStyle(D.t2)
-                .lineSpacing(3.5)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            MarkdownText(text: ask.answer)
         }
         switch ask.phase {
         case .needsConsent(let why):
@@ -203,8 +198,9 @@ struct AskBody: View {
         if !compact, let receipt = ask.receipt, ask.phase != .routing {
             ReceiptView(receipt: receipt)
         }
-        if let second = ask.second {
-            SecondOpinionView(second: second, compact: compact)
+        // In the main window a frontier model is picked from the route menu, never offered under an answer.
+        if !compact, let second = ask.second {
+            SecondOpinionView(second: second)
         }
     }
 }
@@ -373,22 +369,10 @@ private struct ServingMac: View {
 struct SecondOpinionView: View {
     @Environment(AppModel.self) private var model
     var second: AskController.SecondOpinion
-    var compact = false
 
     var body: some View {
         let c = second.candidate
         switch second.phase {
-        case .idle where compact, .failed where compact:
-            Button { model.ask.askSecondOpinion(model: model) } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "sparkle").font(.system(size: 10, weight: .medium))
-                    Text("Ask \(c.model) for a second opinion · \(c.credits) credits").font(D.ui(12))
-                }
-                .foregroundStyle(D.t4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Leaves your pools and goes to \(c.place)")
         case .idle, .failed:
             VStack(alignment: .leading, spacing: 8) {
                 HStack {

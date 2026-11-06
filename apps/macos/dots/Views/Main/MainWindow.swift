@@ -22,6 +22,7 @@ struct MainWindow: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) { TitleDrag() }
         .animation(.easeOut(duration: 0.25), value: model.moment?.id)
         .sheet(item: $model.sheet) { sheet in
             Group {
@@ -259,6 +260,18 @@ struct ThisMacCard: View {
 
 // MARK: - Window chrome
 
+/// The window has no title bar, so the strip where one would be moves it, and a double click zooms it.
+private struct TitleDrag: View {
+    var body: some View {
+        Color.clear
+            .frame(height: 28)
+            .contentShape(Rectangle())
+            .gesture(WindowDragGesture())
+            .allowsWindowActivationEvents(true)
+            .onTapGesture(count: 2) { NSApp.keyWindow?.performZoom(nil) }
+    }
+}
+
 /// Hides the title bar's own background and separator, so the content runs to the top edge
 /// and the traffic lights sit on it. Without this, macOS draws a bar and a line above the content.
 private struct WindowChrome: NSViewRepresentable {
@@ -283,7 +296,8 @@ private struct WindowChrome: NSViewRepresentable {
         window.titlebarSeparatorStyle = .none
         window.titleVisibility = .hidden
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
+        // Only the strip along the top moves the window (see TitleDrag), so dragging in a list or a chat selects.
+        window.isMovableByWindowBackground = false
         if let root = window.contentView?.superview { hideScrollPockets(in: root) }
     }
 
