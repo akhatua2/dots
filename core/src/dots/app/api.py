@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -50,6 +51,17 @@ _CORS_HEADERS = {
     "Access-Control-Allow-Headers": "Authorization, Content-Type, ngrok-skip-browser-warning",
     "Access-Control-Max-Age": "86400",
 }
+
+
+# Who an HTTP turn is charged to. /v1 is behind the join token, so a caller that holds it may name the
+# account (the dots cloud names the person asking); anything else is charged to a shared "api" account.
+_API_ACCOUNT = "api"
+_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _querier(request: web.Request) -> str:
+    named = request.headers.get("X-Dots-Account", "")
+    return named if _ACCOUNT_ID.match(named) else _API_ACCOUNT
 
 
 def _bearer(request: web.Request) -> str | None:
@@ -173,11 +185,17 @@ class HttpApi:
                 "device": p.device,
                 "model": p.requested_model_id,
                 "layer_range": list(p.layer_range) if p.layer_range else None,
+                # The memory this worker offers the pool (its own cap applied), in GB.
+                "ram_gb": self._ram_gb(p.id),
                 "geo": p.geo,
             }
             for p in self.hub.participants.values()
             if p.compute
         ]
+
+    def _ram_gb(self, worker_id: str) -> float | None:
+        decl = self.hub.pool_view.resources.get(worker_id)
+        return round(decl.ram_gb_free, 1) if decl is not None else None
 
     async def _pool_nodes(self, _request: web.Request) -> web.Response:
         """List the compute workers in the pool, with their advertised location."""
@@ -292,6 +310,7 @@ class HttpApi:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created_at = int(time.time())
 
+        account = _querier(request)
         try:
             if stream:
                 return await self._stream(
@@ -302,6 +321,7 @@ class HttpApi:
                     max_tokens,
                     temperature,
                     model_id,
+                    account,
                 )
             return await self._nonstream(
                 conv,
@@ -310,6 +330,7 @@ class HttpApi:
                 max_tokens,
                 temperature,
                 model_id,
+                account,
             )
         finally:
             # Drop the per-conv KV cache from every worker so stateless
@@ -332,17 +353,20 @@ class HttpApi:
         max_new_tokens: int,
         temperature: float,
         model_id: str,
+        account: str,
     ) -> web.Response:
         try:
             text, stats = await self.hub.run_turn(
                 conv,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
+                querier_account=account,
                 model_id=model_id,
             )
         except Exception as e:
             log.exception("turn failed")
             return _error(500, f"turn failed: {e}")
+        self.hub.record_api_turn(conv, account, stats, model_id)
 
         return web.json_response(
             {
@@ -375,6 +399,7 @@ class HttpApi:
         max_new_tokens: int,
         temperature: float,
         model_id: str,
+        account: str,
     ) -> web.StreamResponse:
         response = web.StreamResponse(
             status=200,
@@ -410,11 +435,12 @@ class HttpApi:
             await response.write(chunk({"content": text}))
 
         try:
-            await self.hub.run_turn(
+            _, stats = await self.hub.run_turn(
                 conv,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 on_token=emit,
+                querier_account=account,
                 model_id=model_id,
             )
         except Exception as e:
@@ -424,6 +450,7 @@ class HttpApi:
             await response.write(b"data: [DONE]\n\n")
             return response
 
+        self.hub.record_api_turn(conv, account, stats, model_id)
         await response.write(chunk({}, finish_reason="stop"))
         await response.write(b"data: [DONE]\n\n")
         return response

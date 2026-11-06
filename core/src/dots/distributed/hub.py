@@ -1196,7 +1196,8 @@ class Hub:
         try:
             self._attribute_turn(
                 conv=conv,
-                participant=participant,
+                querier_account=participant.account_id,
+                querier_alias=participant.account_alias,
                 stats=stats,
                 model_id=model_id,
             )
@@ -1207,7 +1208,8 @@ class Hub:
     def _attribute_turn(
         self,
         conv: "Conversation",
-        participant: "Participant",
+        querier_account: str | None,
+        querier_alias: str | None,
         stats: dict,
         model_id: str | None = None,
     ) -> None:
@@ -1221,8 +1223,8 @@ class Hub:
         deployment = self._deployment_for(model_id)
         if deployment.active_params <= 0:
             return  # no real model loaded (tests with fakes) → no FLOP unit
-        if not participant.account_id:
-            log.debug("skipping ledger entry — chat client has no account_id")
+        if not querier_account:
+            log.debug("skipping ledger entry — the querier has no account")
             return
 
         plan: list[tuple[str, str | None, int]] = []
@@ -1260,8 +1262,8 @@ class Hub:
         self.ledger.record_turn(
             conv_id=conv.id,
             turn_idx=self._turn_counter[conv.id],
-            querier_account=participant.account_id,
-            querier_alias=participant.account_alias,
+            querier_account=querier_account,
+            querier_alias=querier_alias,
             plan=plan,
             prefill_tokens=prefill_tokens,
             decode_tokens=decode_tokens,
@@ -1382,6 +1384,17 @@ class Hub:
             ],
             return_exceptions=True,
         )
+
+    def record_api_turn(self, conv: "Conversation", account: str, stats: dict, model_id: str) -> None:
+        """Credits the workers for a turn answered through the HTTP API, and debits `account`.
+
+        Chat clients are attributed when their turn finishes; HTTP turns have no participant, so the API
+        calls this after a successful turn. Ledger trouble is logged, never raised: the answer was given.
+        """
+        try:
+            self._attribute_turn(conv=conv, querier_account=account, querier_alias=None, stats=stats, model_id=model_id)
+        except Exception:
+            log.exception("ledger attribution failed for API turn %s", conv.id)
 
     async def run_turn(
         self,

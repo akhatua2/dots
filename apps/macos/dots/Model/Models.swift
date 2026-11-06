@@ -17,7 +17,8 @@ struct ModelTier: Codable, Hashable, Identifiable {
 }
 
 enum Ladder {
-    static let tiers: [ModelTier] = [
+    /// The cloud sends the ladder in every sync (see `adopt`). This is the starting point until the first one arrives.
+    static private(set) var tiers: [ModelTier] = [
         ModelTier(id: "llama-3.1-8b", name: "Llama 3.1 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 62, credits: 1, layers: 32, activeB: 8),
         ModelTier(id: "gemma-3-27b", name: "Gemma 3 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 38, credits: 1, layers: 62, activeB: 27),
         ModelTier(id: "llama-3.3-70b", name: "Llama 3.3 70B", minGB: 40, params: "70B", paramsLong: "70 billion parameters", tokPerSec: 19, credits: 1, layers: 80, activeB: 70),
@@ -27,9 +28,16 @@ enum Ladder {
     ]
 
     /// Coding pools can prefer a coding model when they have room for it.
-    static let special: [ModelTier] = [
+    static private(set) var special: [ModelTier] = [
         ModelTier(id: "qwen3-coder-480b", name: "Qwen3 Coder 480B", minGB: 270, params: "480B", paramsLong: "480 billion parameters", tokPerSec: 13, credits: 3, layers: 62, activeB: 35),
     ]
+
+    /// Takes the ladder the cloud sent, so a pool's models are the ones its hub can actually serve.
+    static func adopt(_ ladder: LadderData) {
+        guard !ladder.tiers.isEmpty else { return }
+        tiers = ladder.tiers
+        special = ladder.special
+    }
 
     static func tier(_ id: String) -> ModelTier? { (tiers + special).first { $0.id == id } }
     static func best(for gb: Int) -> ModelTier? { tiers.last { $0.minGB <= gb } }
@@ -347,7 +355,11 @@ struct NetworkState: Codable {
     var nights: [NightLent]?
 
     var me: Person { people.first { $0.id == meID }! }
-    var thisMac: MacDevice { devices.first { $0.id == thisMacID }! }
+    /// This Mac as the cloud knows it. Before its first heartbeat a cloud may not list it yet, so it falls
+    /// back to an unknown Mac rather than failing.
+    var thisMac: MacDevice {
+        devices.first { $0.id == thisMacID } ?? MacDevice(id: thisMacID, ownerID: meID, kind: "Mac", memoryGB: 0)
+    }
     func person(_ id: String) -> Person? { people.first { $0.id == id } }
     func device(_ id: String) -> MacDevice? { devices.first { $0.id == id } }
     func pool(_ id: String?) -> Pool? { guard let id else { return nil }; return pools.first { $0.id == id } }

@@ -53,7 +53,10 @@ final class Simulation: DotsBackend {
             state.devices[i].memoryGB = ThisMac.memoryGB
             state.devices[i].kind = ThisMac.kind
         }
-        state.lending.limitGB = min(state.lending.limitGB, state.thisMac.maxLendGB)
+        // Only clamp to what this Mac can lend once the cloud knows its memory.
+        if state.thisMac.memoryGB > 0 {
+            state.lending.limitGB = min(state.lending.limitGB, state.thisMac.maxLendGB)
+        }
     }
 
     /// Where an older dots saved its whole simulated network

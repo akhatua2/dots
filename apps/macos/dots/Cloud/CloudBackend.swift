@@ -65,6 +65,7 @@ final class CloudBackend: DotsBackend {
     private func adopt(_ sync: CloudSync) {
         mirror.adopt(sync.state)
         Pricing.terms = sync.terms
+        if let ladder = sync.ladder { Ladder.adopt(ladder) }
         note = sync.note
         worker = sync.worker
         invites = sync.invites

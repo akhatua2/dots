@@ -89,6 +89,14 @@ struct CloudSync: Codable {
     var invites: [InviteDetails]
     /// Answers and pools are simulated by the mock cloud
     var mock: Bool
+    /// The models pools can run, by the memory they need. Older clouds don't send it.
+    var ladder: LadderData?
+}
+
+/// The cloud's model ladder: the models in order of the memory a pool needs, and the special ones.
+struct LadderData: Codable {
+    var tiers: [ModelTier]
+    var special: [ModelTier]
 }
 
 /// This Mac's report to the hub, every couple of seconds.

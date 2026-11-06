@@ -404,6 +404,13 @@ def main() -> None:
         "defaults to 8080. pass --http-port 0 to disable.",
     )
 
+    p_cloud = sub.add_parser(
+        "cloud",
+        help="run the dots cloud (pools, people, credits, the gateway) next to a hub",
+    )
+    p_cloud.add_argument("--port", type=int, default=None, help="defaults to $DOTS_CLOUD_PORT or 8800")
+    p_cloud.add_argument("--hub-url", default=None, help="the hub's HTTP API; defaults to $DOTS_CLOUD_HUB or http://127.0.0.1:8080")
+
     p_chat = sub.add_parser(
         "chat",
         help="open the interactive chat. donates compute as a side effect.",
@@ -545,6 +552,20 @@ def main() -> None:
             asyncio.run(hub.start())
         except KeyboardInterrupt:
             sys.exit(0)
+        return
+
+    if args.cmd == "cloud":
+        from dataclasses import replace
+
+        from .cloud.__main__ import main as run_cloud
+        from .cloud.config import CloudConfig
+
+        config = CloudConfig.from_env()
+        if args.port:
+            config = replace(config, port=args.port)
+        if args.hub_url:
+            config = replace(config, hub_url=args.hub_url)
+        run_cloud(config)
         return
 
     if args.cmd == "credits":
