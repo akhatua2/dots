@@ -478,6 +478,10 @@ class HttpApi:
             return response
 
         self.hub.record_api_turn(conv, account, stats, model_id)
+        if "speedup" in stats:
+            speed = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                     "dots": {"event": "speed", "speedup": stats["speedup"]}}
+            await response.write(f"data: {json.dumps(speed)}\n\n".encode("utf-8"))
         await response.write(chunk({}, finish_reason="stop"))
         await response.write(b"data: [DONE]\n\n")
         return response

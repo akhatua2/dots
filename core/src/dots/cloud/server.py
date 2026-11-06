@@ -295,7 +295,9 @@ class Cloud:
                 return error(e.status, str(e), "api_error")
             reply["dots"] = {**receipt, "macs": macs}
             return web.json_response(reply)
-        return await _relay(request, self.hub.stream(body, self.me), first={"event": "macs", "macs": macs, **receipt}, last=receipt)
+        speculate = request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
+        return await _relay(request, self.hub.stream(body, self.me, speculate), first={"event": "macs", "macs": macs, **receipt},
+                            last=receipt)
 
     # ---- the gateway -----------------------------------------------------------
 

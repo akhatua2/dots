@@ -13,6 +13,8 @@ struct EndpointConfig: Codable, Equatable {
     var workspaceID: String? = nil
     /// A token handed over in code (the dots cloud's), used instead of a key from the Keychain. Never saved.
     var token: String? = nil
+    /// For a dots pool: whether a draft model may guess ahead on this request. Set per request, never saved.
+    var draftAhead: Bool? = nil
 
     enum CodingKeys: String, CodingKey { case enabled, label, baseURL, model, keychainAccount, workspaceID }
 
@@ -107,6 +109,8 @@ struct AppSettings: Codable, Equatable {
     var payFrontierWith: PayWith = .credits
     /// What your savings are measured against: the frontier model you'd otherwise send everything to
     var savingsBaseline = FrontierModel.opus.id
+    /// Let a pool's draft model guess ahead, so the pool checks several words at once
+    var draftAhead = true
 
     init() {}
     /// Settings saved by an older dots load with defaults for anything new.
@@ -122,6 +126,7 @@ struct AppSettings: Codable, Equatable {
         cloud = try c.decodeIfPresent(CloudSettings.self, forKey: .cloud) ?? d.cloud
         payFrontierWith = try c.decodeIfPresent(PayWith.self, forKey: .payFrontierWith) ?? d.payFrontierWith
         savingsBaseline = try c.decodeIfPresent(String.self, forKey: .savingsBaseline) ?? d.savingsBaseline
+        draftAhead = try c.decodeIfPresent(Bool.self, forKey: .draftAhead) ?? d.draftAhead
     }
 
     private static let defaultsKey = "dots.settings.v1"

@@ -66,14 +66,27 @@ def _head_flops(geometry: ModelGeometry) -> float:
     return float(2 * geometry.vocab_size * geometry.hidden_size)
 
 
-def _note_speed(deployment: "ModelDeployment", resp: dict) -> None:
-    """Folds a finished turn's decode speed into the model's recent speed."""
+def _note_speed(deployment: "ModelDeployment", resp: dict, hops: int) -> float | None:
+    """Folds a finished turn's decode speed into the model's recent speed.
+
+    A turn without a draft model also updates the plain speed for a chain of `hops` peers. A turn with one
+    returns how much faster it was than that plain speed, once there is one to compare with.
+    """
     decoded = int(resp.get("decode_tokens") or 0)
     seconds = float(resp.get("elapsed_ms") or 0) / 1000
     if decoded < 2 or seconds <= 0:
-        return
+        return None
     rate = decoded / seconds
-    deployment.tok_per_sec = rate if not deployment.tok_per_sec else 0.7 * deployment.tok_per_sec + 0.3 * rate
+
+    def blend(old: float | None) -> float:
+        return rate if not old else 0.7 * old + 0.3 * rate
+
+    deployment.tok_per_sec = blend(deployment.tok_per_sec)
+    if resp.get("draft_proposed"):
+        plain = deployment.plain_tok_per_sec.get(hops)
+        return round(rate / plain, 2) if plain else None
+    deployment.plain_tok_per_sec[hops] = blend(deployment.plain_tok_per_sec.get(hops))
+    return None
 
 
 def _speculation_note(resp: object) -> str:
@@ -115,6 +128,9 @@ class ModelDeployment:
     active_params: int = 0
     # Recent decode speed in tokens a second, a moving average over finished turns; 0 until one finishes
     tok_per_sec: float = 0.0
+    # The same without a draft model, by how many Macs a turn's chain hopped to: what a drafted turn's
+    # speed is compared against
+    plain_tok_per_sec: dict[int, float] = field(default_factory=dict)
     geometry: ModelGeometry | None = None
     selected_backend: str | None = None
     current_placement: list[tuple[str, int, int, bool]] = field(default_factory=list)
@@ -1580,9 +1596,9 @@ class Hub:
         active = int(resp.get("active_params") or 0)
         if active and not deployment.active_params:
             deployment.active_params = active
-        _note_speed(deployment, resp)
+        speedup = _note_speed(deployment, resp, hops=len(chain_payload))
 
-        return resp["text"], {
+        stats = {
             "prefill_tokens": int(resp.get("prefill_tokens", 0)),
             "prefill_ms": float(resp.get("prefill_ms", 0.0)),
             "decode_tokens": int(resp.get("decode_tokens", 0)),
@@ -1590,6 +1606,9 @@ class Hub:
             "worker_id": worker.id,
             "model_id": selected_model,
         }
+        if speedup is not None:
+            stats["speedup"] = speedup  # against the same pool decoding one token at a time
+        return resp["text"], stats
 
     # ─────────────────────── delegation helpers ──────────────────────
 

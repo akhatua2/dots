@@ -64,11 +64,15 @@ class HubClient:
         except aiohttp.ClientError as e:
             raise HubError(503, f"the hub didn't answer: {e}") from e
 
-    async def stream(self, body: dict, account: str) -> AsyncIterator[bytes]:
-        """An answer as it is written, charged to `account`: the hub's event lines, passed through as they come."""
+    async def stream(self, body: dict, account: str, speculate: bool = True) -> AsyncIterator[bytes]:
+        """An answer as it is written, charged to `account`: the hub's event lines, passed through as they come.
+        `speculate` False asks the pool not to use a draft model for it."""
+        headers = {"X-Dots-Account": account}
+        if not speculate:
+            headers["X-Dots-Speculate"] = "off"
         try:
             async with self.session.post(self.base_url + "/v1/chat/completions", json={**body, "stream": True},
-                                         headers={"X-Dots-Account": account},
+                                         headers=headers,
                                          timeout=aiohttp.ClientTimeout(total=300)) as r:
                 if r.status >= 400:
                     raise HubError(r.status, _message(await r.json(content_type=None), r.status))

@@ -27,6 +27,8 @@ struct Receipt: Codable, Equatable {
     var draftChecks: Int?
     var draftKept: Int?
     var draftProposed: Int?
+    /// This answer's speed over the same pool without a draft, once the pool has measured that
+    var speedup: Double?
 }
 
 /// One check of a draft model's proposal by the big model.
@@ -97,7 +99,9 @@ enum AnswerRunner {
             return e.isReady ? (e, false, e.serverName.map { "\($0) on this Mac" } ?? "the model on this Mac") : nil
         case .yourPool, .publicPool:
             guard let pool = c.poolID else { return nil }
-            return (app.backend.client.hub(poolID: pool, model: c.modelID), false, "the dots hub")
+            var hub = app.backend.client.hub(poolID: pool, model: c.modelID)
+            hub.draftAhead = settings.draftAhead
+            return (hub, false, "the dots hub")
         case .frontier:
             var own = settings.frontierEndpoint
             let ownReady = own.isReady
@@ -254,6 +258,8 @@ final class AskController {
                             if elapsed > 0.5 { receipt.tokPerSec = Double(Pricing.tokens(self.answer)) / elapsed }
                         case .draft(let d):
                             self.draft = d
+                        case .speedup(let s):
+                            receipt.speedup = s
                         case let .verified(kept, proposed):
                             self.checks.append(DraftCheck(kept: kept, proposed: proposed))
                             receipt.draftChecks = self.checks.count

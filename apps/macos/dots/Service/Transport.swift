@@ -13,6 +13,8 @@ enum AnswerEvent {
     case draft(String)
     /// A check of the draft: how many of its proposed tokens the big model kept
     case verified(kept: Int, proposed: Int)
+    /// How much faster the draft made this answer than the same pool without one
+    case speedup(Double)
     case macAsleep(macID: String, name: String)
     case resumed
     case model(String)      // the model an endpoint says it used
@@ -71,6 +73,7 @@ extension URLRequest {
             setValue(key, forHTTPHeaderField: "x-api-key")
         }
         if inWorkspace, let workspace = endpoint.workspace { setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id") }
+        if endpoint.draftAhead == false { setValue("off", forHTTPHeaderField: "X-Dots-Speculate") }
     }
 }
 
@@ -102,6 +105,7 @@ enum OpenAIClient {
             var text: String?
             var kept: Int?
             var proposed: Int?
+            var speedup: Double?
             var credits: Int?
             var simulated: Bool?
         }
@@ -155,6 +159,7 @@ enum OpenAIClient {
                             if d.event == "asleep", let id = d.mac_id { continuation.yield(.macAsleep(macID: id, name: d.name ?? "A Mac")) }
                             if d.event == "resumed" { continuation.yield(.resumed) }
                             if d.event == "draft" { continuation.yield(.draft(d.text ?? "")) }
+                            if d.event == "speed", let s = d.speedup { continuation.yield(.speedup(s)) }
                             if d.event == "verified", let kept = d.kept, let proposed = d.proposed {
                                 continuation.yield(.verified(kept: kept, proposed: proposed))
                             }
