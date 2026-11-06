@@ -56,6 +56,15 @@ _PLACEMENT_RAM_MARGIN_ENV = "DOTS_PLACEMENT_RAM_MARGIN_GB"
 _HEAD_WORKSPACE_RAM_ENV = "DOTS_HEAD_WORKSPACE_RAM_GB"
 
 
+def _speculation_note(resp: object) -> str:
+    """How much a draft model helped a turn, from the head worker's stats; empty when none ran."""
+    if not isinstance(resp, dict) or not resp.get("draft_proposed"):
+        return ""
+    passes = resp.get("verify_passes") or 1
+    return (f" · draft kept {resp.get('draft_accepted', 0)}/{resp['draft_proposed']}"
+            f" · {resp.get('decode_tokens', 0) / passes:.1f} tokens a pass")
+
+
 def _float_policy(name: str, default: float) -> float:
     raw = os.environ.get(name)
     return default if raw is None else float(raw)
@@ -551,10 +560,16 @@ class Hub:
         if placement is None or not placement.segments:
             pool_ram = sum(free_ram(p) for p in compute_workers)
             short_by = max(0.0, model_ram_gb - pool_ram)
-            ui.notice(
-                f"need ~{short_by:.0f} GB more pool RAM to load this model "
-                f"(have {pool_ram:.1f} GB, model needs ~{model_ram_gb:.1f} GB)"
-            )
+            if short_by > 0:
+                ui.notice(
+                    f"need ~{short_by:.1f} GB more pool RAM to load this model "
+                    f"(have {pool_ram:.1f} GB, model needs ~{model_ram_gb:.1f} GB)"
+                )
+            else:
+                ui.notice(
+                    f"the pool has {pool_ram:.1f} GB, enough for this model's ~{model_ram_gb:.1f} GB in total, "
+                    "but no split fits each Mac's share; a Mac with more room to lend would fix it"
+                )
             deployment.current_placement = []
             return []
 
@@ -1505,6 +1520,7 @@ class Hub:
             tokens_total = self._turn_token_counts.get(conv.id, 0)
             ui.notice(
                 f"turn {conv.id[:8]} done in {wall_ms:.0f}ms · tokens={tokens_total}"
+                + _speculation_note(resp)
             )
             # delegate_token notifications dispatch as fire-and-forget
             # tasks; the response (delegate_done) may resolve before the
