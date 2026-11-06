@@ -1,8 +1,9 @@
 // "Which Macs answered, why it ran there, what it cost."
 import type { Receipt as R } from '../lib/bridge'
-import { shortModel } from '../lib/pools'
+import { shortModel } from '../lib/format'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { ModelMark } from './ModelMark'
 
 export function Receipt({ r }: { r: R }) {
   const macs = r.macs.length
@@ -15,13 +16,15 @@ export function Receipt({ r }: { r: R }) {
           ))}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium text-ink">
+          <p className="flex items-center gap-2 truncate text-[13px] font-medium text-ink">
             Ran on {r.pool}
-            {r.model_id ? ` · ${shortModel(r.model_id)}` : ''}
+            {r.model_id && <ModelMark model={r.model_id} size={15} />}
+            {r.model_id ? shortModel(r.model_id) : ''}
           </p>
           <p className="text-[12px] text-dim">
-            {macs} {macs === 1 ? 'Mac' : 'Macs'}
+            {macs > 0 ? `${macs} ${macs === 1 ? 'Mac' : 'Macs'}` : 'Your Mac'}
             {typeof r.tps === 'number' ? ` · ${r.tps} tok/s` : ''}
+            {r.tokens_in + r.tokens_out > 0 ? ` · ${r.tokens_in.toLocaleString('en-US')} in · ${r.tokens_out.toLocaleString('en-US')} out` : ''}
           </p>
         </div>
         {r.free && <span className="rounded-full bg-surface-2 px-2.5 py-1 text-[12px] text-ink">Free for you</span>}

@@ -209,6 +209,13 @@ fn open_ask(app: AppHandle) {
     toggle_ask(&app);
 }
 
+/// Bring the main window forward and show its Ask screen.
+#[tauri::command]
+fn show_ask_in_app(app: AppHandle) {
+    show_main(&app);
+    let _ = app.emit("ask-inline", ());
+}
+
 #[tauri::command]
 fn open_main(app: AppHandle) {
     show_main(&app);
@@ -272,6 +279,13 @@ fn toggle_tray_panel(app: &AppHandle, rect: Rect) {
 }
 
 fn toggle_ask(app: &AppHandle) {
+    // Inside the app, Ask is a screen of the main window, not a floating panel.
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_focused().unwrap_or(false) {
+            let _ = app.emit("ask-inline", ());
+            return;
+        }
+    }
     let Some(w) = app.get_webview_window("ask") else {
         return;
     };
@@ -386,7 +400,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![call, chat, read_text_file, open_main, open_ask])
+        .invoke_handler(tauri::generate_handler![call, chat, read_text_file, open_main, open_ask, show_ask_in_app])
         .build(tauri::generate_context!())
         .expect("error while building the dots app");
 

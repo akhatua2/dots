@@ -25,6 +25,73 @@ export interface Pool {
   capacity_gb: number
   lenders: string[]
   can_run: PoolModel[]
+  detail?: PoolDetail
+}
+
+export interface Booster {
+  name: string
+  gb: number
+  in: boolean
+}
+
+export interface Boost {
+  id: string
+  title: string
+  day: string
+  date: string
+  long_date: string
+  window: string
+  planned_by: string
+  model: string
+  goal_gb: number
+  pledged_gb: number
+  boosters: Booster[]
+}
+
+export interface PoolDetail {
+  level: number
+  next_level: number
+  level_total_gb: number
+  nights: number
+  runs_tonight: number
+  tokens: string
+  tps_live: number
+  live_no: number
+  owner: string
+  layers: string
+  members: { name: string; live: boolean }[]
+  boost?: Boost
+  activity: { who: string; text: string; when: string }[]
+}
+
+export interface Recap {
+  pool_id: string
+  window: string
+  credits: number
+  lent: string
+  runs: number
+  tokens: string
+  thanks: string
+  number: number
+  date: string
+  night: {
+    ticks: string[]
+    rows: { who: string; start: number; end: number; label: string; mine?: boolean }[]
+  }
+}
+
+export interface ApiExtra {
+  saved: {
+    amount: string
+    against: string
+    requests: number
+    free_pct: number
+    credits_spent: number
+    billed: string
+    with_counts: string
+  }
+  split: { label: string; pct: number; note: string; shade: string }[]
+  recent: { at: string; key: string; ran: string; tokens: string; cost: string; saved: string; note?: string }[]
 }
 
 export interface Badge {
@@ -60,14 +127,12 @@ export interface Catalog {
   default_monthly_limit: number
   keys_default: KeyRow[]
   request_split: { label: string; pct: number; note: string; shade: string }[]
+  invite?: { from: string; pool_id: string; text: string }
+  recap?: Recap
+  api_extra?: ApiExtra
 }
 
-export const fmt = (n: number) => Math.round(n).toLocaleString('en-US')
 
-export function shortModel(id: string): string {
-  const tail = id.split('/').pop() || id
-  return tail.replace(/-4bit$/i, '').replace(/-Instruct$/i, '')
-}
 
 /** A pool as the user sees it: their Mac adds one lender and its lent memory. */
 export function poolView(p: Pool, joined: boolean, lentGb: number): Pool {
@@ -84,4 +149,17 @@ export function poolView(p: Pool, joined: boolean, lentGb: number): Pool {
 /** Models a pool can run at its current capacity, in unlock order. */
 export function runnable(p: Pool) {
   return p.can_run.map((m) => ({ ...m, unlocked: p.capacity_gb >= m.at_gb }))
+}
+
+/** What the pool page needs, from the pool's own detail or derived from what it can run. */
+export function levelOf(pool: Pool, capacityGb: number) {
+  const next = pool.can_run.find((m) => capacityGb < m.at_gb)
+  const level = pool.detail?.level ?? pool.can_run.filter((m) => capacityGb >= m.at_gb).length
+  return {
+    level,
+    nextLevel: level + 1,
+    nextModel: next?.name ?? null,
+    totalGb: pool.detail?.level_total_gb ?? next?.at_gb ?? capacityGb,
+    toGo: next ? Math.max(0, (pool.detail?.level_total_gb ?? next.at_gb) - capacityGb) : 0,
+  }
 }

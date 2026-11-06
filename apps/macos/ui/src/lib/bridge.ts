@@ -59,6 +59,7 @@ export interface PoolNode {
   ready: boolean
   backend: string | null
   device: string | null
+  layer_range: [number, number] | null
   lat: number | null
   lng: number | null
   city: string | null
@@ -75,7 +76,9 @@ export interface Receipt {
   macs: { name: string; ready: boolean }[]
   private: boolean
   free: boolean
-  reasons: { icon: 'lock' | 'dots'; text: string }[]
+  tokens_in: number
+  tokens_out: number
+  reasons: { icon: 'lock' | 'users' | 'globe'; text: string }[]
 }
 
 // Request/response calls. The Rust `call` command forwards the method (and
@@ -90,6 +93,43 @@ export const getConfig = () => call<AppConfig>('config')
 export const getCatalog = () => call<Catalog>('catalog')
 export const getUiState = () => call<Record<string, unknown>>('ui_state_get')
 export const setUiState = (state: unknown) => call('ui_state_set', { state })
+export const getInviteLink = () => call<{ link: string }>('invite_link').then((r) => r.link)
+export interface GatewayKey {
+  id: string
+  name: string
+  scopes: string[]
+  monthly_limit: number | null
+  tail: string
+  last_used: number | null
+  requests: number
+}
+
+export interface RecentRequest {
+  at: string
+  key: string
+  ran: string
+  tokens: string
+  cost: string
+  saved: string
+  note?: string
+}
+
+export interface GatewayView {
+  base: string
+  running: boolean
+  keys: GatewayKey[]
+  requests: number
+  free_pct: number
+  saved_usd: number
+  recent: RecentRequest[]
+  compare_label: string
+  sample?: import('./pools').ApiExtra // the design's sample traffic, until there is real traffic
+}
+
+export const getGateway = () => call<GatewayView>('gateway')
+export const createGatewayKey = (name: string, scopes: string[], monthlyLimit: number | null) =>
+  call<{ key: GatewayKey; secret: string }>('gateway_create_key', { name, scopes, monthly_limit: monthlyLimit })
+export const revokeGatewayKey = (id: string) => call('gateway_revoke', { id })
 export const getLend = () => call<LendState>('lend_get')
 export const setLend = (patch: LendPatch) => call<LendState>('lend_set', patch)
 export const getNodes = () => call<{ nodes: PoolNode[] }>('nodes').then((r) => r.nodes)
@@ -120,6 +160,8 @@ export const onChat = (handler: (e: ChatEvent) => void): Promise<UnlistenFn> =>
   listen<ChatEvent>('chat', (e) => handler(e.payload))
 export const onLend = (handler: (s: LendState) => void): Promise<UnlistenFn> =>
   listen<LendState>('lend', (e) => handler(e.payload))
+export const onAskInline = (handler: () => void): Promise<UnlistenFn> =>
+  listen('ask-inline', () => handler())
 export const onAskShown = (handler: () => void): Promise<UnlistenFn> =>
   listen('ask-shown', () => handler())
 export const onTrayShown = (handler: () => void): Promise<UnlistenFn> =>

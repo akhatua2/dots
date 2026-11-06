@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from .. import ui
+from ..system.util import dots_home
+from .social import KEY_PATHS, SocialStore
 
 if TYPE_CHECKING:
     from ..distributed.hub import Hub
@@ -46,7 +48,7 @@ _OPEN_PATHS = frozenset({"/healthz"})
 # safe — a stranger's page still can't call the pool without the token.
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, ngrok-skip-browser-warning",
     "Access-Control-Max-Age": "86400",
 }
@@ -76,9 +78,20 @@ async def _auth_cors_middleware(request: web.Request, handler):
     if token and request.path not in _OPEN_PATHS:
         provided = _bearer(request)
         if not provided or not hmac.compare_digest(provided, token):
-            resp = _error(401, "missing or invalid token")
-            resp.headers.extend(_CORS_HEADERS)
-            return resp
+            # Not the owner token: a minted API key may still call the
+            # inference endpoints, but nothing that manages the pool.
+            social = request.app.get("social")
+            key = (
+                social.verify(provided)
+                if (isinstance(social, SocialStore) and provided)
+                else None
+            )
+            if key is not None and request.path in KEY_PATHS and request.method != "DELETE":
+                social.touch(key)
+            else:
+                resp = _error(401, "missing or invalid token")
+                resp.headers.extend(_CORS_HEADERS)
+                return resp
 
     response = await handler(request)
     # A streaming response has already flushed its headers in `prepare()` (it
@@ -94,12 +107,21 @@ class HttpApi:
         self.host = host
         self.port = port
         self._runner: web.AppRunner | None = None
+        self.social = SocialStore(dots_home() / "hub" / "social.json")
+        self.pool_name = os.environ.get("DOTS_POOL_NAME", "dots pool")
 
     async def start(self) -> None:
         app = web.Application(
             client_max_size=4 * 1024 * 1024,
             middlewares=[_auth_cors_middleware],
         )
+        app["social"] = self.social
+        app.router.add_get("/v1/pools", self._pools)
+        app.router.add_post("/v1/pools/{pool_id}/endorse", self._endorse)
+        app.router.add_delete("/v1/pools/{pool_id}/endorse", self._unendorse)
+        app.router.add_get("/v1/keys", self._keys_list)
+        app.router.add_post("/v1/keys", self._keys_create)
+        app.router.add_delete("/v1/keys/{key_id}", self._keys_delete)
         app.router.add_post("/v1/chat/completions", self._chat_completions)
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/v1/credits", self._credits_all)
@@ -141,6 +163,74 @@ class HttpApi:
                 ],
             }
         )
+
+    # ---- pool directory, endorsements, API keys ---------------------------
+
+    async def _pools(self, _request: web.Request) -> web.Response:
+        """The pool this hub serves, with live Macs and endorsements."""
+        nodes = self._pool_nodes_data()
+        models = sorted(self.hub.deployments)
+        who = self.social.endorsements.get("hub", [])
+        return web.json_response(
+            {
+                "pools": [
+                    {
+                        "id": "hub",
+                        "name": self.pool_name,
+                        "model": models[0] if models else None,
+                        "macs": len(nodes),
+                        "lending": sum(1 for n in nodes if n["ready"]),
+                        "endorsements": len(who),
+                        "endorsed_by": who,
+                    }
+                ]
+            }
+        )
+
+    async def _endorse(self, request: web.Request) -> web.Response:
+        return await self._set_endorsement(request, True)
+
+    async def _unendorse(self, request: web.Request) -> web.Response:
+        return await self._set_endorsement(request, False)
+
+    async def _set_endorsement(self, request: web.Request, on: bool) -> web.Response:
+        pool_id = request.match_info["pool_id"]
+        if pool_id != "hub":
+            return _error(404, f"unknown pool {pool_id}")
+        try:
+            body = await request.json()
+        except Exception:
+            return _error(400, "request body must be valid JSON")
+        account_id = body.get("account_id")
+        if not isinstance(account_id, str) or not account_id:
+            return _error(400, "account_id is required")
+        n = (
+            self.social.endorse(pool_id, account_id)
+            if on
+            else self.social.unendorse(pool_id, account_id)
+        )
+        return web.json_response({"pool_id": pool_id, "endorsements": n})
+
+    async def _keys_list(self, _request: web.Request) -> web.Response:
+        return web.json_response({"keys": self.social.list_keys()})
+
+    async def _keys_create(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return _error(400, "request body must be valid JSON")
+        scopes = [s for s in body.get("scopes", ["pools"]) if s in ("pools", "public", "frontier")]
+        limit = body.get("monthly_limit")
+        record, secret = self.social.create_key(
+            str(body.get("name", "")), scopes, int(limit) if limit else None
+        )
+        # The secret is returned exactly once; only its hash is stored.
+        return web.json_response({"key": record, "secret": secret}, status=201)
+
+    async def _keys_delete(self, request: web.Request) -> web.Response:
+        if not self.social.revoke_key(request.match_info["key_id"]):
+            return _error(404, "unknown key")
+        return web.json_response({"deleted": True})
 
     async def _credits_all(self, _request: web.Request) -> web.Response:
         return web.json_response(self.hub.ledger.as_dict())
@@ -363,8 +453,18 @@ class HttpApi:
                     "total_tokens": int(stats.get("prefill_tokens", 0))
                     + int(stats.get("decode_tokens", 0)),
                 },
+                # Where the request ran and why — the pool's receipt.
+                "dots": self._receipt(),
             }
         )
+
+    def _receipt(self) -> dict:
+        n = sum(1 for p in self.hub.participants.values() if p.compute and p.ready)
+        return {
+            "ran_on": f"{self.pool_name} · {n} {'Mac' if n == 1 else 'Macs'}",
+            "why": "ran in the pool this hub serves",
+            "credits": 0,
+        }
 
     async def _stream(
         self,

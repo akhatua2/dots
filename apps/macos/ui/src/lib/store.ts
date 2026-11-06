@@ -3,7 +3,10 @@
 import {
   askFrontier,
   getAccount,
+  createGatewayKey,
   getCatalog,
+  getGateway,
+  revokeGatewayKey,
   getConfig,
   getLend,
   getNodes,
@@ -11,6 +14,7 @@ import {
   getUiState,
   setUiState,
   getUsage,
+  onAskInline,
   onAskShown,
   onChat,
   onFileDrop,
@@ -23,6 +27,7 @@ import {
   type AppConfig,
   type ChatContext,
   type ChatEvent,
+  type GatewayView,
   type LendPatch,
   type LendState,
   type PoolNode,
@@ -46,17 +51,12 @@ export type Route =
   | { name: 'explore' }
   | { name: 'api' }
   | { name: 'profile' }
+  | { name: 'settings' }
+  | { name: 'ask' }
+  | { name: 'recap' }
   | { name: 'pool'; id: string }
-
-export interface ApiKey {
-  id: string
-  name: string
-  scope: string
-  tail: string
-  usage: string
-  meta: string
-  isNew?: boolean
-}
+  | { name: 'invite'; id: string }
+  | { name: 'boost'; id: string }
 
 export interface JoinMoment {
   stage: 'in' | 'unlock'
@@ -73,8 +73,10 @@ interface Local {
   joined: string[]
   endorsed: string[]
   pools: Pool[]
-  keys: ApiKey[]
   lendingTo: string | null
+  boosting: string[] // boosts this Mac has been counted in
+  glass: boolean | null // null: follow config.toml
+  recapSeen: boolean
 }
 
 export interface BridgeState {
@@ -84,6 +86,7 @@ export interface BridgeState {
   account: Account | null
   config: AppConfig | null
   catalog: Catalog | null
+  gateway: GatewayView | null
   usage: Usage | null
   lend: LendState | null
   nodes: PoolNode[]
@@ -103,8 +106,10 @@ const freshLocal = (): Local => ({
   joined: [],
   endorsed: [],
   pools: [],
-  keys: [],
   lendingTo: null,
+  boosting: [],
+  glass: null,
+  recapSeen: false,
 })
 
 const surface = document.documentElement.dataset.surface ?? 'main'
@@ -117,6 +122,7 @@ class BridgeStore {
     account: null,
     config: null,
     catalog: null,
+    gateway: null,
     usage: null,
     lend: null,
     nodes: [],
@@ -168,6 +174,7 @@ class BridgeStore {
     void onLend((lend) => this.set({ lend }))
     void onTrayShown(() => void this.refresh().then(() => this.loadState()))
     void onAskShown(() => this.askShown())
+    void onAskInline(() => this.set({ route: { name: 'ask' }, focusTick: this.state.focusTick + 1 }))
     void onFileDrop((paths) => void this.attachPath(paths[0]))
     void this.loadState().then(() => {
       if (surface === 'main') void this.nodesLoop()
@@ -187,7 +194,7 @@ class BridgeStore {
   async refreshNodes() {
     const nodes = await getNodes().catch(() => null)
     if (nodes) this.set({ nodes })
-    await this.refreshCatalog()
+    await Promise.all([this.refreshCatalog(), this.refreshGateway()])
   }
 
   /** User state (joined pools, endorsements, keys) lives in the backend. */
@@ -215,7 +222,6 @@ class BridgeStore {
       this.setLocal({
         seeded: true,
         joined: catalog.joined_default,
-        keys: catalog.keys_default.map((k) => ({ ...k })),
         lendingTo: l.lendingTo ?? (catalog.joined_default.includes('hub') ? 'hub' : null),
       })
     }
@@ -230,7 +236,7 @@ class BridgeStore {
           return
         }
         const [config, lend] = await Promise.all([getConfig(), getLend()])
-        document.documentElement.dataset.glass = config.glass ? 'on' : 'off'
+        document.documentElement.dataset.glass = (this.state.local.glass ?? config.glass) ? 'on' : 'off'
         this.set({ config, lend })
         if (s.ready) {
           const account = await getAccount().catch(() => null)
@@ -291,15 +297,16 @@ class BridgeStore {
     return [...(this.state.catalog?.pools ?? []), ...this.state.local.pools]
   }
 
-  join(poolId: string) {
+  /** Accept a pool (an Explore card or an invite) and start lending `gb` to it. */
+  join(poolId: string, gb?: number) {
     const l = this.state.local
     if (l.joined.includes(poolId)) return
     const pool = this.allPools().find((p) => p.id === poolId)
     if (!pool) return
     this.setLocal({ joined: [...l.joined, poolId], lendingTo: poolId })
-    void this.lendSet({ enabled: true })
-    const gb = this.state.lend?.gb ?? 0
-    const capacity = pool.capacity_gb + gb
+    void this.lendSet({ enabled: true, ...(gb ? { gb } : {}) })
+    const lent = gb ?? this.state.lend?.gb ?? 0
+    const capacity = pool.capacity_gb + lent
     const unlock = pool.can_run.find((m) => m.unlock_on_join && capacity >= m.at_gb)
     this.set({
       join: { stage: 'in', poolId, n: pool.macs + 1, capacity, poolName: pool.name },
@@ -322,6 +329,35 @@ class BridgeStore {
       }
       this.set({ join: null })
     })()
+  }
+
+  /** Count this Mac in on a boost, or take it back out. */
+  toggleBoost(boostId: string) {
+    const l = this.state.local
+    this.setLocal({
+      boosting: l.boosting.includes(boostId)
+        ? l.boosting.filter((id) => id !== boostId)
+        : [...l.boosting, boostId],
+    })
+  }
+
+  /** Stop lending to a pool and drop it from "Your pools". */
+  leavePool(poolId: string) {
+    const l = this.state.local
+    this.setLocal({
+      joined: l.joined.filter((id) => id !== poolId),
+      lendingTo: l.lendingTo === poolId ? null : l.lendingTo,
+    })
+    this.set({ route: { name: 'explore' } })
+  }
+
+  setGlass(on: boolean) {
+    this.setLocal({ glass: on })
+    document.documentElement.dataset.glass = on ? 'on' : 'off'
+  }
+
+  markRecapSeen() {
+    this.setLocal({ recapSeen: true })
   }
 
   createPool(name: string, model: string) {
@@ -359,26 +395,22 @@ class BridgeStore {
     })
   }
 
-  // --- API keys --------------------------------------------------------------
-  createKey(name: string, scope: string): string {
-    const bytes = crypto.getRandomValues(new Uint8Array(16))
-    const secret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-    const key = `dots_sk_live_${secret}`
-    const k: ApiKey = {
-      id: `k-${Date.now()}`,
-      name: name || 'Untitled',
-      scope,
-      tail: key.slice(-4),
-      usage: 'Not used yet',
-      meta: '',
-      isNew: true,
-    }
-    this.setLocal({ keys: [k, ...this.state.local.keys] })
-    return key
+  // --- API keys (made and checked by the local gateway in the bridge) ----------
+  async refreshGateway() {
+    const gateway = await getGateway().catch(() => null)
+    if (gateway) this.set({ gateway })
   }
 
-  revokeKey(id: string) {
-    this.setLocal({ keys: this.state.local.keys.filter((k) => k.id !== id) })
+  /** Returns the secret, which is shown once and never stored. */
+  async createKey(name: string, scopes: string[], monthlyLimit: number | null): Promise<string> {
+    const { secret } = await createGatewayKey(name, scopes, monthlyLimit)
+    await this.refreshGateway()
+    return secret
+  }
+
+  async revokeKey(id: string) {
+    await revokeGatewayKey(id)
+    await this.refreshGateway()
   }
 
   // --- chat ------------------------------------------------------------------
@@ -470,6 +502,12 @@ class BridgeStore {
     } catch (e) {
       this.setLastAssistant({ text: `Error: ${String(e)}`, pending: false }, { busy: false })
     }
+  }
+
+  /** Start a fresh question, keeping the screen. */
+  newQuestion() {
+    this.set({ msgs: [], busy: false, attachment: null, focusTick: this.state.focusTick + 1 })
+    this.finish()
   }
 
   // The Ask panel starts fresh each time it opens.

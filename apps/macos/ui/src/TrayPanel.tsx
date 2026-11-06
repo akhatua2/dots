@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from 'react'
 import { openMain } from './lib/bridge'
 import { autosize } from './lib/autosize'
 import { creditsOf, store, type BridgeState } from './lib/store'
-import { fmt, shortModel } from './lib/pools'
+import { fmt, shortModel } from './lib/format'
 import { Icon } from './components/Icon'
 import { Toggle } from './components/Toggle'
 

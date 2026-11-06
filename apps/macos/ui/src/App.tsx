@@ -1,33 +1,36 @@
 import { useState, useSyncExternalStore } from 'react'
-import { store } from './lib/store'
+import { store, type BridgeState } from './lib/store'
 import { Sidebar } from './components/Sidebar'
 import { JoinOverlay } from './components/JoinOverlay'
 import { Icon } from './components/Icon'
-import { Explore } from './screens/Explore'
-import { PoolPage } from './screens/PoolPage'
-import { Profile } from './screens/Profile'
-import { Api } from './screens/Api'
 import { MapPanel } from './MapPanel'
+import { ApiPage } from './screens/api/ApiPage'
+import { AskPage } from './screens/ask/AskPage'
+import { BoostPage } from './screens/boost/BoostPage'
+import { Explore } from './screens/explore/Explore'
+import { InvitePage } from './screens/invite/InvitePage'
+import { PoolPage } from './screens/pool/PoolPage'
+import { Profile } from './screens/profile/Profile'
+import { RecapPage } from './screens/recap/RecapPage'
+import { SettingsPage } from './screens/settings/SettingsPage'
 
 const HAS_MAP = !!import.meta.env.VITE_MAPBOX_TOKEN
 
 export function App() {
-  // All bridge state comes from the external store — no effects in here.
   const s = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const [showMap, setShowMap] = useState(false)
-  // Mount the map only after the first open, then keep it alive (visibility
-  // toggled) so the Mapbox instance is created once.
+  // Mount the map only after the first open, then keep it alive so the Mapbox
+  // instance (and its paid tile load) is created once.
   const [mapMounted, setMapMounted] = useState(false)
 
   function toggleMap() {
     setMapMounted(true)
-    setShowMap((v) => {
-      if (!v) void store.refreshNodes()
-      return !v
+    setShowMap((open) => {
+      if (!open) void store.refreshNodes()
+      return !open
     })
   }
 
-  const r = s.route
   return (
     <div className="flex h-full">
       <Sidebar s={s} />
@@ -46,17 +49,10 @@ export function App() {
         )}
         <div className="flex h-full">
           <div className="h-full min-w-0 flex-1 overflow-y-auto">
-            {r.name === 'explore' && <Explore s={s} />}
-            {r.name === 'pool' && <PoolPage s={s} id={r.id} />}
-            {r.name === 'profile' && <Profile s={s} />}
-            {r.name === 'api' && <Api s={s} />}
+            <Screen s={s} />
           </div>
           {HAS_MAP && mapMounted && (
-            <aside
-              className={`shrink-0 overflow-hidden border-l border-line transition-[width] duration-200 ${
-                showMap ? 'w-[420px]' : 'w-0'
-              }`}
-            >
+            <aside className={`shrink-0 overflow-hidden border-l border-line transition-[width] duration-200 ${showMap ? 'w-[420px]' : 'w-0'}`}>
               <div className="h-full w-[420px]">
                 <MapPanel nodes={s.nodes} visible={showMap} onClose={() => setShowMap(false)} />
               </div>
@@ -67,4 +63,29 @@ export function App() {
       {s.join && <JoinOverlay j={s.join} device={s.lend?.device.name ?? 'Mac'} />}
     </div>
   )
+}
+
+/** The screen for the current route. */
+function Screen({ s }: { s: BridgeState }) {
+  const route = s.route
+  switch (route.name) {
+    case 'explore':
+      return <Explore s={s} />
+    case 'pool':
+      return <PoolPage s={s} id={route.id} />
+    case 'invite':
+      return <InvitePage s={s} id={route.id} />
+    case 'boost':
+      return <BoostPage s={s} id={route.id} />
+    case 'recap':
+      return <RecapPage s={s} />
+    case 'profile':
+      return <Profile s={s} />
+    case 'api':
+      return <ApiPage s={s} />
+    case 'ask':
+      return <AskPage s={s} />
+    case 'settings':
+      return <SettingsPage s={s} />
+  }
 }

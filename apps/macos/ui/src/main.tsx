@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import '@fontsource-variable/geist'
 import '@fontsource/ibm-plex-mono/400.css'
 import './index.css'
 
@@ -15,7 +16,9 @@ try {
   label = location.hash.slice(1) || 'main'
 }
 document.documentElement.dataset.surface = label
-document.documentElement.dataset.glass = 'off' // until config says otherwise
+document.documentElement.dataset.glass = 'on' // until config says otherwise
+// Right-click would show the browser's own menu, which does not belong in the app.
+document.addEventListener('contextmenu', (e) => e.preventDefault())
 // The main window is designed on a larger canvas; scale it to native density.
 if (label === 'main') {
   try {

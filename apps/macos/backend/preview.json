@@ -27,7 +27,7 @@
       "blurb": "Researchers pooling Macs for long papers and messy data.",
       "lending": 212,
       "tps": 9,
-      "earn": 11,
+      "earn": 5,
       "friends": [
         "Maya",
         "Jun"
@@ -70,7 +70,7 @@
       "blurb": "Idle Macs across Berlin, quick for anyone nearby.",
       "lending": 61,
       "tps": 14,
-      "earn": 9,
+      "earn": 4,
       "friends": [],
       "endorsements": 640,
       "endorsements_label": "640",
@@ -108,7 +108,7 @@
       "blurb": "Builders sharing a coding model around the clock.",
       "lending": 94,
       "tps": 13,
-      "earn": 10,
+      "earn": 4,
       "friends": [
         "Theo"
       ],
@@ -148,7 +148,7 @@
       "blurb": "Editors' Mac Studios, lent out between renders.",
       "lending": 38,
       "tps": 12,
-      "earn": 14,
+      "earn": 6,
       "friends": [],
       "endorsements": 510,
       "endorsements_label": "510",
@@ -185,7 +185,7 @@
       "blurb": "Novelists and editors, with room for a whole manuscript.",
       "lending": 9,
       "tps": 24,
-      "earn": 7,
+      "earn": 3,
       "friends": [
         "Priya"
       ],
@@ -220,7 +220,7 @@
       "blurb": "Campus Macs, lent between classes.",
       "lending": 6,
       "tps": 19,
-      "earn": 5,
+      "earn": 2,
       "friends": [],
       "note": "New this week. Back it early.",
       "endorsements": 42,
@@ -309,6 +309,129 @@
           "at_gb": 48
         }
       ]
+    },
+    {
+      "id": "late-night-lab",
+      "name": "Late Night Lab",
+      "model": "Llama 3.3 70B",
+      "macs": 2,
+      "blurb": "Sam and Ana's Macs, for code at night.",
+      "lending": 2,
+      "tps": 19,
+      "earn": 2,
+      "friends": [
+        "Sam",
+        "Ana"
+      ],
+      "endorsements": 0,
+      "endorsements_label": "0",
+      "tags": [],
+      "public": false,
+      "capacity_gb": 120,
+      "lenders": [
+        "S",
+        "A"
+      ],
+      "can_run": [
+        {
+          "name": "Llama 3.3 70B",
+          "at_gb": 48
+        },
+        {
+          "name": "Qwen3 235B",
+          "at_gb": 136,
+          "unlock_on_join": true,
+          "params": "235 billion"
+        },
+        {
+          "name": "DeepSeek V3.1",
+          "at_gb": 396,
+          "params": "671 billion"
+        }
+      ],
+      "detail": {
+        "level": 3,
+        "next_level": 4,
+        "level_total_gb": 136,
+        "nights": 13,
+        "runs_tonight": 480,
+        "tokens": "202K",
+        "tps_live": 19,
+        "live_no": 13,
+        "owner": "Sam",
+        "layers": "Runs layers 75 to 80",
+        "members": [
+          {
+            "name": "S",
+            "live": true
+          },
+          {
+            "name": "A",
+            "live": true
+          }
+        ],
+        "boost": {
+          "id": "deepseek-boost",
+          "title": "DeepSeek Boost",
+          "day": "SAT",
+          "date": "24",
+          "long_date": "Saturday, October 24",
+          "window": "2 to 6 PM",
+          "planned_by": "Sam",
+          "model": "DeepSeek V3.1",
+          "goal_gb": 396,
+          "pledged_gb": 296,
+          "boosters": [
+            {
+              "name": "S",
+              "gb": 96,
+              "in": true
+            },
+            {
+              "name": "A",
+              "gb": 24,
+              "in": true
+            },
+            {
+              "name": "N",
+              "gb": 18,
+              "in": false
+            },
+            {
+              "name": "T",
+              "gb": 96,
+              "in": false
+            },
+            {
+              "name": "M",
+              "gb": 48,
+              "in": false
+            },
+            {
+              "name": "P",
+              "gb": 14,
+              "in": false
+            }
+          ]
+        },
+        "activity": [
+          {
+            "who": "S",
+            "text": "Sam thanked your MacBook Air",
+            "when": "12:07 AM"
+          },
+          {
+            "who": "You",
+            "text": "You joined with your MacBook Air",
+            "when": "12:07 AM"
+          },
+          {
+            "who": "+",
+            "text": "Passed a million tokens",
+            "when": "Oct 17"
+          }
+        ]
+      }
     }
   ],
   "badges": [
@@ -387,23 +510,147 @@
   ],
   "request_split": [
     {
-      "label": "Your pools",
-      "pct": 71,
+      "label": "This Mac",
+      "pct": 1,
       "note": "free",
-      "shade": "#d6d6d6"
+      "shade": "#f0f0f0"
+    },
+    {
+      "label": "Your pools",
+      "pct": 64,
+      "note": "free",
+      "shade": "#d0d0d0"
     },
     {
       "label": "Public pools",
-      "pct": 19,
-      "note": "186 credits",
+      "pct": 25,
+      "note": "144 credits",
       "shade": "#8c8c8c"
     },
     {
       "label": "Frontier models",
-      "pct": 10,
-      "note": "426 credits",
+      "pct": 11,
+      "note": "150 credits",
       "shade": "#5e5e5e"
     }
   ],
-  "_note": "Preview content from Sourabh's design, served by the bridge so the UI is fully populated before the hub has these features. Real hub data is merged in on top (see bridge.catalog). Set preview_data = false in config.toml to drop it."
+  "_note": "Preview content from Sourabh's design, served by the bridge so the UI is fully populated before the hub has these features. Real hub data is merged in on top (see bridge.catalog). Set preview_data = false in config.toml to drop it.",
+  "invite": {
+    "from": "Sam",
+    "pool_id": "late-night-lab",
+    "text": "Your Mac would unlock Qwen3 235B for everyone in it."
+  },
+  "recap": {
+    "pool_id": "late-night-lab",
+    "window": "10:07 PM to 12:07 AM",
+    "credits": 4,
+    "lent": "2 h",
+    "runs": 325,
+    "tokens": "136K",
+    "thanks": "Sam thanked your MacBook Air",
+    "number": 13,
+    "date": "October 18",
+    "night": {
+      "from": "10 PM",
+      "ticks": [
+        "10 PM",
+        "12 AM",
+        "2 AM",
+        "4 AM"
+      ],
+      "rows": [
+        {
+          "who": "Sam",
+          "start": 0.0,
+          "end": 1.0,
+          "label": "6 h 4 m"
+        },
+        {
+          "who": "Ana",
+          "start": 0.14,
+          "end": 0.9,
+          "label": "4 h 54 m"
+        },
+        {
+          "who": "You",
+          "start": 0.0,
+          "end": 0.32,
+          "label": "2 h",
+          "mine": true
+        }
+      ]
+    }
+  },
+  "api_extra": {
+    "saved": {
+      "amount": "$2.30",
+      "against": "Claude Opus 5.5",
+      "requests": 146,
+      "free_pct": 64,
+      "credits_spent": 294,
+      "billed": "$0.03",
+      "with_counts": "146 of 146"
+    },
+    "split": [
+      {
+        "label": "This Mac",
+        "pct": 1,
+        "note": "free",
+        "shade": "#f0f0f0"
+      },
+      {
+        "label": "Your pools",
+        "pct": 64,
+        "note": "free",
+        "shade": "#d0d0d0"
+      },
+      {
+        "label": "Public pools",
+        "pct": 25,
+        "note": "144 credits",
+        "shade": "#8c8c8c"
+      },
+      {
+        "label": "Frontier models",
+        "pct": 11,
+        "note": "150 credits",
+        "shade": "#5e5e5e"
+      }
+    ],
+    "recent": [
+      {
+        "at": "12:32 AM",
+        "key": "My scripts",
+        "ran": "Anthropic \u00b7 Claude Opus 5.5",
+        "tokens": "3,200 in \u00b7 800 out",
+        "cost": "$0.03",
+        "saved": "saved $0"
+      },
+      {
+        "at": "12:32 AM",
+        "key": "My scripts",
+        "ran": "Anthropic \u00b7 Claude Opus 5.5",
+        "tokens": "1,500 in \u00b7 600 out",
+        "cost": "13 credits",
+        "saved": "saved $0.0050"
+      },
+      {
+        "at": "12:32 AM",
+        "key": "My scripts",
+        "ran": "Open Science \u00b7 Kimi K2",
+        "tokens": "6,100 in \u00b7 900 out",
+        "cost": "4 credits",
+        "saved": "saved $0.04"
+      },
+      {
+        "at": "12:32 AM",
+        "key": "My scripts",
+        "ran": "Studio 9 \u00b7 Qwen3 235B",
+        "tokens": "2,400 in \u00b7 610 out",
+        "cost": "free",
+        "saved": "saved $0.02",
+        "note": "This Mac didn't answer, so it went to Studio 9."
+      }
+    ]
+  }
 }

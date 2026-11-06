@@ -1,168 +1,103 @@
 import { useState } from 'react'
-import { openAsk } from '../lib/bridge'
-import { creditsOf, store, type BridgeState, type Route } from '../lib/store'
-import { fmt, poolView, shortModel } from '../lib/pools'
+import { store, type BridgeState, type Route } from '../lib/store'
+import { isLiveIn, joinedPools } from '../lib/selectors'
 import { Icon } from './Icon'
-import { Swirl } from './Swirl'
+import { PoolMark } from './Fingerprint'
+import { LiveCard } from './sidebar/LiveCard'
+import { NewPoolForm } from './sidebar/NewPoolForm'
 
-const NAV: { name: Route['name'] | 'ask'; label: string; icon?: string; hint?: string }[] = [
-  { name: 'explore', label: 'Explore', icon: 'compass' },
-  { name: 'ask', label: 'Ask', hint: '⌥ Space' },
-  { name: 'api', label: 'API', icon: 'braces' },
-  { name: 'profile', label: 'Profile', icon: 'user' },
+interface NavEntry {
+  label: string
+  icon?: string
+  hint?: string
+  route: Route
+}
+
+const NAV: NavEntry[] = [
+  { label: 'Explore', icon: 'compass', route: { name: 'explore' } },
+  { label: 'Ask', hint: '⌥ Space', route: { name: 'ask' } },
+  { label: 'API', icon: 'braces', route: { name: 'api' } },
+  { label: 'Profile', icon: 'user', route: { name: 'profile' } },
 ]
+
+const rowBase = 'flex h-[34px] w-full items-center gap-3 rounded-[9px] px-3 text-[15px] transition-colors'
 
 export function Sidebar({ s }: { s: BridgeState }) {
   const [creating, setCreating] = useState(false)
-  const all = [...(s.catalog?.pools ?? []), ...s.local.pools]
-  const pools = all.filter((p) => s.local.joined.includes(p.id))
-  const lentGb = s.lend?.gb ?? 0
-  const credits = creditsOf(s.usage, s.config)
-  const lendingPool = s.local.lendingTo
-    ? all.find((p) => p.id === s.local.lendingTo)?.name
-    : s.config?.pool_name
-  const lending = !!s.lend?.lending
+  const pools = joinedPools(s)
 
   return (
     <aside className="sidebar flex w-[250px] shrink-0 flex-col">
       <div data-tauri-drag-region className="h-[38px] shrink-0" />
-      <div className="px-5 pb-[18px] pt-1 text-[23px] font-bold leading-none tracking-[-0.03em]">
+      <div className="px-5 pb-[18px] pt-1 text-[26px] font-bold leading-none tracking-[-0.03em]">
         dots<span className="text-signal">.</span>
       </div>
 
       <nav className="space-y-0.5 px-2.5">
-        {NAV.map((n) => {
-          const active = n.name !== 'ask' && s.route.name === n.name
-          return (
-            <button
-              key={n.name}
-              onClick={() => (n.name === 'ask' ? void openAsk() : store.nav({ name: n.name } as Route))}
-              className={`flex h-[34px] w-full items-center gap-3 rounded-[9px] px-3 text-[15px] transition-colors ${
-                active ? 'bg-active text-ink' : 'text-[#cfcfcf] hover:bg-active/50'
-              }`}
-            >
-              {n.icon ? (
-                <Icon name={n.icon} size={16} className="text-dim" />
-              ) : (
-                <span className="grid size-4 place-items-center">
-                  <span className="size-[7px] rounded-full bg-signal" />
-                </span>
-              )}
-              <span className="flex-1 text-left">{n.label}</span>
-              {n.hint && <span className="text-[13px] text-faint">{n.hint}</span>}
-            </button>
-          )
-        })}
+        {NAV.map((entry) => (
+          <NavRow key={entry.label} entry={entry} s={s} />
+        ))}
       </nav>
 
-      <p className="label px-5 pb-2 pt-7 !text-[12px]">Your pools</p>
+      <p className="px-5 pb-2 pt-7 text-[12.5px] text-dim">Your pools</p>
       <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2.5">
-        {pools.map((raw) => {
-          const p = poolView(raw, s.local.lendingTo === raw.id, lentGb)
-          const active = s.route.name === 'pool' && s.route.id === p.id
+        {pools.map((pool) => {
+          const active = s.route.name === 'pool' && s.route.id === pool.id
           return (
             <button
-              key={p.id}
-              onClick={() => store.nav({ name: 'pool', id: p.id })}
-              className={`flex w-full items-center gap-3 rounded-[9px] px-2.5 py-[7px] text-left transition-colors ${
-                active ? 'bg-active' : 'hover:bg-active/50'
-              }`}
+              key={pool.id}
+              onClick={() => store.nav({ name: 'pool', id: pool.id })}
+              className={`${rowBase} !h-auto !px-2.5 py-[7px] text-left ${active ? 'bg-active' : 'hover:bg-active/50'}`}
             >
-              <Swirl seed={p.id} size={31} cells={26} />
-              <span className="min-w-0">
-                <span className="block truncate text-[14.5px] font-semibold leading-tight">{p.name}</span>
-                <span className="block truncate text-[11.5px] leading-tight text-dim">
-                  {p.macs} {p.macs === 1 ? 'Mac' : 'Macs'} · {shortModel(p.model)}
-                </span>
-              </span>
+              <PoolMark seed={pool.id} size={30} />
+              <span className="flex-1 truncate text-[15px] font-medium">{pool.name}</span>
+              {isLiveIn(s, pool.id) && <span className="size-[7px] rounded-full bg-signal" />}
             </button>
           )
         })}
         {creating ? (
-          <NewPool models={s.catalog?.models ?? []} onDone={() => setCreating(false)} />
+          <NewPoolForm models={s.catalog?.models ?? []} onDone={() => setCreating(false)} />
         ) : (
-          <button
-            onClick={() => setCreating(true)}
-            className="flex h-[34px] w-full items-center gap-3 rounded-[9px] px-2.5 text-[14.5px] text-[#cfcfcf] hover:bg-active/50"
-          >
-            <Icon name="plus" size={16} className="text-dim" /> Start a pool
+          <button onClick={() => setCreating(true)} className={`${rowBase} text-[#cfcfcf] hover:bg-active/50`}>
+            <Icon name="plus" size={16} className="text-dim" /> Start a Pool
           </button>
         )}
       </div>
 
-      <div className="glass-card m-3 rounded-[14px] border border-line bg-card px-3.5 py-3">
-        <div className="flex items-start gap-2.5">
-          {lending ? (
-            <span className="mt-[7px] size-2 rounded-full bg-signal" />
-          ) : (
-            <span className="mt-[7px] size-2 rounded-full border border-dim" />
-          )}
-          <div className="min-w-0">
-            <p className="text-[14px] font-semibold leading-tight">
-              {lending ? `Lending ${lentGb} GB` : 'Not lending'}
-            </p>
-            <p className="truncate text-[12px] text-dim">
-              {s.lend?.device.name ?? 'This Mac'}
-              {lending && lendingPool ? ` · ${lendingPool}` : ''}
-            </p>
-          </div>
-        </div>
-        <div className="mt-2.5 flex items-start gap-2.5">
-          <Icon name="credits" size={16} className="mt-0.5" />
-          <div>
-            <p className="text-[14px] font-semibold leading-tight">
-              {credits.balance === null ? '—' : fmt(credits.balance)} credits
-            </p>
-            <p className="text-[12px] text-dim">
-              {credits.perHour !== null && credits.perHour >= 0.5
-                ? `+${fmt(credits.perHour)} an hour`
-                : 'earns while you lend'}
-            </p>
-          </div>
-        </div>
-      </div>
+      <button
+        onClick={() => store.nav({ name: 'settings' })}
+        className={`${rowBase} mx-2.5 !w-auto ${s.route.name === 'settings' ? 'bg-active' : 'text-[#cfcfcf] hover:bg-active/50'}`}
+      >
+        <Icon name="gear" size={16} className="text-dim" />
+        <span className="flex-1 text-left">Settings</span>
+        <span className="text-[13px] text-faint">⌘,</span>
+      </button>
+      <LiveCard s={s} />
     </aside>
   )
 }
 
-function NewPool({ models, onDone }: { models: string[]; onDone: () => void }) {
-  const [name, setName] = useState('')
-  const [model, setModel] = useState(models[0] ?? '')
-  function create() {
-    if (!name.trim()) return
-    store.createPool(name.trim(), model)
-    onDone()
-  }
+function NavRow({ entry, s }: { entry: NavEntry; s: BridgeState }) {
+  const { label, icon, hint, route } = entry
+  const active = s.route.name === route.name
+  // The orange dot beside Profile means there is a recap you have not opened.
+  const hasNews = label === 'Profile' && !s.local.recapSeen && !!s.catalog?.recap
+
   return (
-    <div className="space-y-2 rounded-lg bg-active/60 p-2.5">
-      <input
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') create()
-          if (e.key === 'Escape') onDone()
-        }}
-        placeholder="Pool name"
-        className="w-full rounded-md bg-input px-2.5 py-1.5 text-[13px] outline-none placeholder:text-faint"
-      />
-      <select
-        value={model}
-        onChange={(e) => setModel(e.target.value)}
-        className="w-full rounded-md bg-input px-2 py-1.5 text-[13px] outline-none"
-      >
-        {models.map((m) => (
-          <option key={m}>{m}</option>
-        ))}
-      </select>
-      <div className="flex gap-2">
-        <button onClick={create} className="flex-1 rounded-md bg-signal py-1.5 text-[13px] font-semibold text-[#1a0a03]">
-          Create
-        </button>
-        <button onClick={onDone} className="flex-1 rounded-md bg-btn py-1.5 text-[13px]">
-          Cancel
-        </button>
-      </div>
-    </div>
+    <button
+      onClick={() => store.nav(route)}
+      className={`${rowBase} ${active ? 'bg-active text-ink' : 'text-[#cfcfcf] hover:bg-active/50'}`}
+    >
+      {icon ? (
+        <Icon name={icon} size={16} className="text-dim" />
+      ) : (
+        <span className="grid size-4 place-items-center">
+          <span className="size-[7px] rounded-full bg-signal" />
+        </span>
+      )}
+      <span className="flex-1 text-left">{label}</span>
+      {hasNews && <span className="size-[7px] rounded-full bg-signal" />}
+      {hint && <span className="text-[13px] text-faint">{hint}</span>}
+    </button>
   )
 }

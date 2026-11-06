@@ -44,11 +44,13 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 import uuid
 from collections import deque
 
 from dots.system.util import (
+    dots_home,
     load_dotenv_into_env,
     load_account_alias,
     load_account_email,
@@ -56,6 +58,7 @@ from dots.system.util import (
     load_or_create_account,
 )
 from dots.cli import DEFAULT_HUB
+from gateway import Gateway
 from dots.distributed.worker import PoolNotReadyError, Worker
 
 # Single source of truth for non-secret defaults — never hardcode these in
@@ -154,6 +157,7 @@ async def pool_nodes() -> dict:
                 "ready": n.get("ready"),
                 "backend": n.get("backend"),
                 "device": n.get("device"),  # populated once workers advertise it
+                "layer_range": n.get("layer_range"),
                 "lat": geo.get("lat"),
                 "lng": geo.get("lng"),
                 "city": geo.get("city"),
@@ -240,6 +244,7 @@ class Bridge:
             if self.chat is not None:
                 await self.chat._disconnect()
         lender.stop()
+        await gateway.stop()
 
 
 
@@ -248,7 +253,7 @@ class Bridge:
 # (plugged in / not while the Mac is in use), and a one-hour pause. The local
 # worker subprocess is started/stopped/resized to match.
 
-_DOTS_DIR = pathlib.Path.home() / ".dots"
+_DOTS_DIR = dots_home()
 _LEND_PATH = _DOTS_DIR / "lend.json"
 _LEND_DEFAULTS = {
     "enabled": True,
@@ -427,6 +432,36 @@ class Lender:
 
 lender = Lender()
 
+
+gateway = Gateway(
+    _DOTS_DIR / "gateway.json",
+    port=int(_conf_num("gateway_port", "DOTS_GATEWAY_PORT")),
+    upstream=lambda: _conf("hub_http", "DOTS_HUB_HTTP"),
+    token=lambda: os.environ.get("DOTS_JOIN_TOKEN", ""),
+    model=MODEL,
+    pool_name=_conf("pool_name", "DOTS_POOL_NAME"),
+    price_in=_conf_num("compare_usd_per_mtok_in", "DOTS_COMPARE_IN"),
+    price_out=_conf_num("compare_usd_per_mtok_out", "DOTS_COMPARE_OUT"),
+)
+
+
+def gateway_view() -> dict:
+    """The API page's data: real numbers from the local gateway, with the design's
+    sample requests filling in until there has been real traffic."""
+    view = gateway.view()
+    view["compare_label"] = _conf("frontier_label", "DOTS_FRONTIER_LABEL")
+    if not view["requests"] and _conf_bool("preview_data", "DOTS_PREVIEW_DATA"):
+        sample = json.loads((pathlib.Path(__file__).with_name("preview.json")).read_text()).get("api_extra", {})
+        view["sample"] = sample
+    return view
+
+
+def _invite_link() -> str:
+    """What a friend needs to join this pool: the hub address and the join token.
+    Access travels in the link, so nothing is built into the app."""
+    token = os.environ.get("DOTS_JOIN_TOKEN", "")
+    return "dots://join?" + urllib.parse.urlencode({"hub": DEFAULT_HUB, "token": token})
+
 # What the user did in the UI (pools joined, endorsements, keys made). Kept by
 # the backend so the frontend holds no state of its own; this is the seam where
 # the hub takes over once it serves these features.
@@ -496,8 +531,12 @@ async def catalog() -> dict:
         "pools": [real_pool],
         "badges": [],
         "profile": {"questions_helped": 0, "since": ""},
-        "key_scopes": [],
-        "default_monthly_limit": 0,
+        "key_scopes": [
+            {"id": "pools", "title": "Your pools", "body": "Private, and free for you", "default": True},
+            {"id": "public", "title": "Public pools", "body": "Spends credits", "default": False},
+            {"id": "frontier", "title": "Frontier models", "body": "Spends credits, and leaves your pools", "default": False},
+        ],
+        "default_monthly_limit": int(_conf_num("default_monthly_limit", "DOTS_DEFAULT_MONTHLY_LIMIT")),
         "keys_default": (
             [{"id": "join", "name": "Join token", "scope": "Your pool", "tail": token[-4:],
               "usage": "", "meta": ""}] if token else []
@@ -552,7 +591,9 @@ def _frontier_call(prompt: str, context: dict | None) -> dict:
     }
 
 
-async def build_receipt(private: bool, model_id: str | None, tps: float | None) -> dict:
+async def build_receipt(
+    private: bool, model_id: str | None, tps: float | None, tokens_in: int = 0, tokens_out: int = 0
+) -> dict:
     """Which Macs answered, and why it ran there. Only states what is known."""
     try:
         nodes = (await pool_nodes())["nodes"]
@@ -568,7 +609,8 @@ async def build_receipt(private: bool, model_id: str | None, tps: float | None) 
         reasons.append(
             {"icon": "lock", "text": "It includes a personal document, so it stayed in pools you're in."}
         )
-    reasons.append({"icon": "dots", "text": f"You're in {pool}, so it ran there free."})
+    reasons.append({"icon": "users", "text": f"You're in {pool}, so it ran there free."})
+    reasons.append({"icon": "globe", "text": "Answered through the dots hub."})
     return {
         "pool": pool,
         "model_id": model_id,
@@ -576,6 +618,8 @@ async def build_receipt(private: bool, model_id: str | None, tps: float | None) 
         "macs": macs,
         "private": private,
         "free": True,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
         "reasons": reasons,
     }
 
@@ -630,7 +674,13 @@ async def handle_chat(prompt: str, max_tokens: int, context: dict | None = None)
                     tps = round(decode / elapsed, 1)
             if tps:
                 last_tps["value"] = tps
-            receipt = await build_receipt(bool(attached), stats.get("model_id"), tps)
+            receipt = await build_receipt(
+                bool(attached),
+                stats.get("model_id"),
+                tps,
+                int(stats.get("prefill_tokens") or 0),
+                decode,
+            )
             await emit(
                 {
                     "chat": "done",
@@ -706,6 +756,18 @@ async def dispatch(req: dict) -> None:
         elif method == "frontier":
             p = req.get("params") or {}
             data = await asyncio.to_thread(_frontier_call, p.get("prompt", ""), p.get("context"))
+        elif method == "gateway":
+            data = gateway_view()
+        elif method == "gateway_create_key":
+            p = req.get("params") or {}
+            record, secret = gateway.create_key(
+                str(p.get("name", "")), list(p.get("scopes") or ["pools"]), p.get("monthly_limit") or None
+            )
+            data = {"key": record, "secret": secret}
+        elif method == "gateway_revoke":
+            data = {"deleted": gateway.revoke_key(str((req.get("params") or {}).get("id", "")))}
+        elif method == "invite_link":
+            data = {"link": _invite_link()}
         elif method == "ui_state_get":
             data = _ui_state_get()
         elif method == "ui_state_set":
@@ -730,6 +792,8 @@ async def main() -> None:
     # Connect to the hub in the background so we answer stdin immediately; the
     # UI polls "status" until ready.
     asyncio.create_task(bridge.start())
+    with contextlib.suppress(OSError):  # port taken: the API page says it is not running
+        await gateway.start()
 
     reader = asyncio.StreamReader()
     await asyncio.get_running_loop().connect_read_pipe(

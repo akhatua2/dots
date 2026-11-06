@@ -24,7 +24,7 @@
   --color-warn: #e5484d;
 
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
 }
 
 html,
@@ -35,10 +35,12 @@ body,
 
 body {
   margin: 0;
+  overscroll-behavior: none;
   color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: 13px;
-  letter-spacing: -0.003em;
+  letter-spacing: -0.006em;
+  font-feature-settings: 'ss01', 'cv11';
   background-color: var(--color-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -58,11 +60,23 @@ button {
   cursor: default;
   font: inherit;
 }
-button:focus,
-button:focus-visible,
-input:focus,
-input:focus-visible {
+/* Mouse clicks leave no ring; keyboard focus gets ours. */
+:focus {
   outline: none;
+}
+:focus-visible {
+  outline: 2px solid rgba(255, 90, 31, 0.75);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+/* Text fields show their caret instead of a ring. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+input,
+textarea {
+  caret-color: var(--color-signal);
 }
 input,
 textarea {
@@ -463,11 +477,52 @@ textarea {
 [data-glass='on'] .sidebar {
   --color-dim: #a9a9af;
   --color-faint: #7d7d84;
-  background: rgba(16, 16, 18, 0.46);
+  background: rgba(12, 12, 14, 0.84);
   border-right: 1px solid rgba(255, 255, 255, 0.07);
 }
 [data-glass='on'] .sidebar .glass-card {
   background: rgba(255, 255, 255, 0.07);
   border-color: rgba(255, 255, 255, 0.13);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* Sourabh's grain: a fine film noise over every surface, fixed so it never
+   scrolls. Kept very low so it reads as texture, not pattern. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0.07;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 1.1 -0.1'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* Numbers in stats and credits line up from one row to the next. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+h1,
+h2 {
+  text-wrap: balance;
+}
+
+img,
+canvas,
+svg {
+  -webkit-user-drag: none;
+}
+
+/* A row of evenly spaced dots, used for the night timeline. */
+.dot-row {
+  background-image: radial-gradient(circle, currentColor 1.1px, transparent 1.6px);
+  background-size: 5px 8px;
+  background-repeat: repeat-x;
+  background-position: left center;
+}
+
+/* No lone word on the last line of a paragraph. */
+p {
+  text-wrap: pretty;
 }

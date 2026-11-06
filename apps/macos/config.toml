@@ -43,4 +43,15 @@ frontier_url = "https://api.anthropic.com/v1/messages"  # override: DOTS_FRONTIE
 
 # Liquid-glass look: translucent sidebar and floating panels over native macOS
 # vibrancy. false (default) = the flat graphite look from the mockups.   override: DOTS_GLASS
-glass = false
+glass = true
+
+# The local OpenAI-compatible endpoint for apps on this Mac.   override: DOTS_GATEWAY_PORT
+gateway_port = 8787
+
+# "Saved this month" compares what ran for free against this model's price.
+# USD per million tokens, input and output.   override: DOTS_COMPARE_IN / DOTS_COMPARE_OUT
+compare_usd_per_mtok_in = 5.0
+compare_usd_per_mtok_out = 25.0
+
+# Credits a new API key may spend per month by default.   override: DOTS_DEFAULT_MONTHLY_LIMIT
+default_monthly_limit = 500
