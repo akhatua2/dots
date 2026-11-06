@@ -1,10 +1,11 @@
-"""Speculative decoding: a small draft model proposes, the pool verifies several tokens in one pass.
+"""Speculative decoding: something cheap guesses, the pool verifies several tokens in one pass.
 
 Across a pool of Macs every pass of the big model costs a network round trip per hop, so decoding is
-bound by latency, not by the GPUs. A draft model on the head Mac proposes `k` tokens locally, where
-they cost no network at all. The pool then runs the current token and the `k` proposals through every
-layer in a single pass, one round trip for all of them, and keeps the proposals for as long as they
-match what the big model itself samples.
+bound by latency, not by the GPUs. A draft on the head Mac proposes `k` tokens locally, where they cost
+no network at all: the words that followed the last few earlier in the conversation, a small model with
+the same tokenizer, or the big model's own draft head (`backends/mlx/mtp.py`). The pool then runs the
+current token and the `k` proposals through every layer in a single pass, one round trip for all of
+them, and keeps the proposals for as long as they match what the big model itself samples.
 
 Verification is by sampling: at each position the big model samples a token, and a proposal is kept
 only when it is that token. Every token we emit is therefore a sample from the big model given the
@@ -23,19 +24,77 @@ from .autoregressive import AutoregressiveGeneration
 from .base import GenerationRequest, GenerationResult, GenerationStrategy
 
 if TYPE_CHECKING:
-    from ..backends.base import BackendRuntime
+    from ..backends.base import BackendRuntime, PrefillOutput
+
+
+class Draft:
+    """What guesses ahead for a turn: a small model of its own, or the big model's own draft head."""
+
+    # How many of the prompt's last hidden states the big model should keep for it at prefill
+    context_rows = 1
+    # The most it guesses before a check, unless DOTS_DRAFT_TOKENS says otherwise
+    most_guesses = 4
+
+    @property
+    def ready(self) -> bool:
+        return True
+
+    async def start(self, conv_id: str, request: GenerationRequest, prefill: "PrefillOutput") -> None:
+        """The big model has read the prompt."""
+
+    async def propose(self, conv_id: str, token: int, k: int, recent: list[int] = (),
+                      penalty: float = 1.0) -> list[int]:
+        """Its k guesses for what follows `token`, greedy, with the big model's repetition `penalty` on the
+        `recent` tokens (`token` among them) and on its own guesses."""
+        raise NotImplementedError
+
+    async def follow(self, conv_id: str, emitted: list[int], proposal: list[int], proposed: bool) -> None:
+        """A check kept `emitted` (the round's token, then the guesses that held). `proposed` is False when the
+        guesses were looked up instead and this draft sat the round out."""
+
+    def finish(self, conv_id: str) -> None:
+        """The turn is over."""
+
+
+class ModelDraft(Draft):
+    """A small model with the big one's tokenizer, run whole on the head Mac, with a cache of its own."""
+
+    def __init__(self, runtime: "BackendRuntime") -> None:
+        self.runtime = runtime
+
+    @property
+    def ready(self) -> bool:
+        return self.runtime.supports_speculation
+
+    async def start(self, conv_id, request, prefill) -> None:
+        await self.runtime.prefill(conv_id, request.history, template_kwargs=request.template_kwargs)
+
+    async def propose(self, conv_id, token, k, recent=(), penalty=1.0):
+        # Greedy whatever the temperature: the big model decides what is kept
+        return await self.runtime.propose(conv_id, token, k, recent, penalty)
+
+    async def follow(self, conv_id, emitted, proposal, proposed) -> None:
+        if not proposed:  # it reads what was emitted, in one pass
+            await self.runtime.decode_many(conv_id, emitted)
+        elif len(emitted) <= len(proposal):  # it was fed the round's token and all but its last guess
+            self.runtime.trim(conv_id, len(proposal) - len(emitted))
+        else:  # all its guesses kept: it never fed its last one, so it catches up
+            await self.runtime.decode_one(conv_id, proposal[-1])
+
+    def finish(self, conv_id) -> None:
+        self.runtime.reset_conversation(conv_id)
 
 
 class SpeculativeGeneration(GenerationStrategy):
     name = "speculative"
 
-    def __init__(self, draft: "BackendRuntime | None", draft_tokens: int = 4, adaptive: bool = False,
+    def __init__(self, draft: "Draft | BackendRuntime | None", draft_tokens: int = 4, adaptive: bool = False,
                  lookup: bool = False) -> None:
         if draft_tokens < 1:
             raise ValueError("draft_tokens must be at least 1")
         if draft is None and not lookup:
             raise ValueError("without a draft model, guesses can only be looked up")
-        self.draft = draft
+        self.draft = draft if draft is None or isinstance(draft, Draft) else ModelDraft(draft)
         self.k = draft_tokens
         # Adaptive: guess up to `draft_tokens`, fewer after a check that threw guesses away (a check
         # costs more the more it checks), more again after one that kept them all.
@@ -46,24 +105,27 @@ class SpeculativeGeneration(GenerationStrategy):
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         target, draft = request.runtime, self.draft
-        if not (target.supports_speculation and (draft is None or draft.supports_speculation)):
+        if not (target.supports_speculation and (draft is None or draft.ready)):
             return await AutoregressiveGeneration().generate(request)
 
         conv = request.conv_id
         prefill = await target.prefill(conv, request.history, forward_hidden=request.forward_hidden,
-                                       template_kwargs=request.template_kwargs)
+                                       template_kwargs=request.template_kwargs,
+                                       keep_rows=draft.context_rows if draft is not None else 1)
         if prefill.logits_row is None:
             return GenerationResult(text="", stats={"prefill_tokens": 0, "decode_tokens": 0,
                                                     "prefill_ms": 0.0, "elapsed_ms": 0.0})
         if draft is not None:
-            await draft.prefill(conv, request.history, template_kwargs=request.template_kwargs)
+            await draft.start(conv, request, prefill)
 
         out: list[int] = []
 
-        def sample(runtime: "BackendRuntime", logits_row, before: list[int]) -> int:
+        def window(before: list[int]) -> list[int]:
             ctx = request.repetition_context
-            recent = before[-ctx:] if ctx > 0 else before
-            return runtime.sample_token(logits_row, request.temperature, recent_tokens=recent,
+            return before[-ctx:] if ctx > 0 else before
+
+        def sample(runtime: "BackendRuntime", logits_row, before: list[int]) -> int:
+            return runtime.sample_token(logits_row, request.temperature, recent_tokens=window(before),
                                         repetition_penalty=request.repetition_penalty)
 
         token = sample(target, prefill.logits_row, out)
@@ -92,9 +154,7 @@ class SpeculativeGeneration(GenerationStrategy):
             elif draft is None:  # nothing to look up and no draft: this round is one token, as without guessing
                 proposal = []
             else:
-                # The draft guesses k tokens after `token`, feeding `token` and its own guesses as it goes.
-                # Its guesses are greedy whatever the temperature: the big model decides what is kept.
-                proposal = await draft.propose(conv, token, k)
+                proposal = await draft.propose(conv, token, k, window(out + [token]), request.repetition_penalty)
             n_guess = len(proposal)
             proposed += n_guess
             if request.on_draft is not None and proposal:
@@ -132,14 +192,8 @@ class SpeculativeGeneration(GenerationStrategy):
 
             # Keep exactly what was emitted. The big model was fed 1 + n_guess tokens.
             await _trim(target, request, conv, (1 + n_guess) - emitted)
-            if draft is None:
-                pass
-            elif from_lookup:  # the draft sat this round out: it reads what was emitted, in one pass
-                await draft.decode_many(conv, out[-emitted:])
-            elif emitted <= n_guess:  # the draft was fed `token` and all but its last proposal
-                draft.trim(conv, n_guess - emitted)
-            else:  # all its proposals kept: it never fed its last one, so it catches up
-                await draft.decode_one(conv, proposal[-1])
+            if draft is not None:
+                await draft.follow(conv, out[-emitted:], proposal, proposed=not from_lookup)
             if self.adaptive and not from_lookup:
                 k = min(self.k, k + 1) if emitted > k else max(1, emitted)
 
@@ -153,7 +207,7 @@ class SpeculativeGeneration(GenerationStrategy):
         if request.on_draft is not None:
             await request.on_draft("")
         if draft is not None:
-            draft.reset_conversation(conv)
+            draft.finish(conv)
         elapsed_ms = (time.perf_counter() - decode_start) * 1000
         return GenerationResult(
             text=target.decode_tokens(out),

@@ -7,6 +7,10 @@ decoding, so a speedup is never bought with a different answer.
 
     uv run python scripts/bench_decode.py
     uv run python scripts/bench_decode.py --target mlx-community/Qwen3.5-4B-MLX-4bit --rtt 0 25 50 100
+    uv run python scripts/bench_decode.py --target mlx-community/Qwen3.5-0.8B-4bit --draft Qwen/Qwen3.5-0.8B
+
+`--draft` is a separate small model, or the target's own draft head (an mlx-community `*-MTP-*` repo, or
+the model's original release, which carries it).
 """
 
 from __future__ import annotations
@@ -43,6 +47,15 @@ def build(repo: str):
     return host, MlxBackendRuntime.from_host(host)
 
 
+def build_draft(repo: str, host, target):
+    """A separate draft model, or the target's own draft head when `repo` holds that."""
+    from dots.backends.mlx.mtp import MtpDraft, holds_head, load_head
+
+    if holds_head(repo):
+        return MtpDraft(target, load_head(repo, host))
+    return build(repo)[1]
+
+
 def split_pool(host, conv_id: str, rtt_ms: float):
     """The big model as two Macs: the first half here, the second half one round trip away."""
     import mlx.core as mx
@@ -59,12 +72,13 @@ def split_pool(host, conv_id: str, rtt_ms: float):
     return forward
 
 
-async def run(strategy, runtime, host, prompt: str, rtt_ms: float, max_tokens: int, conv_id: str):
+async def run(strategy, runtime, host, prompt: str, rtt_ms: float, max_tokens: int, conv_id: str,
+              penalty: float = 1.0):
     from dots.generation.base import GenerationRequest
 
     runtime.reset_conversation(conv_id)
     request = GenerationRequest(runtime=runtime, conv_id=conv_id, history=[{"role": "user", "content": prompt}],
-                                max_tokens=max_tokens, temperature=0.0, repetition_penalty=1.0,
+                                max_tokens=max_tokens, temperature=0.0, repetition_penalty=penalty,
                                 template_kwargs={"enable_thinking": False},
                                 forward_hidden=split_pool(host, conv_id, rtt_ms))
     t0 = time.perf_counter()
@@ -74,6 +88,8 @@ async def run(strategy, runtime, host, prompt: str, rtt_ms: float, max_tokens: i
 
 
 async def main() -> None:
+    from dots.generation.base import GenerationRequest
+
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--target", default="mlx-community/Qwen3.5-2B-MLX-4bit")
     p.add_argument("--draft", default="mlx-community/Qwen3.5-0.8B-4bit")
@@ -83,13 +99,15 @@ async def main() -> None:
     p.add_argument("--adaptive", action="store_true", help="also try adaptive draft lengths, up to each k")
     p.add_argument("--lookup", action="store_true", help="also try looking guesses up in the conversation")
     p.add_argument("--prompts", choices=["general", "edit"], default="general")
+    p.add_argument("--penalty", type=float, default=GenerationRequest.repetition_penalty,
+                   help="repetition penalty, by default what the pool's turns use")
     args = p.parse_args()
 
     from dots.generation.autoregressive import AutoregressiveGeneration
     from dots.generation.speculative import SpeculativeGeneration
 
     host, target = build(args.target)
-    _, draft = build(args.draft)
+    draft = build_draft(args.draft, host, target)
     print(f"target {args.target} ({host.n_layers} layers, split in two)   draft {args.draft}")
     print(f"{'rtt ms':>6}  {'strategy':<14} {'tok/s':>7} {'speedup':>8} {'accepted':>9}  same output")
 
@@ -102,7 +120,8 @@ async def main() -> None:
         base_tokens = base_seconds = 0.0
         baseline_text = []
         for i, prompt in enumerate(prompts):
-            result, seconds = await run(AutoregressiveGeneration(), target, host, prompt, rtt, args.max_tokens, f"b{i}")
+            result, seconds = await run(AutoregressiveGeneration(), target, host, prompt, rtt, args.max_tokens, f"b{i}",
+                                         args.penalty)
             baseline_text.append(result.text)
             base_tokens += result.stats["decode_tokens"]
             base_seconds += seconds
@@ -114,7 +133,7 @@ async def main() -> None:
             for i, prompt in enumerate(prompts):
                 strategy = SpeculativeGeneration(draft if with_draft else None, draft_tokens=k, adaptive=adaptive,
                                                  lookup=lookup)
-                result, seconds = await run(strategy, target, host, prompt, rtt, args.max_tokens, f"s{i}")
+                result, seconds = await run(strategy, target, host, prompt, rtt, args.max_tokens, f"s{i}", args.penalty)
                 same &= result.text == baseline_text[i]
                 tokens += result.stats["decode_tokens"]
                 seconds_total += seconds

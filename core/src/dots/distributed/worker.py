@@ -29,7 +29,7 @@ from typing import Callable
 from .. import ui
 from ..backends.base import BackendRuntime, ModelAssignment
 from ..backends.registry import get_backend_runtime
-from ..backends.mlx.draft import load_draft_runtime, same_tokenizer
+from ..backends.mlx.draft import draft_for, load_draft
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
 from ..generation.speculative import SpeculativeGeneration
@@ -124,8 +124,9 @@ class Worker:
         self.backend: BackendRuntime | None = None
         self.backends: dict[str, BackendRuntime] = {}
         self.generation = get_generation_strategy()
-        # Draft models for speculative decoding, by repo id (None: it failed to load).
-        self._drafts: dict[str, BackendRuntime | None] = {}
+        # Drafts for speculative decoding, by (draft repo, model): a model's own head or a small model
+        # (None: it failed to load)
+        self._drafts: dict[tuple[str, str], object | None] = {}
         self._host_ready = asyncio.Event()
         self._host_ready_by_model: dict[str, asyncio.Event] = {}
         self._host_load_task: asyncio.Task | None = None
@@ -1152,32 +1153,32 @@ class Worker:
 
         Guesses looked up in the conversation are free, so every turn uses them (scripts/bench_decode.py:
         answers that copy or edit what they were given came 2.55x faster on one Mac, others the same).
-        A draft model's guesses cost a pass of the draft and a bigger check, which only pays when the
-        turn crosses the network (0.85x on one Mac, 1.26x at 25 ms, 1.47x at 50 ms), so it joins in then.
+        `DOTS_DRAFT_MODEL` adds the model's own draft head, on every turn, or a small draft model, on turns
+        that cross the network, where it pays (`draft_for`).
         """
         lookup = os.environ.get("DOTS_PROMPT_LOOKUP", "1") != "0"
         if not speculate or not runtime.supports_speculation:
             return self.generation
         draft = None
         draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
-        if spans_macs and draft_id and draft_id != model_id:
-            draft = await self._load_draft(draft_id)
-            if draft is not None and not same_tokenizer(draft, runtime):
-                draft = None
+        if draft_id and draft_id != model_id:
+            draft = draft_for(await self._load_draft(draft_id, model_id, runtime), runtime, spans_macs=spans_macs)
         if draft is None and not lookup:
             return self.generation
-        return SpeculativeGeneration(draft, draft_tokens=int(os.environ.get("DOTS_DRAFT_TOKENS", "4")),
+        guesses = int(os.environ.get("DOTS_DRAFT_TOKENS", draft.most_guesses if draft is not None else 4))
+        return SpeculativeGeneration(draft, draft_tokens=guesses,
                                      adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0", lookup=lookup)
 
-    async def _load_draft(self, draft_id: str) -> BackendRuntime | None:
-        """The draft model, loaded whole on this Mac the first time it is needed. None if it won't load."""
-        if draft_id not in self._drafts:
+    async def _load_draft(self, draft_id: str, model_id: str, runtime: BackendRuntime):
+        """The draft, loaded on this Mac the first time this model needs it. None if it won't load."""
+        key = (draft_id, model_id)
+        if key not in self._drafts:
             try:
-                self._drafts[draft_id] = await asyncio.to_thread(load_draft_runtime, draft_id)
+                self._drafts[key] = await asyncio.to_thread(load_draft, draft_id, runtime)
             except Exception:
-                log.exception("draft model %s failed to load; decoding one token at a time", draft_id)
-                self._drafts[draft_id] = None
-        return self._drafts[draft_id]
+                log.exception("draft %s failed to load for %s; guessing ahead without it", draft_id, model_id)
+                self._drafts[key] = None
+        return self._drafts[key]
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
         """Hub-triggered probe: open (or reuse) a connection to the target

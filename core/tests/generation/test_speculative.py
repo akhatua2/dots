@@ -43,7 +43,7 @@ class FakeModel:
         row[self.rule(fed)] = 1.0
         return row
 
-    async def prefill(self, conv, history, *, forward_hidden=None, template_kwargs=None):
+    async def prefill(self, conv, history, *, forward_hidden=None, template_kwargs=None, keep_rows=1):
         from dots.backends.base import PrefillOutput
 
         self.passes += 1
@@ -55,7 +55,7 @@ class FakeModel:
         self.caches[conv].append(token)
         return self._row(self.caches[conv])
 
-    async def propose(self, conv, token, k):
+    async def propose(self, conv, token, k, recent=(), penalty=1.0):
         guesses, fed = [], token
         for _ in range(k):
             row = await self.decode_one(conv, fed)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from ..base import (
     BackendCapabilities,
@@ -96,6 +96,17 @@ def _apply_repetition_penalty(logits_row, recent_tokens, penalty: float):
         selected > 0, selected / penalty, selected * penalty
     )
     return logits_row
+
+
+def penalized(logits, seen, penalty: float):
+    """`_apply_repetition_penalty` on the GPU, for guesses chained without reading each back: `seen` is
+    an array of token ids, `logits` one row or a batch of them."""
+    if penalty == 1.0 or seen.size == 0:
+        return logits
+    import mlx.core as mx
+
+    hit = mx.zeros((logits.shape[-1],), dtype=mx.int32).at[seen].add(1) > 0
+    return mx.where(hit, mx.where(logits > 0, logits / penalty, logits * penalty), logits)
 
 
 def _sample(
@@ -377,6 +388,8 @@ class MlxBackendRuntime(BackendRuntime):
         self.assignment = ModelAssignment()
         self.host: FullModelHost | None = None
         self._geometry: ModelGeometry | None = None
+        # Each conversation's last pass, as final hidden states: a model's own draft head reads them
+        self._rows: dict[str, Any] = {}
         # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't
         from .small_batch import install
 
@@ -530,6 +543,11 @@ class MlxBackendRuntime(BackendRuntime):
 
     def reset_conversation(self, conv_id: str) -> None:
         self._require_host().reset_conversation(conv_id)
+        self._rows.pop(conv_id, None)
+
+    def last_rows(self, conv_id: str):
+        """The final hidden states (after the last norm) of the conversation's latest pass, one per position."""
+        return self._rows[conv_id]
 
     async def _forward_hidden(
         self,
@@ -550,6 +568,7 @@ class MlxBackendRuntime(BackendRuntime):
         *,
         forward_hidden: ForwardHidden | None = None,
         template_kwargs: dict | None = None,
+        keep_rows: int = 1,
     ) -> PrefillOutput:
         host = self._require_host()
         full_ids = host.tokenizer.apply_chat_template(
@@ -567,8 +586,10 @@ class MlxBackendRuntime(BackendRuntime):
 
         t0 = time.perf_counter()
         hidden = host.embed(array([new_ids]))
-        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=1)  # only the last row picks a token
-        hidden = host.norm(hidden)
+        # The last row picks a token; the pool sends back only the rows wanted
+        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=max(1, keep_rows))
+        hidden = host.norm(hidden[:, -max(1, keep_rows):, :])
+        self._rows[conv_id] = hidden
         logits = host._project_logits(hidden[:, -1:, :])
         prefill_ms = (time.perf_counter() - t0) * 1000
         host._token_counts[conv_id] = already_seen + len(new_ids)
@@ -585,6 +606,7 @@ class MlxBackendRuntime(BackendRuntime):
         hidden = host.embed(array([[token]]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
         hidden = host.norm(hidden)
+        self._rows[conv_id] = hidden
         logits = host._project_logits(hidden[:, -1:, :])
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + 1
         return logits[0, -1]
@@ -593,19 +615,22 @@ class MlxBackendRuntime(BackendRuntime):
     def supports_speculation(self) -> bool:
         return self.host is None or self.host.can_rewind
 
-    async def propose(self, conv_id: str, token: int, k: int) -> list[int]:
+    async def propose(self, conv_id: str, token: int, k: int, recent: list[int] = (),
+                      penalty: float = 1.0) -> list[int]:
         """k greedy guesses as one lazy graph: each guess feeds the next on the GPU, and they are read
         back together, instead of stopping after each to bring it into Python."""
         import mlx.core as mx
 
         host = self._require_host()
         fed = array([[token]])
+        seen = array(list(recent), dtype=mx.int32)
         guesses = []
         for _ in range(k):
             hidden = host.embed(fed)
             hidden = await self._forward_hidden(conv_id, hidden, None)
             logits = host._project_logits(host.norm(hidden)[:, -1:, :])
-            fed = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+            fed = mx.argmax(penalized(logits[:, -1, :], seen, penalty), axis=-1, keepdims=True)
+            seen = mx.concatenate([seen, fed[0]])
             guesses.append(fed)
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + k
         picked = mx.concatenate(guesses, axis=1)
@@ -628,6 +653,7 @@ class MlxBackendRuntime(BackendRuntime):
         hidden = host.embed(array([tokens]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
         hidden = host.norm(hidden)
+        self._rows[conv_id] = hidden
         logits = host._project_logits(hidden)
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + len(tokens)
         return logits[0]
@@ -697,6 +723,7 @@ class MlxBackendRuntime(BackendRuntime):
         host = self.host
         self.host = None
         self._geometry = None
+        self._rows.clear()
         if host is not None:
             host._caches.clear()
             host._token_counts.clear()

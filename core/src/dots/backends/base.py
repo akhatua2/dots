@@ -121,9 +121,11 @@ class BackendRuntime(ABC):
         *,
         forward_hidden: ForwardHidden | None = None,
         template_kwargs: dict | None = None,
+        keep_rows: int = 1,
     ) -> PrefillOutput:
         """Feeds the conversation's new tokens. `template_kwargs` go to the model's chat template
-        (`enable_thinking`, say)."""
+        (`enable_thinking`, say). `keep_rows` of the prompt's last hidden states are kept for a draft that
+        reads them; one picks the first token."""
 
     @abstractmethod
     async def decode_one(
@@ -156,8 +158,10 @@ class BackendRuntime(ABC):
         """Drops the last `n` tokens from the conversation's cache, as if they had never been fed."""
         raise NotImplementedError(f"{type(self).__name__} can't roll its cache back")
 
-    async def propose(self, conv_id: str, token: int, k: int) -> list[int]:
-        """As a draft model: its k most likely next tokens after `token`, each fed back in, greedily.
+    async def propose(self, conv_id: str, token: int, k: int, recent: list[int] = (),
+                      penalty: float = 1.0) -> list[int]:
+        """As a draft model: its k most likely next tokens after `token`, each fed back in, greedily, with
+        the big model's repetition `penalty` on the `recent` tokens and its own guesses.
 
         The cache ends holding `token` and all but the last guess. A backend can do this faster than
         k separate steps, for instance without stopping to read each guess back.
@@ -165,7 +169,8 @@ class BackendRuntime(ABC):
         guesses: list[int] = []
         fed = token
         for _ in range(k):
-            guesses.append(self.sample_token(await self.decode_one(conv_id, fed), 0.0))
+            row = await self.decode_one(conv_id, fed)
+            guesses.append(self.sample_token(row, 0.0, recent_tokens=[*recent, *guesses], repetition_penalty=penalty))
             fed = guesses[-1]
         return guesses
 

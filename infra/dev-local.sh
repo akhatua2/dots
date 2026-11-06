@@ -9,7 +9,7 @@
 #   infra/dev-local.sh worker   or start a worker by hand, without the app
 #   infra/dev-local.sh stop     stop everything
 #   infra/dev-local.sh status   show what is running
-#   infra/dev-local.sh split    serve a model that has to split across Macs, with a draft model
+#   infra/dev-local.sh split    serve a model that has to split across Macs
 #
 # In the Mac app's Settings, turn off "Use the mock cloud" and connect to http://127.0.0.1:8800. Then lending
 # in the app starts this Mac's worker; the small model loads on the first answer.
@@ -23,9 +23,12 @@ LOGS="$HOME_DIR/logs"
 HTTP_PORT="${DOTS_LOCAL_HTTP_PORT:-8080}"
 CLOUD_PORT="${DOTS_LOCAL_CLOUD_PORT:-8800}"
 MAX_RAM_GB="${DOTS_LOCAL_MAX_RAM_GB:-6}"
-# The split setup: a model bigger than one Mac's share, and a small draft with the same tokenizer
+# Each model guesses ahead with its own draft head. mlx-community has none for the small Qwen3.5s, so the
+# head comes out of Qwen's original release (only its tensors are loaded).
+DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-Qwen/Qwen3.5-0.8B}"
+# The split setup: a model bigger than one Mac's share
 SPLIT_MODEL="${DOTS_LOCAL_SPLIT_MODEL:-mlx-community/Qwen3.5-2B-MLX-4bit}"
-DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-}"  # newest small models can't check guesses yet; set one that can
+SPLIT_DRAFT_MODEL="${DOTS_LOCAL_SPLIT_DRAFT_MODEL:-Qwen/Qwen3.5-2B}"
 
 # Run from the home directory with the token unset: python-dotenv would otherwise find a .env
 # above the working directory and bring a real join token in with it.
@@ -51,7 +54,8 @@ start() {
 
 worker() {
   if pgrep -f "dots.cli worker" >/dev/null; then echo "worker already running"; return; fi
-  run nohup "$PY" -m dots.cli worker "$(tr -d ' \n' <"$HOME_DIR/hub_ticket.txt")" --max-ram "$MAX_RAM_GB" \
+  run env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" nohup "$PY" -m dots.cli worker \
+    "$(tr -d ' \n' <"$HOME_DIR/hub_ticket.txt")" --max-ram "$MAX_RAM_GB" \
     >"$LOGS/worker.log" 2>&1 &
   echo "worker started (logs in $LOGS/worker.log)"
 }
@@ -65,15 +69,15 @@ app() {
   for _ in $(seq 1 50); do pgrep -x dots >/dev/null || break; sleep 0.2; done
   pkill -x dots || true
   open --env "DOTS_HOME=$HOME_DIR" --env "DOTS_WORKER=$PY -m dots.cli worker" \
-    --env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-}" "$bundle"
+    --env "DOTS_DRAFT_MODEL=${DOTS_DRAFT_MODEL:-$DRAFT_MODEL}" "$bundle"
 }
 
-# A model too big for one Mac's share, with speculative decoding on, to see a pool split across Macs.
+# A model too big for one Mac's share, to see a pool split across Macs.
 # The hub keeps less headroom on the Mac running the head than in production, so Macs lending about
 # 1 GB each can hold their parts.
 split() {
   stop
-  export DOTS_POOL_MODEL="$SPLIT_MODEL" DOTS_DRAFT_MODEL="$DRAFT_MODEL"
+  export DOTS_POOL_MODEL="$SPLIT_MODEL" DOTS_DRAFT_MODEL="$SPLIT_DRAFT_MODEL"
   export DOTS_PLACEMENT_RAM_MARGIN_GB=0.1 DOTS_HEAD_WORKSPACE_RAM_GB=0.2
   start
   app

@@ -31,7 +31,7 @@ Not yet: Kimi K3 (its layers share state across blocks of layers, more than the 
 crosses between Macs) and DeepSeek V4.1 (mlx-lm itself can't run it). Gemma 4's small models (per-layer
 inputs) fail too.
 
-Testing uses Qwen3.5 0.8B, and Qwen3.5 2B to split.
+Testing uses Qwen3.5 0.8B, Qwen3.5 2B to split, and Qwen3.5 4B for the draft head.
 
 **Guessing ahead works on them too.** A running state (linear attention, convolution) can't be rolled
 back by dropping tokens, so for a pass short enough to be a check those layers go a token at a time and
@@ -46,16 +46,44 @@ models (gpt-oss) still decode one token at a time: their window is overwritten i
 | general | 0 ms | 0.93× | 0.97× |
 | general | 25 ms | 1.30× | 0.99× |
 
+**Their own drafts (MTP).** Qwen3.5 and its successors were trained with one extra layer that reads the
+model's last hidden state and the next token and predicts the token after. It runs on the head Mac, which
+already has the embedding, final norm and output layer, from the hidden states the pool just computed: a
+guess costs one layer and the output layer, and no network (`backends/mlx/mtp.py`). The weights come from
+mlx-community's `*-MTP-*` repos, which hold the head alone (67 MB for Qwen3.5 4B, 239 MB for Qwen3.6 27B),
+or out of Qwen's original release, whose norms are stored centred on zero and get +1 as mlx-lm does for
+the rest of the model. At prefill the last Mac sends back the prompt's last 32 hidden states instead of
+one: on Qwen3.5 0.8B those were as good as the whole prompt (78% of first guesses kept) and none at all
+cost five points.
+
+Qwen3.5 4B with its 4-bit head (`bench_decode.py`, adaptive):
+
+| Repetition penalty | Guesses a check | Round trip | Kept | Speedup |
+|---|---|---|---|---|
+| none | up to 1 | 0 ms | 77% | 1.48× |
+| none | up to 2 | 0 ms | 66% | 1.30× |
+| none | up to 2 | 25 ms | 66% | 1.31× |
+| none | up to 3 | 25 ms | 60% | 1.39× |
+| 1.3, the pool's | up to 2 | 0 ms | 67% | 1.45× |
+| 1.3, the pool's | up to 2 | 25 ms | 67% | 1.36× |
+
+Unlike a separate draft model it pays on one Mac too, so it is on for every turn. Its guesses avoid
+repeats as the big model does; on Qwen3.5 0.8B through the app's worker that took the guesses kept on the
+same question from 32% to 41%, and 1.4 to 1.6 tokens a pass. The first guess past each check comes from
+the pool's own hidden state and most hold; later ones read the head's own output and fewer do. Up to one
+was fastest on one Mac and up to three at 25 ms, so it guesses up to two (`DOTS_DRAFT_TOKENS`).
+
+Outputs match one-token decoding up to rounding: wherever they differed, the two tokens' logits were within
+one bf16 step of each other (0.125 or less). Checking several tokens at once sums in a different order, so
+such near-ties can go either way; looking guesses up, with no draft at all, shows the same.
+
 ## Next
 
-1. **Their own drafts (MTP).** Qwen3.5/3.6, DeepSeek V4.1 and MiniMax M2.7 ship multi-token-prediction
-   layers: the model guesses its next tokens itself, no draft model, which is how the Project Maya fork
-   gets 38-42 tok/s across two PCs. mlx-community has MTP builds (Qwen3.8-27B-MTP).
-2. **Images in.** Qwen3.5 is natively multimodal; we skip its vision encoder today. The head Mac would
+1. **Images in.** Qwen3.5 is natively multimodal; we skip its vision encoder today. The head Mac would
    run the encoder and feed image features in with the text; the rest of the split is unchanged.
-3. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
+2. **Images out, and editing.** Diffusion models don't split by layers well, and one fits on one Mac,
    so the pool sends the whole job to a Mac that has the model (MLX ports such as mflux). Personal
    photos stay private by default, the way Ask keeps personal documents in your own pools: an edit runs
    on your own Mac unless you say otherwise.
-4. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
+3. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
    is set up as a worker (`infra/remote-worker.sh`).

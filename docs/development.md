@@ -103,15 +103,17 @@ runs its layers on the hidden state it is sent (`distributed/worker.py`).
 
 Guessing ahead (`generation/speculative.py`) gets several tokens out of one pass of the big model. Guesses
 come from looking the last few tokens up earlier in the conversation, which is free and on for every
-turn, and, when a turn crosses the network, from a small draft model on the head Mac. One pass checks
-them all and keeps the ones the big model would have written itself. Checking a few tokens at once goes
+turn, and from a draft on the head Mac: the model's own draft head (`backends/mlx/mtp.py`), one extra
+layer that reads the hidden states the pool just ran and pays on every turn, or else a small draft model,
+which only pays when a turn crosses the network. One pass checks them all and keeps the ones the big model
+would have written itself. Checking a few tokens at once goes
 through a Metal kernel (`backends/mlx/small_batch.py`) that reads each 4-bit weight once for all of them.
 The measurements behind each choice are in [`plans/decode-over-the-network.md`](plans/decode-over-the-network.md).
 
 | Setting | Where | Default | What it does |
 |---|---|---|---|
-| `DOTS_DRAFT_MODEL` | worker | none | A small model with the same tokenizer to guess ahead when a turn crosses Macs |
-| `DOTS_DRAFT_TOKENS` | worker | 4 | Most tokens the draft guesses before a check |
+| `DOTS_DRAFT_MODEL` | worker | none | The model's own draft head (an mlx-community `*-MTP-*` repo, or the model's original release, which carries it), or a small model with the same tokenizer for turns that cross Macs |
+| `DOTS_DRAFT_TOKENS` | worker | 2 for a head, 4 for a model | Most tokens the draft guesses before a check |
 | `DOTS_DRAFT_ADAPTIVE` | worker | on | Guess fewer after misses, more after a full hit |
 | `DOTS_PROMPT_LOOKUP` | worker | on | Look guesses up in the conversation |
 | `DOTS_SMALL_BATCH_KERNEL` | worker | on | The Metal kernel for checking 2 to 5 tokens |
