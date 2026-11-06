@@ -254,6 +254,42 @@ struct ReceiptView: View {
     @State private var expanded = false
 
     var body: some View {
+        if compact && !expanded { line } else { card }
+    }
+
+    /// The receipt as one quiet line under an answer: where it ran, how fast, what it cost. Click for why.
+    private var line: some View {
+        Button { withAnimation(.easeOut(duration: 0.18)) { expanded = true } } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 10.5, weight: .medium))
+                Text(summary).font(D.ui(12))
+                Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .bold)).opacity(0.7)
+            }
+            .foregroundStyle(D.t5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Where this ran, and why")
+    }
+
+    private var summary: String {
+        var parts = [receipt.place, Self.modelName(receipt.model)]
+        if receipt.tokPerSec > 0 { parts.append("\(Int(receipt.tokPerSec.rounded())) tok/s") }
+        parts.append(receipt.paidWithKey ? receipt.usd.dollars : receipt.credits == 0 ? "free" : "\(receipt.credits) credits")
+        if receipt.isPrivate { parts.append("private") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "mlx-community/Qwen2.5-0.5B-Instruct-4bit" -> "Qwen2.5 0.5B"; names like "Qwen3 235B" pass through.
+    static func modelName(_ id: String) -> String {
+        var name = id.split(separator: "/").last.map(String.init) ?? id
+        for suffix in ["-4bit", "-8bit", "-bf16", "-Instruct", "-Chat", "-it"] {
+            name = name.replacingOccurrences(of: suffix, with: "")
+        }
+        return name.replacingOccurrences(of: "-", with: " ")
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 if receipt.macs.isEmpty {
@@ -263,7 +299,7 @@ struct ReceiptView: View {
                     MacsServing(macs: receipt.macs, asleepID: receipt.asleepMacID, serving: !receipt.finished)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ran on \(receipt.place) · \(receipt.model)").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
+                    Text("Ran on \(receipt.place) · \(Self.modelName(receipt.model))").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
                     Text(subline).font(D.ui(12)).foregroundStyle(D.t4)
                 }
                 Spacer()
@@ -281,7 +317,7 @@ struct ReceiptView: View {
             }
             .padding(14)
             .contentShape(Rectangle())
-            .onTapGesture { if compact { withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() } } }
+            .onTapGesture { if compact { withAnimation(.easeOut(duration: 0.18)) { expanded = false } } }
             if !compact || expanded {
             Hairline().padding(.horizontal, 14)
             VStack(alignment: .leading, spacing: 9) {
@@ -392,17 +428,16 @@ struct SecondOpinionView: View {
         let c = second.candidate
         switch second.phase {
         case .idle where compact, .failed where compact:
-            HStack(spacing: 10) {
-                Text("Second opinion").font(D.ui(12)).foregroundStyle(D.t4)
-                Text(c.model).font(D.ui(13, .semibold)).foregroundStyle(D.t2)
-                IconLine(symbol: "smallcircle.filled.circle", text: "\(c.credits) credits", color: D.t3, size: 12)
-                Spacer()
-                HoverAccentButton(title: "Ask \(c.model.components(separatedBy: " ").first ?? c.model)") {
-                    model.ask.askSecondOpinion(model: model)
+            Button { model.ask.askSecondOpinion(model: model) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkle").font(.system(size: 10, weight: .medium))
+                    Text("Ask \(c.model) for a second opinion · \(c.credits) credits").font(D.ui(12))
                 }
+                .foregroundStyle(D.t4)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 14).frame(height: 44)
-            .card(fill: D.bg2, stroke: D.line)
+            .buttonStyle(.plain)
+            .help("Leaves your pools and goes to \(c.place)")
         case .idle, .failed:
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
