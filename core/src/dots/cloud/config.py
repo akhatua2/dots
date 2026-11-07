@@ -18,7 +18,7 @@ class CloudConfig:
     # When set, every call must carry it as a Bearer token. Unset means open, for a cloud on localhost.
     token: str = ""
     # The name the hub's pool goes by in the apps.
-    pool_name: str = "Firefly"
+    pool_name: str = "Home"
     pool_blurb: str = "A small model for quick, simple questions."
     # The model the pool asks the hub for. The hub serves whatever it is asked for, loading it on the
     # first request, so the cloud names one.
