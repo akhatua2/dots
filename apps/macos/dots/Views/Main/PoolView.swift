@@ -341,7 +341,11 @@ struct LevelCard: View {
             return "Each picture is drawn whole on one Mac lending \(needs) GB or more. \(now)"
         }
         let togo = needs - gb
-        return "Its weights are shared out across the Macs lending here." + (togo > 0 ? " \(togo) GB to go." : "")
+        // A model one Mac can hold is copied whole to each Mac with room for it; a bigger one is split between them
+        let whole = pool.macs.contains { $0.state == .lending && $0.lendGB >= needs }
+        let how = whole ? "Each Mac lending \(needs) GB or more keeps its own copy, and your questions run on yours."
+                        : "Its weights are shared out across the Macs lending here."
+        return how + (togo > 0 ? " \(togo) GB to go." : "")
     }
 
     /// The pool's memory as segments: each Mac's in grey, yours orange, and the stretch still to go outlined.
@@ -439,11 +443,21 @@ struct ContributionCard: View {
                 .font(D.ui(13)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.top, 10)
+            // The least this Mac must lend for the pool's model to run, given what the other Macs lend
+            let others = pool.pooledGB - (me?.state == .lending ? me?.lendGB ?? 0 : 0)
+            let least = pool.needsGB.map { max(0, $0 - others) } ?? 0
             ThinSlider(value: Binding(get: { max(1, shareGB) }, set: { model.setShare(pool, gb: $0) }),
-                       range: 1...max(2, maxLend), enabled: on, label: "Lend in \(pool.name)")
+                       range: 1...max(2, maxLend), mark: least > 0 && !pool.draws ? least : nil, enabled: on,
+                       label: "Lend in \(pool.name)")
                 .help(most < maxLend ? "Lend up to \(most) GB here; your other pools have the rest of the \(maxLend) GB this Mac lends."
                                      : "Lend 1 to \(maxLend) GB. \(s.thisMac.keptGB) GB always stays with your Mac.")
                 .padding(.top, 12)
+            if on && !pool.draws && least > 0 && shareGB < least {
+                Text(others == 0 ? "Below \(least) GB, \(pool.name) can't run \(pool.modelLabel ?? "its model"): no other Mac lends here."
+                                 : "Below \(least) GB, \(pool.name) can't run \(pool.modelLabel ?? "its model") with the other Macs here.")
+                    .font(D.ui(12.5)).foregroundStyle(D.accentText).padding(.top, 10)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             LayerTicks(shares: shares(includeMe: on), live: on && model.backend.worker?.working == true)
                 .padding(.top, 16)
             HStack {
@@ -470,7 +484,8 @@ struct ContributionCard: View {
         if includeMe, let w = model.backend.worker, w.poolID == pool.id {
             return [(w.firstLayer, 0x4E4E4E), (w.lastLayer - w.firstLayer + 1, 0xFF5A1F), (max(0, w.layers - w.lastLayer - 1), 0x8A8A8A)]
         }
-        guard let layers = pool.model?.layers else { return [] }  // no model, no layers to share
+        // A pool that names its model is laid out by the hub, which says where this Mac's part is (above)
+        guard !pool.runsOneModel, let layers = pool.model?.layers else { return [] }
         var macs = pool.macs.filter { $0.state == .lending && ($0.macID != s.thisMacID || includeMe) }.sorted { $0.joinedAt < $1.joinedAt }
         if includeMe, !macs.contains(where: { $0.macID == s.thisMacID }) {
             macs.append(PoolMac(macID: s.thisMacID, lendGB: s.share(in: pool.id)?.gb ?? 0, state: .lending, joinedAt: .now))
@@ -496,7 +511,11 @@ struct ContributionCard: View {
 
     private func layersLine(on: Bool) -> String {
         let s = model.state
-        if on, let w = model.backend.worker, w.poolID == pool.id { return "Runs layers \(w.firstLayer + 1) to \(w.lastLayer + 1)" }
+        if on, let w = model.backend.worker, w.poolID == pool.id {
+            return w.firstLayer == 0 && w.lastLayer + 1 == w.layers ? "Holds the whole model" : "Runs layers \(w.firstLayer + 1) to \(w.lastLayer + 1)"
+        }
+        // A pool that names its model is laid out by the hub; until the hub says, there's nothing to show
+        if pool.runsOneModel { return on ? "Gets its part of the model when it's in" : "Not lending here" }
         if on, pool.model == nil { return "Layers are shared out once the pool runs a model" }
         if on {
             var start = 0
@@ -632,7 +651,8 @@ struct ActivityCard: View {
             default: out.append(Item(id: a.id, date: a.date, glyph: DotGlyph.sparkle, text: a.text ?? ""))
             }
         }
-        for u in pool.unlocks where (Ladder.tier(u.modelID)?.minGB ?? .max) <= pool.pooledGB {
+        // Unlocks are the ladder's: a pool that names its one model doesn't climb it
+        for u in pool.unlocks where !pool.runsOneModel && (Ladder.tier(u.modelID)?.minGB ?? .max) <= pool.pooledGB {
             let tier = Ladder.tier(u.modelID)?.name ?? u.modelID
             let who = u.byMacID == s.thisMacID ? "Your \(s.thisMac.kind)" : s.device(u.byMacID).flatMap { s.person($0.ownerID)?.name } ?? "A Mac"
             out.append(Item(id: "unlock-\(u.modelID)", date: u.date, glyph: DotGlyph.padlock, text: "\(who) unlocked \(tier)"))
