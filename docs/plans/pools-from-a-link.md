@@ -64,6 +64,34 @@ runs today:
 So the family of an image model can't always be read. When it can't, the form asks what kind of model it is,
 from the kinds dots knows how to run, rather than guessing.
 
+## Who can see what
+
+On the network, everything is encrypted: Macs and the hub talk over iroh (QUIC with TLS 1.3, each side proven by
+its key), so no one in between, relays included, can read prompts, answers, pictures or hidden states.
+
+On the Macs, a Mac sees what it computes. The head (the first layers and the output, which turn words into tokens
+and back) sees the question and the answer in plain form. A middle Mac sees hidden states, which can in principle
+be decoded back into much of the text. A Mac drawing a picture sees the prompt and the picture. The worker doesn't
+log or keep any of it, but its owner could read it on purpose. Nothing on a consumer Mac can stop that: containers
+run in a Linux VM the owner controls (and without the GPU), the Secure Enclave holds keys but runs no models, and
+the hardware that proves a machine can't look (confidential computing) isn't offered to apps on Macs.
+
+So dots keeps the plain-text parts where the asker trusts them:
+
+1. **Your question's head runs on your own Mac** when you lend to the pool, so the other Macs only see hidden
+   states; when you don't lend, it runs on the hub. Today the hub picks the head by free memory, so a small model
+   can run whole on a friend's Mac: this changes that. Pools of close friends can turn it off for speed.
+2. **Private material only goes where you trust**: your documents and photos to your own Mac or pools of people you
+   invited, never public pools. Ask and Draw already route this way.
+3. **Nothing kept**: workers drop a conversation's working memory after each request (the hub already resets it).
+4. **Each Mac's key in the Secure Enclave**, so a Mac can't be impersonated, and the app remembers each Mac's key
+   and warns if it changes.
+5. **The receipt says who could read it**: which Macs handled the question, and for public pools that they could
+   read it.
+
+End-to-end encryption past the hub (the asker sealing the question to the head Mac's key, so the hub only routes)
+is possible on top of this; with the head on the asker's own Mac, the hub sees nothing either.
+
 ## Safety
 
 A worker never runs a command it receives. The pool names a model (and, for pictures, its family); each worker
@@ -75,11 +103,12 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 
 1. The backend reads a link: kind, family where it can tell, size, what Macs need, whether dots runs it. Done.
 2. A pool stores its model (and kind). Done: the cloud keeps it and says it in each pool's sync.
-3. The hub knows each worker's pool and runs each request on its pool's Macs with its pool's model.
+3. The hub knows each worker's pool and runs each request on its pool's Macs with its pool's model. Done.
 4. Lending per pool: an amount to each pool, one worker each.
 5. Workers learn what to run from their pool; runners by kind, no models in code.
 6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
 7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
+8. Your question's head on your own Mac (see Who can see what).
 
 ## Not now
 
