@@ -275,3 +275,21 @@ async def test_what_this_mac_earned_in_the_last_hour_comes_from_the_ledger(env, 
     assert (await state(client))["earning"]["lastHour"] == 6, "6,025 micro-CU at 1,000 credits a CU, half an hour ago"
     monkeypatch.setattr(timefmt, "now", lambda: datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc))
     assert (await state(client))["earning"]["lastHour"] == 0
+
+
+async def test_a_pool_runs_the_model_its_link_names(env, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    described = {
+        "owner/draw-q4": ModelDescription("owner/draw-q4", "draw", "pictures", "DrawPipeline", 4.6, runs=None),
+        "owner/speech": ModelDescription("owner/speech", "speech", "unknown", None, 9.0, runs=False,
+                                         why="dots can't tell what this model is from its files"),
+    }
+    monkeypatch.setattr("dots.cloud.links.describe", lambda link: described[link])
+    client, _ = env
+    r = await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True, "model": "owner/draw-q4"})
+    pool = (await r.json())["pool"]
+    assert r.status == 200 and pool["servesModelID"] == "owner/draw-q4" and pool["kind"] == "pictures"
+    assert pool["modelName"] and pool["isPublic"] is True
+    r = await client.post("/v1/pools", json={"id": "talk", "name": "Talk", "model": "owner/speech"})
+    assert r.status == 400 and "can't run" in (await r.json())["error"]["message"]

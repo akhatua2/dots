@@ -23,7 +23,7 @@ create table if not exists devices (
 create table if not exists pools (
     id text primary key, name text not null, is_public integer not null, blurb text not null,
     host_id text, created_at text not null, offers_idle integer not null default 0,
-    serves_model_id text, phase real not null
+    serves_model_id text, model_kind text, phase real not null
 );
 create table if not exists members (pool_id text, person_id text, primary key (pool_id, person_id));
 create table if not exists macs_seen (mac_id text primary key, first_seen text not null);
@@ -69,7 +69,17 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("pragma journal_mode = wal")
         self.db.executescript(_SCHEMA)
+        self._add_missing_columns()
         self.db.execute("insert or ignore into lending (id) values (1)")
+
+    # Columns added since a database was first made: (table, column, type)
+    _ADDED = [("pools", "model_kind", "text")]
+
+    def _add_missing_columns(self) -> None:
+        for table, column, kind in self._ADDED:
+            have = {row["name"] for row in self.rows(f"pragma table_info({table})")}
+            if column not in have:
+                self.db.execute(f"alter table {table} add column {column} {kind}")
 
     def rows(self, sql: str, *args) -> list[sqlite3.Row]:
         return self.db.execute(sql, args).fetchall()
@@ -108,6 +118,10 @@ class Store:
             pool_id, name, int(is_public), blurb, host_id, timefmt.iso(timefmt.now()), _phase(pool_id),
         )
         self.run("insert or ignore into members (pool_id, person_id) values (?, ?)", pool_id, host_id)
+
+    def set_pool_model(self, pool_id: str, model_id: str, kind: str) -> None:
+        """What a pool runs: one model, which writes text or draws pictures"""
+        self.run("update pools set serves_model_id = ?, model_kind = ? where id = ?", model_id, kind, pool_id)
 
     def describe_pool(self, pool_id: str, blurb: str) -> None:
         self.run("update pools set blurb = ? where id = ?", blurb, pool_id)

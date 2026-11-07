@@ -136,7 +136,17 @@ class Cloud:
             return error(400, "Send an id (lowercase letters, digits and dashes) and a name.")
         if self.pool_row(pool_id):
             return error(400, f"There's already a pool called {pool_id}.")
+        model = None
+        if body.get("model"):  # the link it runs, read the way Start a Pool reads it
+            try:
+                model = await asyncio.to_thread(links.describe, str(body["model"]))
+            except ValueError as e:
+                return error(400, str(e))
+            if model.runs is False:
+                return error(400, f"dots can't run {model.name}: {model.why}")
         self.store.ensure_pool(pool_id, name[:60], self.me, is_public=bool(body.get("isPublic")))
+        if model is not None:
+            self.store.set_pool_model(pool_id, model.id, model.kind)
         self.store.award("starter", "sparkles", "Pool starter", f"Started {name}")
         sync = await self.sync.build(self.hub)
         pool = next(p for p in sync["state"]["pools"] if p["id"] == pool_id)

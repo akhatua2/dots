@@ -124,6 +124,10 @@ class SyncBuilder:
             pool["servesModelID"] = hub.model  # what actually answers here
         elif row["serves_model_id"]:
             pool["servesModelID"] = row["serves_model_id"]
+        # What it runs, by name, and whether it writes text or draws pictures
+        if pool.get("servesModelID"):
+            pool["modelName"] = catalog.short_name(pool["servesModelID"])
+            pool["kind"] = row["model_kind"] or "text"
         invite = s.one("select code, expires from invites where pool_id = ? order by expires desc", pool_id)
         if invite and not is_expired(invite["expires"]):
             pool["invite"] = {"code": invite["code"], "expires": invite["expires"]}

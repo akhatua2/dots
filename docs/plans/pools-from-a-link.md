@@ -43,7 +43,11 @@ Ask uses pools that answer in words, Draw uses pools that draw.
 
 Each pool is served by its own hub, which serves that pool's one model. A Mac that lends to a pool connects to
 its hub (the ticket comes with the pool in the cloud's sync), and the hub tells it what to run: text layers of
-the pool's model, or the pool's image model. A Mac lends to one pool at a time.
+the pool's model, or the pool's image model.
+
+A Mac can lend to several pools, an amount to each: 4 GB to Home and 6 GB to Prism, say. It runs one worker for
+each, connected to that pool's hub and held to that pool's share, so the pools never compete for the same memory.
+The app shows each pool's share beside it, and what this Mac has left to lend.
 
 ## What the backend can tell from a link
 
@@ -71,9 +75,10 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 
 1. The backend reads a link: kind, family where it can tell, size, what Macs need, whether dots runs it.
 2. A pool stores its model (and kind); the hub for a pool serves only that model.
-3. Workers learn what to run from the pool's hub; runners by kind, no models in code.
-4. Start a Pool takes a link; Explore shows what each pool runs and whether this Mac can lend.
-5. For people beyond one Wi-Fi: the cloud and the hubs on a public server.
+3. Lending per pool: an amount to each pool, one worker each.
+4. Workers learn what to run from the pool's hub; runners by kind, no models in code.
+5. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
+6. For people beyond one Wi-Fi: the cloud and the hubs on a public server.
 
 ## Not now
 
