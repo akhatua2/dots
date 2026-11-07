@@ -473,6 +473,11 @@ def main() -> None:
         "the hub treats it as a layer-count cap when planning. "
         "defaults to no cap.",
     )
+    p_worker.add_argument(
+        "--pool",
+        default=os.environ.get("DOTS_POOL", ""),
+        help="the pool this Mac lends to; the hub runs only that pool's model on it (default: the hub's own pool)",
+    )
 
     p_serve = sub.add_parser(
         "serve",
@@ -658,7 +663,7 @@ def main() -> None:
             if companion is not None:
                 _shutdown_companion_worker(companion)
     elif args.cmd == "worker":
-        worker = Worker(hub_ticket, headless=True, max_load_gb=args.max_ram)
+        worker = Worker(hub_ticket, headless=True, max_load_gb=args.max_ram, pool=args.pool)
         # Record our PID so a sibling `dots chat` knows there's already a
         # local worker and doesn't auto-spawn a duplicate.
         write_worker_pid(os.getpid())

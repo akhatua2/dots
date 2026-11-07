@@ -297,19 +297,26 @@ class Cloud:
         self.store.award(f"unlock-{pool_id}-{tier['id']}", "bolt.fill", "Unlocker", f"Took {pool['name']} to {tier['name']}")
         return event
 
+    def hub_pool(self, pool_id: str) -> str:
+        """The pool's name at the hub: the hub's own pool is its default"""
+        return "" if pool_id == HUB_POOL else pool_id
+
     async def pool_answer(self, request: web.Request) -> web.StreamResponse:
-        """A pool's answer. Only the hub's pool runs a model today; it answers through the hub."""
+        """A pool's answer, from its own model on its own Macs, through the hub."""
         pool_id = request.match_info["pool"]
-        if pool_id != HUB_POOL:
-            return error(404, "This pool doesn't run a model yet.", "not_found_error")
+        row = self.pool_row(pool_id)
+        if row is None or (pool_id != HUB_POOL and (not row["serves_model_id"] or row["model_kind"] == "pictures")):
+            return error(404, "This pool doesn't answer questions.", "not_found_error")
         body = await _body(request)
         hub = await HubView.read(self.hub, self.config.pool_model)
         if not hub.online:
             return error(503, "The hub isn't answering right now.", "api_error")
+        model = hub.model if pool_id == HUB_POOL else row["serves_model_id"]
         macs = [{"id": m["macID"], "initial": _initial(self, m["macID"]), "name": _name(self, m["macID"])}
                 for m in self.sync.pool_macs(pool_id, hub) if m["state"] == "lending"]
-        receipt = {"pool": self.config.pool_name, "model": catalog.short_name(hub.model), "credits": 0, "simulated": False}
-        body["model"] = hub.model
+        receipt = {"pool": row["name"], "model": catalog.short_name(model), "credits": 0, "simulated": False}
+        body["model"] = model
+        body["pool"] = self.hub_pool(pool_id)
         if not body.get("stream"):
             try:
                 reply = await self.hub.complete(body, self.me)
@@ -322,10 +329,12 @@ class Cloud:
                             last=receipt)
 
     async def pool_picture(self, request: web.Request) -> web.StreamResponse:
-        """A picture from a pool, streamed as it forms. Only the hub's pool draws today."""
-        if request.match_info["pool"] != HUB_POOL:
-            return error(404, "This pool doesn't draw pictures yet.", "not_found_error")
-        body = await _body(request)
+        """A picture from a pool that draws, streamed as it forms, from its own Macs."""
+        pool_id = request.match_info["pool"]
+        row = self.pool_row(pool_id)
+        if row is None or row["model_kind"] != "pictures":
+            return error(404, "This pool doesn't draw pictures.", "not_found_error")
+        body = {**await _body(request), "pool": self.hub_pool(pool_id)}
         out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await out.prepare(request)
         try:

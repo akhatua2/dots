@@ -191,6 +191,8 @@ class Participant:
     device: str | None = None
     # The image model this worker draws with, if it offers one (images.py)
     images: str | None = None
+    # The pool it lends to: it runs only that pool's model. "" is the hub's default pool.
+    pool: str = ""
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
@@ -246,6 +248,8 @@ class Hub:
         # FLOP-CU attribution.
 
         self.participants: dict[str, Participant] = {}
+        # Which pool each model runs for: a pool runs one model, on its own Macs only
+        self._model_pool: dict[str, str] = {}
         self._pool_lock = asyncio.Lock()
         # Set after the model is loaded AND the server is listening — useful
         # for callers (tests, embeddings) that want a deterministic ready signal.
@@ -361,12 +365,12 @@ class Hub:
     def image_models(self) -> list[str]:
         return sorted({p.images for p in self.participants.values() if p.compute and p.images})
 
-    def drawing_mac(self) -> "Participant":
+    def drawing_mac(self, pool: str = "") -> "Participant":
         """Which Mac draws the next picture. Of those that offer an image model: one not answering a question
         right now, then one that isn't the head of a text model (the head runs the first layers, the output
         layer and the draft that guesses ahead on every answer), then the one with the most memory free,
         since a picture needs several GB beyond the Mac's share of the text model."""
-        offering = [p for p in self.participants.values() if p.compute and p.images]
+        offering = [p for p in self.participants.values() if p.compute and p.images and p.pool == pool]
         if not offering:
             raise NoImageMac("no Mac in the pool offers images right now")
 
@@ -379,11 +383,11 @@ class Hub:
 
         return min(offering, key=lambda p: (self.is_serving(p.id), is_head(p), -free_gb(p)))
 
-    async def make_image(self, on_step=None, **job) -> dict:
+    async def make_image(self, on_step=None, pool: str = "", **job) -> dict:
         """Draws a picture, whole, on the Mac `drawing_mac` picks. Returns the worker's answer: base64 `png`,
         `model`, `ms`, and which Mac drew it. `on_step(step, of, preview)` gets the picture as it forms, a
         base64 JPEG after each step."""
-        worker = self.drawing_mac()
+        worker = self.drawing_mac(pool)
         ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
         job_id = uuid.uuid4().hex
         if on_step is not None:
@@ -558,7 +562,7 @@ class Hub:
             (
                 p
                 for p in self.participants.values()
-                if p.compute and self._worker_supports_selected_backend(p)
+                if p.compute and self._worker_supports_selected_backend(p) and self.in_pool(p, self.model_id)
             ),
             key=lambda p: p.id,
         )
@@ -975,6 +979,7 @@ class Hub:
                 geo=sanitize_geo(hello_msg.get("geo")),
                 device=_sanitize_device(hello_msg.get("device")),
                 images=hello_msg.get("images") if isinstance(hello_msg.get("images"), str) else None,
+                pool=str(hello_msg.get("pool") or ""),
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
@@ -1039,10 +1044,15 @@ class Hub:
             for deployment in list(self.deployments.values()):
                 await self._ensure_model_started_locked(deployment.model_id)
 
-    async def ensure_model_started(self, model_id: str) -> ModelDeployment:
-        """Create or start loading a model deployment if needed."""
+    async def ensure_model_started(self, model_id: str, pool: str = "") -> ModelDeployment:
+        """Create or start loading a model deployment if needed, on the Macs of `pool` (the pool that runs it)."""
+        self._model_pool[model_id] = pool
         async with self._model_turn_lock:
             return await self._ensure_model_started_locked(model_id)
+
+    def in_pool(self, participant: "Participant", model_id: str | None) -> bool:
+        """Whether this Mac lends to the pool that runs `model_id`."""
+        return participant.pool == self._model_pool.get(model_id or "", "")
 
     async def _ensure_model_started_locked(self, model_id: str) -> ModelDeployment:
         self._activate_model(model_id)

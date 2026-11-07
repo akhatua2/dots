@@ -199,7 +199,8 @@ class HttpApi:
         if editing and job.image is None:
             return _error(400, "an edit needs the picture to start from, as `image`")
         payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
-                   "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged}
+                   "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged,
+                   "pool": str(body.get("pool") or "")}
         if job.image is not None:
             payload["image"] = base64.b64encode(job.image).decode()
         if str(body.get("stream", False)).lower() in ("true", "1"):
@@ -273,6 +274,7 @@ class HttpApi:
                 "device": p.device,
                 "model": p.requested_model_id,
                 "layer_range": list(p.layer_range) if p.layer_range else None,
+                "pool": p.pool,
                 # The memory this worker offers the pool (its own cap applied), in GB.
                 "ram_gb": self._ram_gb(p.id),
                 # Part of a turn being answered right now
@@ -384,7 +386,8 @@ class HttpApi:
         if not isinstance(model_id, str) or not model_id:
             return _error(400, "model must be a non-empty string")
 
-        deployment = await self.hub.ensure_model_started(model_id)
+        # The pool that asks: its model runs on its own Macs only. Unnamed, the hub's default pool.
+        deployment = await self.hub.ensure_model_started(model_id, pool=str(body.get("pool") or ""))
         if not deployment.pool_ready.is_set():
             # The first question after the hub starts loads the model; with Macs in the pool it waits for that
             # instead of turning the question away

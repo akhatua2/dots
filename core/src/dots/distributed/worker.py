@@ -84,6 +84,7 @@ class Worker:
         account_id: str | None = None,
         account_alias: str | None = None,
         requested_model_id: str | None = None,
+        pool: str = "",
     ):
         # The hub's shareable iroh ticket — the "join token". The worker dials
         # this over iroh (NAT-traversed) rather than a host:port.
@@ -97,6 +98,8 @@ class Worker:
         # ram_gb_free value we send to the hub, so placement decisions
         # never assign more than the user agreed to.
         self.max_load_gb = max_load_gb
+        # The pool this worker lends to: the hub runs only that pool's model on it. "" is the hub's default pool.
+        self.pool = pool
         self.resource_limits = discover_worker_limits(max_ram_gb=self.max_load_gb)
         # Whether this Worker contributes compute to the pool. False
         # makes it a pure chat client: the hub won't send `load_units`
@@ -290,6 +293,7 @@ class Worker:
         device = await asyncio.to_thread(detect_device)
         hello_payload: dict = {
             "worker_id": self.identity,
+            "pool": self.pool,
             "account_id": self.account_id,
             "compute": bool(self.compute),
             "resources": resource_decl_to_hello_field(decl),

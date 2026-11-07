@@ -63,14 +63,15 @@ class SyncBuilder:
         return catalog.ladder(served)
 
     def pool_macs(self, pool_id: str, hub: HubView) -> list[dict]:
-        """A pool's Macs. The hub's pool has the hub's real workers; any pool has this Mac while it lends there."""
+        """A pool's Macs: the workers lending to it at the hub, and this Mac while it lends there."""
         macs: list[dict] = []
-        if pool_id == HUB_POOL:
-            for node in hub.nodes:
-                mac_id = self.this_mac if node.get("account_id") == self.me else node["id"]
-                # A worker in the hub is lending, whether or not a model is loaded yet: the hub loads one on the first
-                # question, which the pool would never get if it waited for the model before counting the Mac
-                macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending"))
+        # The Macs whose workers lend to this pool; the hub's own pool is its default ("")
+        at_hub = "" if pool_id == HUB_POOL else pool_id
+        for node in (n for n in hub.nodes if (n.get("pool") or "") == at_hub):
+            mac_id = self.this_mac if node.get("account_id") == self.me else node["id"]
+            # A worker in the hub is lending, whether or not a model is loaded yet: the hub loads one on the first
+            # question, which the pool would never get if it waited for the model before counting the Mac
+            macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending"))
         lending = self.store.lending()
         if lending["pool_id"] == pool_id and lending["active"] and all(m["macID"] != self.this_mac for m in macs):
             # In the hub's pool this Mac lends only once its worker is in the hub; until then it is starting up and
@@ -116,8 +117,6 @@ class SyncBuilder:
             "speedFactor": 1,
             "demand": 0.8,
         }
-        if pool_id == HUB_POOL and hub.draws:
-            pool["drawsWith"] = hub.draws[0]  # a Mac in the pool draws pictures with this model
         if mine is not None:
             pool["endorsedAtMacs"] = mine["macs_at"]
         if pool_id == HUB_POOL and hub.model:
@@ -128,6 +127,8 @@ class SyncBuilder:
         if pool.get("servesModelID"):
             pool["modelName"] = catalog.short_name(pool["servesModelID"])
             pool["kind"] = row["model_kind"] or "text"
+            if pool["kind"] == "pictures":
+                pool["drawsWith"] = pool["servesModelID"]  # its Macs draw pictures with it
         invite = s.one("select code, expires from invites where pool_id = ? order by expires desc", pool_id)
         if invite and not is_expired(invite["expires"]):
             pool["invite"] = {"code": invite["code"], "expires": invite["expires"]}
