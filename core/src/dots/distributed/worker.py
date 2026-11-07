@@ -35,7 +35,8 @@ from ..backends.mlx.draft import draft_for, load_draft
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
 from ..generation.speculative import SpeculativeGeneration
-from ..images import ImageJob, ImageTool
+from ..image_tools import runners as image_runners
+from ..images import ImageJob
 from .chain_timing import ChainTiming
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
@@ -133,8 +134,8 @@ class Worker:
         # Drafts for speculative decoding, by (draft repo, model): a model's own head or a small model
         # (None: it failed to load)
         self._drafts: dict[tuple[str, str], object | None] = {}
-        # The image model this Mac draws with, if it offers one; one picture at a time
-        self.image_tool = ImageTool.from_env()
+        # How this Mac draws each family of image model it can (image_tools/runners.toml); one picture at a time
+        self.runners = image_runners.here()
         self._drawing = asyncio.Lock()
         self._host_ready = asyncio.Event()
         self._host_ready_by_model: dict[str, asyncio.Event] = {}
@@ -314,8 +315,9 @@ class Worker:
             hello_payload["join_token"] = join_token
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
-        if self.image_tool is not None and self.compute:
-            hello_payload["images"] = self.image_tool.model
+        if self.runners and self.compute:
+            # The originals it can draw models of; its pool says which model when it asks for a picture
+            hello_payload["images"] = sorted({o for r in self.runners for o in r.originals})
         # A chat client tells the hub which model it intends to query so
         # the hub knows that model is "in use" and won't evict it to make
         # room for another. Compute-only workers leave this unset.
@@ -1195,10 +1197,13 @@ class Worker:
         return self._drafts[key]
 
     async def _handle_make_image(self, msg: dict) -> dict:
-        """Draws one picture with this Mac's image model, whole, and sends it back as base64 PNG."""
-        if self.image_tool is None:
-            return {"kind": "error", "error": "this Mac doesn't offer images"}
+        """Draws one picture, whole, with the pool's model and the runner this Mac has for it, and sends it back as
+        base64 PNG. The job names the model; the command is always the runner's own."""
+        runner = image_runners.for_original(msg.get("original"), self.runners)
+        if runner is None:
+            return {"kind": "error", "error": "this Mac can't draw this pool's model"}
         try:
+            tool = runner.tool(str(msg.get("model") or ""))
             image = msg.get("image")
             job = ImageJob(prompt=str(msg.get("prompt", "")), width=msg.get("width"), height=msg.get("height"),
                            steps=msg.get("steps"), seed=msg.get("seed"),
@@ -1215,11 +1220,11 @@ class Worker:
 
         async with self._drawing:
             try:
-                png, ms = await self.image_tool.draw(job, on_step if job_id else None)
+                png, ms = await tool.draw(job, on_step if job_id else None)
             except RuntimeError as e:
                 log.warning("image job failed: %s", e)
                 return {"kind": "error", "error": str(e)}
-        return {"kind": "image_ok", "png": base64.b64encode(png).decode(), "model": self.image_tool.model, "ms": ms}
+        return {"kind": "image_ok", "png": base64.b64encode(png).decode(), "model": tool.model, "ms": ms}
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
         """Hub-triggered probe: open (or reuse) a connection to the target

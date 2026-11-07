@@ -206,9 +206,13 @@ class HttpApi:
             return _error(400, str(e))
         if editing and job.image is None:
             return _error(400, "an edit needs the picture to start from, as `image`")
+        # The pool's model, and the original it was made from, which says how a Mac runs it
+        model, original = body.get("model"), body.get("original")
+        if not isinstance(model, str) or not model or not isinstance(original, str) or not original:
+            return _error(400, "name the pool's image model and the original it was made from")
         payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
                    "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged,
-                   "pool": str(body.get("pool") or "")}
+                   "pool": str(body.get("pool") or ""), "model": model, "original": original}
         if _only_mine(body):
             account = _querier(request)
             if account == _API_ACCOUNT:

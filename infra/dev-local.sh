@@ -26,10 +26,9 @@ MAX_RAM_GB="${DOTS_LOCAL_MAX_RAM_GB:-6}"
 # Each model guesses ahead with its own draft head. mlx-community has none for the small Qwen3.5s, so the
 # head comes out of Qwen's original release (only its tensors are loaded).
 DRAFT_MODEL="${DOTS_LOCAL_DRAFT_MODEL:-Qwen/Qwen3.5-0.8B}"
-# An image model for this Mac to draw with, and the tool that runs it (core/src/dots/images.py). Off unless
-# set: drawing takes about 5 GB on top of the lent share.
+# Settings for drawing (core/src/dots/images.py). What a Mac draws comes from the pool it lends to.
 IMAGE_ENV=()
-for name in DOTS_IMAGE_MODEL DOTS_IMAGE_COMMAND DOTS_IMAGE_EDIT_COMMAND DOTS_IMAGE_BASE_MODEL DOTS_IMAGE_STEPS; do
+for name in DOTS_IMAGE_STEPS DOTS_IMAGE_TIMEOUT_S DOTS_IMAGE_EDIT_PIXELS; do
   if [ -n "${!name:-}" ]; then IMAGE_ENV+=("$name=${!name}"); fi
 done
 APP_IMAGE_ENV=()

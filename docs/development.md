@@ -126,9 +126,7 @@ The measurements behind each choice are in [`plans/decode-over-the-network.md`](
 | `DOTS_PREFILL_CHUNK` | worker | 1024 | Long prompts cross Macs in chunks of this many tokens, overlapping compute and network; 0 sends them whole |
 | `DOTS_CHAIN` | worker | `star` | `ring` passes the hidden state Mac to Mac instead of back through the head |
 | `DOTS_IMAGE_MAX_PIXELS` | worker | 1048576 | Images larger than this are scaled down before the model reads them |
-| `DOTS_IMAGE_MODEL` | worker | none | An image model this Mac draws with, whole; unset, it offers none (`images.py`) |
-| `DOTS_IMAGE_COMMAND`, `DOTS_IMAGE_EDIT_COMMAND` | worker | mflux's FLUX 3 commands | The tool that draws, and the one that edits |
-| `DOTS_IMAGE_STEPS` | worker | 8 | Denoising steps when a job doesn't say |
+| `DOTS_IMAGE_STEPS` | worker | the model's own | Denoising steps when a job doesn't say. What a Mac draws comes from its pool; how it draws each kind of model is `image_tools/runners.toml` |
 | `DOTS_IMAGE_EDIT_PIXELS` | worker | 1048576 | A larger picture is edited at this size and the edit put back into the full-size picture |
 | `DOTS_PLACEMENT_RAM_MARGIN_GB` | hub | 1.0 | Memory the head Mac keeps free beyond its share |
 | `DOTS_HEAD_WORKSPACE_RAM_GB` | hub | 0.5 | Working memory counted for the head's output layer |

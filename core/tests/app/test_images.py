@@ -103,10 +103,10 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
         return SimpleNamespace(id=wid, short_id=wid, compute=True, images=images, busy=busy, layer_range=None, pool="",
                                conn=SimpleNamespace(call=call))
 
-    pool = [worker("plain", None), worker("busy", "z", busy=True), worker("free", "z")]
+    pool = [worker("plain", None), worker("busy", ["z"], busy=True), worker("free", ["z"])]
     hub = SimpleNamespace(participants={w.id: w for w in pool}, is_serving=lambda wid: wid == "busy", _image_watchers={},
                           pool_view=SimpleNamespace(resources={}))
-    hub.drawing_mac = lambda pool="", account=None: Hub.drawing_mac(hub, pool, account)
+    hub.drawing_mac = lambda pool="", account=None, original=None: Hub.drawing_mac(hub, pool, account, original)
     drawn = await Hub.make_image(hub, prompt="a cat", width=512, height=512)
     ((wid, kind, job),) = calls
     assert drawn["worker_id"] == "free" and (wid, kind) == ("free", "make_image")
@@ -116,8 +116,12 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
     with pytest.raises(NoImageMac):
         lonely = SimpleNamespace(participants={"p": pool[0]}, is_serving=lambda _: False, _image_watchers={},
                                  pool_view=SimpleNamespace(resources={}))
-        lonely.drawing_mac = lambda pool="", account=None: Hub.drawing_mac(lonely, pool, account)
+        lonely.drawing_mac = lambda pool="", account=None, original=None: Hub.drawing_mac(lonely, pool, account, original)
         await Hub.make_image(lonely, prompt="x")
+
+
+# What the cloud adds to every picture a pool asks for: its model, and the original it was made from
+DRAWS = {"model": "owner/draw-q4", "original": "owner/draw"}
 
 
 @pytest.fixture
@@ -141,27 +145,29 @@ async def api():
 
 async def test_generations_in_openai_shape(api):
     client, jobs = api
-    r = await client.post("/v1/images/generations", json={"prompt": "a cat", "size": "512x768", "seed": 4})
+    r = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat", "size": "512x768", "seed": 4})
     body = await r.json()
     assert r.status == 200 and base64.b64decode(body["data"][0]["b64_json"]) == PNG
     assert body["dots"]["model"] == "z" and jobs[0]["width"] == 512 and jobs[0]["height"] == 768 and jobs[0]["seed"] == 4
-    bad = await client.post("/v1/images/generations", json={"prompt": "a cat", "size": "999x999"})
+    bad = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat", "size": "999x999"})
     assert bad.status == 400 and len(jobs) == 1
 
 
 async def test_edits_take_the_picture_as_json_or_a_form(api):
     client, jobs = api
     start = b"starting picture"
-    r = await client.post("/v1/images/edits", json={"prompt": "in winter", "size": "512x512", "strength": 0.6,
+    r = await client.post("/v1/images/edits", json={**DRAWS, "prompt": "in winter", "size": "512x512", "strength": 0.6,
                                                      "image": "data:image/png;base64," + base64.b64encode(start).decode()})
     assert r.status == 200 and base64.b64decode(jobs[-1]["image"]) == start and jobs[-1]["strength"] == 0.6
     form = FormData()
+    for key, value in DRAWS.items():
+        form.add_field(key, value)
     form.add_field("prompt", "in winter")
     form.add_field("size", "512x512")
     form.add_field("image", start, filename="road.png", content_type="image/png")
     r = await client.post("/v1/images/edits", data=form)
     assert r.status == 200 and base64.b64decode(jobs[-1]["image"]) == start
-    missing = await client.post("/v1/images/edits", json={"prompt": "in winter"})
+    missing = await client.post("/v1/images/edits", json={**DRAWS, "prompt": "in winter"})
     assert missing.status == 400
 
 
@@ -229,7 +235,7 @@ async def test_a_streamed_picture_shows_each_step_then_the_picture(api):
     import json
 
     client, _ = api
-    r = await client.post("/v1/images/generations", json={"prompt": "a cat", "size": "512x512", "stream": True})
+    r = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat", "size": "512x512", "stream": True})
     events = [json.loads(line[6:]) for line in (await r.text()).splitlines() if line.startswith("data: ")]
     assert [e["type"] for e in events] == ["image_generation.partial_image"] * 2 + ["image_generation.completed"]
     assert events[1]["dots"] == {"step": 2, "of": 2} and base64.b64decode(events[-1]["b64_json"]) == PNG
@@ -237,7 +243,7 @@ async def test_a_streamed_picture_shows_each_step_then_the_picture(api):
 
 def test_the_text_models_head_draws_only_when_no_other_mac_can():
     def mac(wid, head, free):
-        return SimpleNamespace(id=wid, compute=True, images="z", layer_range=(0, 12) if head else (12, 24), pool="")
+        return SimpleNamespace(id=wid, compute=True, images=["z"], layer_range=(0, 12) if head else (12, 24), pool="")
 
     macs = {m.id: m for m in (mac("head", True, 9.0), mac("roomy", False, 8.0), mac("tight", False, 3.0))}
     free = {"head": 9.0, "roomy": 8.0, "tight": 3.0}
@@ -252,7 +258,7 @@ def test_the_text_models_head_draws_only_when_no_other_mac_can():
 
 def test_a_picture_is_drawn_only_by_a_mac_in_the_pool_that_asked():
     def mac(wid, pool):
-        return SimpleNamespace(id=wid, compute=True, images="z", layer_range=None, pool=pool)
+        return SimpleNamespace(id=wid, compute=True, images=["z"], layer_range=None, pool=pool)
 
     macs = {m.id: m for m in (mac("home", ""), mac("prism", "prism"))}
     hub = SimpleNamespace(participants=macs, is_serving=lambda wid: False, pool_view=SimpleNamespace(resources={}))
@@ -264,7 +270,7 @@ def test_a_picture_is_drawn_only_by_a_mac_in_the_pool_that_asked():
 
 def test_only_my_macs_draws_on_my_own_mac_or_not_at_all():
     def mac(wid, account):
-        return SimpleNamespace(id=wid, compute=True, images="z", layer_range=None, pool="", account_id=account)
+        return SimpleNamespace(id=wid, compute=True, images=["z"], layer_range=None, pool="", account_id=account)
 
     macs = {m.id: m for m in (mac("friend", "ana"), mac("mine", "me"))}
     hub = SimpleNamespace(participants=macs, is_serving=lambda wid: wid == "mine", pool_view=SimpleNamespace(resources={}))
@@ -284,8 +290,27 @@ def test_only_my_macs_holds_when_every_part_of_the_model_is_on_my_macs():
 
 async def test_an_only_mine_picture_names_whose_macs(api):
     client, jobs = api
-    r = await client.post("/v1/images/generations", json={"prompt": "a cat", "privacy": "mine"},
+    r = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat", "privacy": "mine"},
                           headers={"X-Dots-Account": "me"})
     assert r.status == 200 and jobs[-1]["only_account"] == "me"
-    anonymous = await client.post("/v1/images/generations", json={"prompt": "a cat", "privacy": "mine"})
+    anonymous = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat", "privacy": "mine"})
     assert anonymous.status == 400
+
+
+async def test_a_picture_names_the_pools_model_and_its_original(api):
+    client, jobs = api
+    r = await client.post("/v1/images/generations", json={**DRAWS, "prompt": "a cat"})
+    assert r.status == 200 and jobs[-1]["model"] == "owner/draw-q4" and jobs[-1]["original"] == "owner/draw"
+    r = await client.post("/v1/images/generations", json={"prompt": "a cat"})
+    assert r.status == 400, "a picture without the pool's model is refused"
+
+
+def test_a_picture_goes_only_to_a_mac_that_can_draw_its_kind_of_model():
+    def mac(wid, originals):
+        return SimpleNamespace(id=wid, compute=True, images=originals, layer_range=None, pool="", account_id="me")
+
+    macs = {m.id: m for m in (mac("flux", ["bfl/flux"]), mac("zimage", ["tongyi/z"]))}
+    hub = SimpleNamespace(participants=macs, is_serving=lambda wid: False, pool_view=SimpleNamespace(resources={}))
+    assert Hub.drawing_mac(hub, "", None, "tongyi/z").id == "zimage"
+    with pytest.raises(NoImageMac):
+        Hub.drawing_mac(hub, "", None, "someone/else")

@@ -189,8 +189,8 @@ class Participant:
     # Worker-advertised device name for the pool map, e.g. "MacBook Pro · Apple
     # M1 Pro". Best-effort; None if the worker didn't send one.
     device: str | None = None
-    # The image model this worker draws with, if it offers one (images.py)
-    images: str | None = None
+    # The originals this worker can draw models of, with the runners it has (image_tools/runners.toml)
+    images: list[str] | None = None
     # The pool it lends to: it runs only that pool's model. "" is the hub's default pool.
     pool: str = ""
     conv: Conversation = field(
@@ -363,16 +363,19 @@ class Hub:
         self._deployment_for().selected_backend = value
 
     def image_models(self) -> list[str]:
-        return sorted({p.images for p in self.participants.values() if p.compute and p.images})
+        """The originals the Macs here can draw models of"""
+        return sorted({o for p in self.participants.values() if p.compute and p.images for o in p.images})
 
-    def drawing_mac(self, pool: str = "", only_account: str | None = None) -> "Participant":
+    def drawing_mac(self, pool: str = "", only_account: str | None = None, original: str | None = None) -> "Participant":
         """Which Mac draws the next picture. Of those that offer an image model: one not answering a question
         right now, then one that isn't the head of a text model (the head runs the first layers, the output
         layer and the draft that guesses ahead on every answer), then the one with the most memory free,
         since a picture needs several GB beyond the Mac's share of the text model.
 
-        `only_account`: only that person's own Macs ("Only my Macs"), and none at all rather than anyone else's."""
+        `only_account`: only that person's own Macs ("Only my Macs"), and none at all rather than anyone else's.
+        `original`: only Macs that can draw models made from it."""
         offering = [p for p in self.participants.values() if p.compute and p.images and p.pool == pool
+                    and (original is None or original in p.images)
                     and (only_account is None or p.account_id == only_account)]
         if not offering:
             raise NoImageMac("none of your Macs in the pool draws right now" if only_account
@@ -396,8 +399,8 @@ class Hub:
         """Draws a picture, whole, on the Mac `drawing_mac` picks. Returns the worker's answer: base64 `png`,
         `model`, `ms`, and which Mac drew it. `on_step(step, of, preview)` gets the picture as it forms, a
         base64 JPEG after each step."""
-        worker = self.drawing_mac(pool, only_account)
-        ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
+        worker = self.drawing_mac(pool, only_account, job.get("original"))
+        ui.notice(f"image on worker·{worker.short_id} ({job.get('model')})")
         job_id = uuid.uuid4().hex
         if on_step is not None:
             self._image_watchers[job_id] = on_step
@@ -987,7 +990,7 @@ class Hub:
                 peer_ticket=peer_ticket,
                 geo=sanitize_geo(hello_msg.get("geo")),
                 device=_sanitize_device(hello_msg.get("device")),
-                images=hello_msg.get("images") if isinstance(hello_msg.get("images"), str) else None,
+                images=_strings(hello_msg.get("images")),
                 pool=str(hello_msg.get("pool") or ""),
             )
             self.participants[worker_id] = participant
@@ -2184,3 +2187,10 @@ class Hub:
             mode=mode,
             max_segments=max_segments,
         )
+
+
+def _strings(value) -> list[str] | None:
+    """A list of strings from a hello, or None"""
+    if not isinstance(value, list):
+        return None
+    return [v for v in value if isinstance(v, str)] or None

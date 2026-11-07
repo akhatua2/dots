@@ -373,3 +373,29 @@ async def test_only_my_macs_reaches_the_hub_and_its_refusal_comes_back(env):
     assert r.status == 409 and "aren't yours" in (await r.json())["error"]["message"]
     r = await client.post("/hub/v1/pools/hub/chat/completions", json=ask)
     assert r.status == 200, "without it, the pool's Macs answer"
+
+
+async def test_a_pool_made_before_the_cloud_kept_originals_learns_its_own(tmp_path, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    store = Store(tmp_path / "c.db")
+    store.ensure_pool("prism", "Prism", ME, is_public=True)
+    store.set_pool_model("prism", "owner/draw-q4", "pictures")  # as an older cloud kept it: no size, no original
+    read = asyncio.Event()
+
+    def describe(link):
+        if link == "owner/draw-q4":
+            read.set()
+        return ModelDescription(link, "draw", "pictures", "DrawPipeline", 4.6, runs=None, original="owner/draw")
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model="")
+    cloud = Cloud(store, HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())):
+        await asyncio.wait_for(read.wait(), 5)
+        await asyncio.sleep(0.05)
+        row = store.one("select * from pools where id = 'prism'")
+        assert row["model_original"] == "owner/draw" and row["model_gb"] == 4.6
+    await hub_server.close()

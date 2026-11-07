@@ -1,0 +1,31 @@
+# How a Mac draws with each family of image model: a tool dots ships for it, its version pinned.
+#
+# A pool that draws names its model and the original that model was made from, as the model's own card says
+# (an mflux build of FLUX.2 klein 4B names black-forest-labs/FLUX.2-klein-4B). A Mac draws for the pool with
+# the runner below whose `originals` include that original, or it doesn't draw there. Only the model's name
+# comes with a job; the command is always one of these. `{tools}` is this folder.
+
+[[runner]]
+name = "FLUX.2 klein"
+originals = ["black-forest-labs/FLUX.2-klein-4B"]
+base_model = "flux2-klein-4b"
+draw = ["uvx", "--from", "mflux==0.24.0", "mflux-generate-flux2"]
+edit = ["uvx", "--from", "mflux==0.24.0", "mflux-generate-flux2-edit"]
+macos = "14.0"
+
+# dots' own driver, which shows the picture the model is heading for after each step (flux3_draw.py)
+[[runner]]
+name = "FLUX 3 Image Klein"
+originals = ["black-forest-labs/flux-3-image-klein"]
+base_model = "flux3-klein"
+draw = ["uvx", "--from", "mflux==0.24.0", "python", "-I", "{tools}/flux3_draw.py"]
+edit = ["uvx", "--from", "mflux==0.24.0", "python", "-I", "{tools}/flux3_draw.py"]
+macos = "14.0"
+
+# Restyles a starting picture rather than following edit instructions
+[[runner]]
+name = "Z-Image Turbo"
+originals = ["Tongyi-MAI/Z-Image-Turbo"]
+base_model = "z-image-turbo"
+draw = ["uvx", "--from", "mflux==0.24.0", "mflux-generate-z-image-turbo"]
+macos = "14.0"

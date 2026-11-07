@@ -47,7 +47,8 @@ def test_text_pictures_and_what_dots_cant_tell(tmp_path):
     text = describe("huggingface.co/a/chat-3B", hub)
     assert (text.kind, text.family, text.gb) == ("text", "qwen3_5", 2.0)
     pictures = describe("b/draw-q4", hub)
-    assert (pictures.kind, pictures.family, pictures.gb) == ("pictures", "DrawPipeline", 4.0)
+    assert (pictures.kind, pictures.family, pictures.gb, pictures.original) == ("pictures", "DrawPipeline", 4.0, "c/draw")
+    assert pictures.runs is False and "no way to draw" in pictures.why, "no runner draws models made from c/draw"
     for link in ("a/speech", "d/mystery"):
         unknown = describe(link, hub)
         assert unknown.kind == "unknown" and unknown.runs is False and unknown.why

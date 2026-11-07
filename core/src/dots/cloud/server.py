@@ -48,23 +48,28 @@ class Cloud:
         store.describe_pool(HUB_POOL, config.pool_blurb)
 
     async def _read_hub_pool_model(self, app: web.Application):
-        """The hub's own pool runs the model the cloud asks the hub for: read its repo once, in the background, so
-        the pool says what it runs and how big it is like any pool started from a link."""
-        task = asyncio.create_task(self._describe_hub_pool())
+        """Reads, once and in the background, what each pool runs where the cloud doesn't know it all yet: the
+        hub's own pool runs the model the cloud asks the hub for, and a pool made before the cloud kept a model's
+        size or original says them once its repo is read again."""
+        task = asyncio.create_task(self._describe_pools())
         yield
         task.cancel()
 
-    async def _describe_hub_pool(self) -> None:
-        model_id = self.config.pool_model
-        row = self.pool_row(HUB_POOL)
-        if not model_id or (row["serves_model_id"] == model_id and row["model_gb"]):
-            return
-        try:
-            model = await asyncio.to_thread(links.describe, model_id)
-        except Exception as e:  # offline, or the repo can't be read: the pool says less until it can
-            log.info("couldn't read %s: %s", model_id, e)
-            return
-        self.store.set_pool_model(HUB_POOL, model.id, model.kind, model.gb)
+    async def _describe_pools(self) -> None:
+        wanted = {HUB_POOL: self.config.pool_model} if self.config.pool_model else {}
+        for row in self.store.rows("select * from pools where serves_model_id is not null"):
+            missing = not row["model_gb"] or (row["model_kind"] == "pictures" and not row["model_original"])
+            if row["id"] == HUB_POOL and row["serves_model_id"] == self.config.pool_model and not missing:
+                wanted.pop(HUB_POOL, None)
+            elif row["id"] != HUB_POOL and missing:
+                wanted[row["id"]] = row["serves_model_id"]
+        for pool_id, model_id in wanted.items():
+            try:
+                model = await asyncio.to_thread(links.describe, model_id)
+            except Exception as e:  # offline, or the repo can't be read: the pool says less until it can
+                log.info("couldn't read %s: %s", model_id, e)
+                continue
+            self.store.set_pool_model(pool_id, model.id, model.kind, model.gb, model.original)
 
     # ---- the app -------------------------------------------------------------
 
@@ -170,7 +175,7 @@ class Cloud:
                 return error(400, f"dots can't run {model.name}: {model.why}")
         self.store.ensure_pool(pool_id, name[:60], self.me, is_public=bool(body.get("isPublic")))
         if model is not None:
-            self.store.set_pool_model(pool_id, model.id, model.kind, model.gb)
+            self.store.set_pool_model(pool_id, model.id, model.kind, model.gb, model.original)
         self.store.award("starter", "sparkles", "Pool starter", f"Started {name}")
         sync = await self.sync.build(self.hub)
         pool = next(p for p in sync["state"]["pools"] if p["id"] == pool_id)
@@ -362,7 +367,9 @@ class Cloud:
         row = self.pool_row(pool_id)
         if row is None or row["model_kind"] != "pictures":
             return error(404, "This pool doesn't draw pictures.", "not_found_error")
-        body = {**await _body(request), "pool": hub_pool(pool_id)}
+        # The pool's model, and the original that says how a Mac draws with it
+        body = {**await _body(request), "pool": hub_pool(pool_id), "model": row["serves_model_id"],
+                "original": row["model_original"]}
         _keep_privacy(request, body, {})
         out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await out.prepare(request)

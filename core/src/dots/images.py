@@ -5,14 +5,9 @@ network at every step; and the image models people use fit on one Mac. So the hu
 whole, to a worker that offers an image model, and that Mac draws it.
 
 The model runs in its own tool, such as mflux, which uv installs on first use in an environment of its own: it
-brings torch and opencv, which the worker itself never needs. A worker offers images only when it is set up
-with a model and the tool that runs it:
+brings torch and opencv, which the worker itself never needs. Which tool draws which model is fixed in
+`image_tools/runners.toml`; the pool names the model. Settings:
 
-    DOTS_IMAGE_MODEL         the model it offers; unset: none
-    DOTS_IMAGE_COMMAND       the tool that draws with it
-    DOTS_IMAGE_EDIT_COMMAND  the tool that edits pictures with it; unset: the drawing tool starts from the
-                             picture instead (image to image), which restyles but doesn't follow instructions
-    DOTS_IMAGE_BASE_MODEL    the family a converted model belongs to, as the tool names it
     DOTS_IMAGE_STEPS         denoising steps when a job doesn't say; unset: the model's own
     DOTS_IMAGE_EDIT_PIXELS   a picture larger than this is edited at this size, and the edit put back into the
                              full-size picture (`keep_unchanged`), so it keeps its definition everywhere else
@@ -29,7 +24,6 @@ import io
 import os
 import random
 import re
-import shlex
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -99,18 +93,10 @@ class ImageTool:
     edit_pixels: int = 1024 * 1024
 
     @classmethod
-    def from_env(cls) -> "ImageTool | None":
-        model = os.environ.get("DOTS_IMAGE_MODEL", "").strip()
-        if not model:
-            return None
-        command = os.environ.get("DOTS_IMAGE_COMMAND", "").strip()
-        if not command:
-            return None
-        edit_command = os.environ.get("DOTS_IMAGE_EDIT_COMMAND", "").strip()
-        return cls(model=model,
-                   command=tuple(shlex.split(command)),
-                   edit_command=tuple(shlex.split(edit_command)) if edit_command else None,
-                   base_model=os.environ.get("DOTS_IMAGE_BASE_MODEL", "").strip() or None,
+    def with_settings(cls, *, model: str, command: tuple[str, ...], edit_command: tuple[str, ...] | None,
+                      base_model: str | None) -> "ImageTool":
+        """A tool for `model`, with this Mac's settings for steps, time and edit size."""
+        return cls(model=model, command=command, edit_command=edit_command, base_model=base_model,
                    timeout_s=float(os.environ.get("DOTS_IMAGE_TIMEOUT_S", "900")),
                    steps=_steps(os.environ.get("DOTS_IMAGE_STEPS", "")),
                    edit_pixels=int(os.environ.get("DOTS_IMAGE_EDIT_PIXELS", str(1024 * 1024))))

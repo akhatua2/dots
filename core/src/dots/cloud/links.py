@@ -31,6 +31,8 @@ class ModelDescription:
     # Whether dots runs it: None when this host can't tell
     runs: bool | None
     why: str | None = None
+    # The model it was made from, as its card says: for pictures, what says how a Mac draws with it
+    original: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -62,7 +64,13 @@ def describe(link: str, hub=None) -> ModelDescription:
     tags = set(info.tags or [])
 
     if info.library_name == "mflux" or "mflux" in tags:
-        return ModelDescription(repo, name, "pictures", _pipeline_class(info, hub), gb, runs=None)
+        from ..image_tools import runners
+
+        original = _original(info)
+        known = runners.for_original(original, runners.load()) is not None
+        return ModelDescription(repo, name, "pictures", _pipeline_class(info, hub), gb, runs=None if known else False,
+                                why=None if known else "dots has no way to draw with this kind of model yet",
+                                original=original)
     if "config.json" in files and (info.pipeline_tag is None or info.pipeline_tag in _TEXT_TASKS):
         model_type = _read_json(hub, repo, "config.json").get("model_type")
         if model_type:
@@ -78,11 +86,17 @@ def _read_json(hub, repo: str, filename: str) -> dict:
         return json.load(f)
 
 
-def _pipeline_class(info, hub) -> str | None:
-    """An image model's family: the pipeline class of the original it names, when that can be read."""
+def _original(info) -> str | None:
+    """The model a build was made from, as its card names it"""
     base = (info.card_data or {}).get("base_model") if info.card_data else None
     base = base[0] if isinstance(base, list) and base else base
-    if not isinstance(base, str):
+    return base if isinstance(base, str) else None
+
+
+def _pipeline_class(info, hub) -> str | None:
+    """An image model's family: the pipeline class of the original it names, when that can be read."""
+    base = _original(info)
+    if base is None:
         return None
     try:
         return _read_json(hub, base, "model_index.json").get("_class_name")

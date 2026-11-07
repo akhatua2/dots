@@ -119,7 +119,9 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 3. The hub knows each worker's pool and runs each request on its pool's Macs with its pool's model. Done.
 4. Lending per pool: an amount to each pool, one worker each. Done: the cloud keeps a share per pool, the app runs a
    worker for each with its pool and memory, and each worker has its own identity at the hub.
-5. Workers learn what to run from their pool; runners by kind, no models in code.
+5. Workers learn what to run from their pool; runners by kind, no models in code. Done: a pool that draws keeps the original its
+   model was made from (its card says); each picture names the pool's model and that original; a Mac draws with the
+   runner `image_tools/runners.toml` has for it, or not at all, and never runs a command from a job.
 6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend. Done:
    a pool says its model, kind and size; its page shows what it runs, needs and has in place of the ladder; a Mac
    that can't hold a drawing pool's model joins it to ask, lending nothing.

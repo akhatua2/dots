@@ -101,7 +101,7 @@ images: the cloud marks those on the ladder (`readsImages`). With none, Ask says
 
 **Images out, and editing.** A diffusion model runs every layer many times over one image, so splitting it
 would cross the network at every step, and the image models people use fit on one Mac: the hub sends each
-job whole to a worker that offers an image model (`DOTS_IMAGE_MODEL`), through OpenAI's image API
+job whole to a worker in a pool that draws (its model is the pool's, its runner from `image_tools/runners.toml`), through OpenAI's image API
 (`/v1/images/generations`, `/v1/images/edits`). The worker runs mflux in its own uv environment
 (`images.py`): mflux brings torch and opencv, which a worker doesn't otherwise need.
 
