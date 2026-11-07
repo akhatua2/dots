@@ -475,3 +475,25 @@ def test_a_picture_model_goes_by_its_familys_name(model_id, original, name):
     from dots.cloud.catalog import picture_model_name
 
     assert picture_model_name(model_id, original) == name
+
+
+async def test_a_public_cloud_lets_someone_new_in_from_the_app(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    for open_signup in (False, True):
+        config = CloudConfig(hub_url=str(hub_server.make_url("")), token="owner-secret", open_signup=open_signup)
+        cloud = Cloud(Store(tmp_path / f"c{open_signup}.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+        async with TestClient(TestServer(cloud.app())) as client:
+            r = await client.post("/v1/people", json={"name": "Sam", "account": "acc-sam-new"})
+            if not open_signup:
+                assert r.status == 403, "a cloud that isn't open takes new people by invite"
+                continue
+            body = await r.json()
+            assert r.status == 200 and body["token"].startswith("dots_") and body["sync"]["state"]["meID"] == "acc-sam-new"
+            mine = await client.get("/v1/state", headers={"Authorization": f"Bearer {body['token']}"})
+            assert (await mine.json())["state"]["meID"] == "acc-sam-new"
+            joined = await client.post("/v1/pools/hub/join", json={"gb": 4}, headers={"Authorization": f"Bearer {body['token']}"})
+            assert [x["gb"] for x in (await joined.json())["sync"]["state"]["lendingShares"]] == [4]
+            again = await client.post("/v1/people", json={"name": "Sam", "account": "acc-sam-new"})
+            assert again.status == 409
+    await hub_server.close()

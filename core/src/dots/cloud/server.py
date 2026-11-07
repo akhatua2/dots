@@ -112,6 +112,7 @@ class Cloud:
         r.add_get("/v1/invites/{code}", self.invite_details)
         r.add_post("/v1/invites/{code}/accept", self.accept_invite)
         r.add_post("/v1/invites/{code}/join", self.join_as_newcomer)
+        r.add_post("/v1/people", self.sign_up)
         r.add_post("/hub/v1/heartbeat", self.heartbeat)
         r.add_post("/hub/v1/pools/{pool}/chat/completions", self.pool_answer)
         r.add_post("/hub/v1/pools/{pool}/images/{kind:generations|edits}", self.pool_picture)
@@ -125,7 +126,8 @@ class Cloud:
         caller = self._caller(request)
         # Someone new may look at an invite and join through it, which is how they get a token of their own
         newcomer = request.path == "/healthz" or (request.path.startswith("/v1/invites/")
-                                                  and (request.method == "GET" or request.path.endswith("/join")))
+                                                  and (request.method == "GET" or request.path.endswith("/join"))) \
+            or (request.path == "/v1/people" and request.method == "POST")
         if caller is None and not newcomer:
             return error(401, "Pass your token as a Bearer token.", "authentication_error")
         request["caller"] = caller
@@ -322,6 +324,29 @@ class Cloud:
             return error(404, "That invite has expired or never existed.", "not_found_error")
         return await self._join(request, invite["pool_id"], _gb(await _body(request)))
 
+    def _new_person(self, name: str, account: str) -> tuple[Caller, str] | web.Response:
+        """Someone new here: a person with the account their Mac's workers carry, a Mac, and a token of their own"""
+        if not name or not _ACCOUNT.match(account):
+            return error(400, "Send your name and your Mac's account (letters, digits, - and _).")
+        if self.store.one("select 1 from people where id = ?", account):
+            return error(409, "That account is already here. Use the token it got when it joined.", "conflict_error")
+        mac = f"mac-{account}"
+        self.store.set_person(account, name[:60])
+        return Caller(account, mac), self.store.make_token(account, mac)
+
+    async def sign_up(self, request: web.Request) -> web.Response:
+        """Someone new joins a public cloud straight from the app, with no invite: they get a token of their own,
+        shown this once, and see the public pools to join. A cloud only takes this when it is open."""
+        if not self.config.open_signup:
+            return error(403, "This cloud takes new people by invite. Ask someone in it for a link.", "permission_error")
+        body = await _body(request)
+        made = self._new_person(str(body.get("name", "")).strip(), str(body.get("account", "")).strip())
+        if isinstance(made, web.Response):
+            return made
+        caller, token = made
+        request["caller"] = caller
+        return await self.whole(request, token=token, personID=caller.person, macID=caller.mac)
+
     async def join_as_newcomer(self, request: web.Request) -> web.Response:
         """Someone new joins the pool an invite is for: they become a person here, with a Mac and a token of their
         own, which this answer carries once. `account` is the account their Mac's workers carry, so the hub knows
@@ -330,16 +355,13 @@ class Cloud:
         if not invite or is_expired(invite["expires"]):
             return error(404, "That invite has expired or never existed.", "not_found_error")
         body = await _body(request)
-        name, account = str(body.get("name", "")).strip(), str(body.get("account", "")).strip()
-        if not name or not _ACCOUNT.match(account):
-            return error(400, "Send your name and your Mac's account (letters, digits, - and _).")
-        if self.store.one("select 1 from people where id = ?", account):
-            return error(409, "That account is already here. Use the token it got when it joined.", "conflict_error")
-        mac = f"mac-{account}"
-        self.store.set_person(account, name[:60])
-        token = self.store.make_token(account, mac)
-        request["caller"] = Caller(account, mac)
-        return await self._join(request, invite["pool_id"], _gb(body), token=token, personID=account, macID=mac)
+        made = self._new_person(str(body.get("name", "")).strip(), str(body.get("account", "")).strip())
+        if isinstance(made, web.Response):
+            return made
+        caller, token = made
+        request["caller"] = caller
+        return await self._join(request, invite["pool_id"], _gb(body), token=token, personID=caller.person,
+                                macID=caller.mac)
 
     async def pledge(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]

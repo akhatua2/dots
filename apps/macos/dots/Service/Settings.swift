@@ -76,16 +76,22 @@ struct RouterRules: Codable, Equatable {
 
 /// Where the dots cloud is: the mock on this Mac, or a cloud at an address.
 struct CloudSettings: Codable, Equatable {
-    var useMock = true
+    /// The cloud a fresh install uses: the one the app was built for (`DotsCloudAddress`, set in project.yml), or the
+    /// mock when it names none
+    static let builtIn = ((Bundle.main.object(forInfoDictionaryKey: "DotsCloudAddress") as? String) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    var useMock = CloudSettings.builtIn.isEmpty
     var mockPort = 8790
-    var address = ""
+    var address = CloudSettings.builtIn
 
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        useMock = try c.decodeIfPresent(Bool.self, forKey: .useMock) ?? true
-        mockPort = try c.decodeIfPresent(Int.self, forKey: .mockPort) ?? 8790
-        address = try c.decodeIfPresent(String.self, forKey: .address) ?? ""
+        let d = CloudSettings()
+        useMock = try c.decodeIfPresent(Bool.self, forKey: .useMock) ?? d.useMock
+        mockPort = try c.decodeIfPresent(Int.self, forKey: .mockPort) ?? d.mockPort
+        address = try c.decodeIfPresent(String.self, forKey: .address) ?? d.address
     }
 }
 
@@ -118,6 +124,8 @@ struct AppSettings: Codable, Equatable {
     var imageMaxPixels = 1_048_576
     /// How big pictures are drawn, the longer side in pixels: sharper, or quicker (`Drawing.sides`)
     var pictureSide = 1024
+    /// Whether the first launch's welcome has been through: who you are, and what this Mac lends
+    var onboarded = false
 
     init() {}
     /// Settings saved by an older dots load with defaults for anything new.
@@ -136,6 +144,8 @@ struct AppSettings: Codable, Equatable {
         draftAhead = try c.decodeIfPresent(Bool.self, forKey: .draftAhead) ?? d.draftAhead
         imageMaxPixels = try c.decodeIfPresent(Int.self, forKey: .imageMaxPixels) ?? d.imageMaxPixels
         pictureSide = try c.decodeIfPresent(Int.self, forKey: .pictureSide) ?? d.pictureSide
+        // Settings saved before the welcome existed belong to someone already set up
+        onboarded = try c.decodeIfPresent(Bool.self, forKey: .onboarded) ?? true
     }
 
     private static let defaultsKey = "dots.settings.v1"

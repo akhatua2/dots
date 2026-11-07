@@ -45,9 +45,12 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: com.sourabhdaroji.dots.invite
             CFBundleURLSchemes: [dots]
+        # The cloud a fresh install connects to (DOTS_CLOUD_ADDRESS); empty, the built-in mock
+        DotsCloudAddress: $(DOTS_CLOUD_ADDRESS)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sourabhdaroji.dots
+        DOTS_CLOUD_ADDRESS: ""
         PRODUCT_NAME: dots
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: dots

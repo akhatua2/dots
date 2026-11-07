@@ -132,6 +132,9 @@ struct HeartbeatReply: Codable { var sync: CloudSync; var unlock: UnlockEvent? }
 struct JoinReply: Codable { var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
 /// Joining a friend's cloud through their invite: who you are there, and the token to use there from now on
 struct Newcomer: Codable { var name: String; var account: String; var gb: Int }
+/// Signing up on a public cloud from the first launch: the token to use there from now on
+struct SignUp: Codable { var name: String; var account: String }
+struct SignUpReply: Codable { var token: String; var sync: CloudSync }
 struct NewcomerReply: Codable { var token: String; var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
 struct BadgeReply: Codable { var badge: Badge?; var sync: CloudSync }
 struct PoolReply: Codable { var pool: Pool; var sync: CloudSync }

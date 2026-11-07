@@ -16,6 +16,12 @@ struct MainWindow: View {
         }
         .background(D.bg1)
         .overlay {
+            // The first launch's welcome covers the window until it's through
+            if !model.settings.onboarded && model.moment == nil {
+                OnboardingView().transition(.opacity)
+            }
+        }
+        .overlay {
             if let moment = model.moment {
                 MomentView(moment: moment)
                     .id(moment.id)

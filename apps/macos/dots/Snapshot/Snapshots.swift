@@ -187,6 +187,11 @@ enum Snapshots {
                  clock: Date().nightStart.addingTimeInterval(19.03 * 3_600))
         }
 
+        // The first launch: the welcome, your name, and what this Mac lends
+        save(OnboardingView(step: .welcome), model, window, dir, "26-welcome")
+        save(OnboardingView(step: .name), model, window, dir, "27-welcome-name")
+        save(OnboardingView(step: .lend), model, window, dir, "28-welcome-lend")
+
         // 10. Pools that name their one model: Home writes text with a small model, Prism draws pictures
         cloud.world.update { s in
             if let i = s.pools.firstIndex(where: { $0.id == "home" }) {

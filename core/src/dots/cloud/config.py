@@ -19,6 +19,8 @@ class CloudConfig:
     token: str = ""
     # Where friends reach this cloud from their own Macs, for invite links; unset, invites name no cloud.
     public_url: str = ""
+    # Whether someone new can join with no invite, straight from the app's first launch (a public cloud)
+    open_signup: bool = False
     # The name the hub's pool goes by in the apps.
     pool_name: str = "Home"
     pool_blurb: str = "A small model for quick, simple questions."
@@ -40,6 +42,7 @@ class CloudConfig:
             hub_token=env.get("DOTS_JOIN_TOKEN", cls.hub_token),
             token=env.get("DOTS_CLOUD_TOKEN", cls.token),
             public_url=env.get("DOTS_CLOUD_PUBLIC_URL", cls.public_url),
+            open_signup=env.get("DOTS_CLOUD_OPEN_SIGNUP", "") == "1",
             pool_name=env.get("DOTS_POOL_NAME", cls.pool_name),
             pool_blurb=env.get("DOTS_POOL_BLURB", cls.pool_blurb),
             pool_model=env.get("DOTS_POOL_MODEL", cls.pool_model),

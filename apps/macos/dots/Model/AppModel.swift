@@ -428,6 +428,44 @@ final class AppModel {
         route = .pool(pool.id)
     }
 
+    // MARK: The first launch
+
+    /// What the welcome says went wrong, when finishing it didn't work
+    var onboardingError: String?
+
+    /// The pool a new Mac lends to first: the public pool that answers questions with the most Macs in it
+    var firstPool: Pool? {
+        state.publicPools.filter { !$0.draws && $0.modelLabel != nil }.max { $0.lendingMacs < $1.lendingMacs }
+    }
+
+    /// The end of the welcome: who you are, and what this Mac lends. A cloud that doesn't know this Mac yet is
+    /// signed up to (a public cloud lets someone new in), then it lends to the first pool and says so.
+    func finishOnboarding(name: String, lendGB: Int) {
+        onboardingError = nil
+        Task {
+            do {
+                if !backend.isMock && (cloudToken ?? "").isEmpty {
+                    let reply: SignUpReply = try await backend.client.send(
+                        "POST", "v1/people", body: SignUp(name: name, account: workerProcess.account))
+                    cloudToken = reply.token
+                    connectCloud()
+                    await backend.syncNow()
+                } else {
+                    backend.rename(name)
+                }
+                settings.onboarded = true
+                if lendGB > 0, let pool = firstPool {
+                    backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
+                    join(pool, gb: lendGB)
+                } else {
+                    route = .explore
+                }
+            } catch {
+                onboardingError = error.localizedDescription
+            }
+        }
+    }
+
     // MARK: Invites
 
     /// Joins a friend's cloud through their invite: you become a person there, with your name and the account your

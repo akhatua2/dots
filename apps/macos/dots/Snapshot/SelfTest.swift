@@ -72,6 +72,7 @@ enum SelfTest {
             await lendingStories(rig)
             await communityStories(rig)
             await privacyStories(rig)
+            await welcomeStory(rig)
             await friendsCloudStory(rig)
         } else {
             print("\nThis Mac can't lend (it needs more than 8 GB of memory), so stories 7 to 17 can't run here.")
@@ -737,6 +738,23 @@ enum SelfTest {
     }
 
     // MARK: Helpers
+
+    /// Story 22: the first launch ends lending to a pool, under the name you gave.
+    private static func welcomeStory(_ rig: Rig) async {
+        let model = rig.model
+        story(22, "The first launch: your name, what this Mac lends, and a pool to start in")
+        // A new Mac lends nowhere yet
+        for share in model.state.lendingShares { if let pool = model.state.pool(share.poolID) { model.setShare(pool, gb: 0) } }
+        await model.backend.settled()
+        model.settings.onboarded = false
+        let first = model.firstPool
+        model.finishOnboarding(name: "Robin", lendGB: 2)
+        let done = await until(5) { model.settings.onboarded && model.state.share(in: first?.id) != nil }
+        await model.backend.settled()
+        check("Finishing it lends 2 GB to \(first?.name ?? "a public pool"), the busiest that answers questions, as Robin",
+              done && model.state.share(in: first?.id)?.gb == 2 && model.state.me.name == "Robin")
+        model.moment = nil
+    }
 
     /// Story 21: an invite to a friend's cloud. A second mock cloud plays the friend's; the app joins it there and uses
     /// it from then on. Last, because the app stays on the friend's cloud.
