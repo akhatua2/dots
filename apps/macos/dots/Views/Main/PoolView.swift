@@ -322,11 +322,12 @@ struct LevelCard: View {
 
     @ViewBuilder private func action(togo: Int) -> some View {
         let s = model.state
-        let lendingHere = s.lendingPoolID == pool.id && s.lending.isOn
-        let room = s.thisMac.maxLendGB - (lendingHere ? s.lending.limitGB : 0)
+        let lent = s.share(in: pool.id)?.gb ?? 0
+        let lendingHere = lent > 0 && s.lending.isOn
+        let room = s.mostGB(for: pool.id) - lent
         if room >= togo {
             Button(lendingHere ? "Lend \(togo) GB More" : pool.isMember(s.meID) ? "Lend Here" : "Add My Mac") {
-                if lendingHere { model.setLimit(s.lending.limitGB + togo) } else { model.join(pool) }
+                if pool.isMember(s.meID) { model.setShare(pool, gb: lent + togo); model.setLendingOn(true) } else { model.join(pool) }
             }
             .buttonStyle(DButtonStyle(kind: .primary, large: true))
         }
@@ -340,7 +341,8 @@ struct LevelCard: View {
 
 // MARK: - Your contribution
 
-/// What your Mac gives this pool right now, and the controls for it: lend here or not, how much, or leave.
+/// What your Mac gives this pool right now, and the controls for it: lend here or not, how much, or leave. The most
+/// it can lend here is what its other pools leave.
 struct ContributionCard: View {
     @Environment(AppModel.self) private var model
     @Environment(\.isSnapshot) private var isSnapshot
@@ -349,23 +351,30 @@ struct ContributionCard: View {
 
     var body: some View {
         let s = model.state
-        let here = s.lendingPoolID == pool.id
+        let shareGB = s.share(in: pool.id)?.gb ?? 0
+        let here = shareGB > 0
         let on = here && s.lending.isOn
         let status = model.lendingStatus
         let maxLend = s.thisMac.maxLendGB
-        // What the pool counts for this Mac: its worker lends the setting, or less when that much isn't free.
+        let most = s.mostGB(for: pool.id)
+        // What the pool counts for this Mac: its worker lends the share, or less when that much isn't free.
         // Until the worker is in the pool it is starting, and lends nothing yet.
         let me = pool.macs.first { $0.macID == s.thisMacID }
         let starting = on && status.isActive && me?.state == .online
-        let lent = me?.state == .lending ? me?.lendGB ?? s.lending.limitGB : s.lending.limitGB
+        let lent = me?.state == .lending ? me?.lendGB ?? shareGB : shareGB
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Your Contribution").font(D.ui(13, .semibold)).foregroundStyle(D.title)
                 Spacer()
                 OrangeSwitch(isOn: Binding(get: { on }, set: { want in
-                    if want { if here { model.setLendingOn(true) } else { model.join(pool) } } else { model.setLendingOn(false) }
+                    if want {
+                        if !here { model.setShare(pool, gb: most) }
+                        model.setLendingOn(true)
+                    } else {
+                        model.setShare(pool, gb: 0)
+                    }
                 }), label: "Lend in \(pool.name)")
-                .disabled(maxLend == 0)
+                .disabled(maxLend == 0 || (!here && most == 0))
             }
             .frame(height: 20)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -375,16 +384,17 @@ struct ContributionCard: View {
                     .contentTransition(.numericText())
                 HStack(spacing: 6) {
                     if status.isActive && here && !starting { Circle().fill(D.accent).frame(width: 6, height: 6).modifier(Blink(on: !isSnapshot)) }
-                    Text(starting ? "your Mac is joining the pool" : note(here: here, on: on, status: status) + (on && lent < s.lending.limitGB ? ", up to \(s.lending.limitGB) GB" : ""))
+                    Text(starting ? "your Mac is joining the pool" : note(here: here, on: on, most: most, status: status) + (on && lent < shareGB ? ", up to \(shareGB) GB" : ""))
                         .lineLimit(1)
                 }
-                .help(on && lent < s.lending.limitGB ? "Only \(lent) GB is free on your Mac right now, so that is what it lends." : "")
+                .help(on && lent < shareGB ? "Only \(lent) GB is free on your Mac right now, so that is what it lends." : "")
                 .font(D.ui(13)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.top, 10)
-            ThinSlider(value: Binding(get: { max(1, s.lending.limitGB) }, set: { model.setLimit($0) }),
+            ThinSlider(value: Binding(get: { max(1, shareGB) }, set: { model.setShare(pool, gb: $0) }),
                        range: 1...max(2, maxLend), enabled: on, label: "Lend in \(pool.name)")
-                .help("Lend 1 to \(maxLend) GB. \(s.thisMac.keptGB) GB always stays with your Mac.")
+                .help(most < maxLend ? "Lend up to \(most) GB here; your other pools have the rest of the \(maxLend) GB this Mac lends."
+                                     : "Lend 1 to \(maxLend) GB. \(s.thisMac.keptGB) GB always stays with your Mac.")
                 .padding(.top, 12)
             LayerTicks(shares: shares(includeMe: on), live: on && model.backend.worker?.working == true)
                 .padding(.top, 16)
@@ -398,9 +408,8 @@ struct ContributionCard: View {
         .panel()
     }
 
-    private func note(here: Bool, on: Bool, status: LendingStatus) -> String {
-        let s = model.state
-        if !here { return s.lendingPool.map { "lending to \($0.name)" } ?? "not lending" }
+    private func note(here: Bool, on: Bool, most: Int, status: LendingStatus) -> String {
+        if !here { return most == 0 ? "your other pools have all of this Mac" : "not lending here" }
         if !on { return "in this pool" }
         return status.isActive ? "lending now" : status.headline.lowercased()
     }
@@ -414,7 +423,7 @@ struct ContributionCard: View {
         guard let layers = pool.model?.layers else { return [] }  // no model, no layers to share
         var macs = pool.macs.filter { $0.state == .lending && ($0.macID != s.thisMacID || includeMe) }.sorted { $0.joinedAt < $1.joinedAt }
         if includeMe, !macs.contains(where: { $0.macID == s.thisMacID }) {
-            macs.append(PoolMac(macID: s.thisMacID, lendGB: s.lending.limitGB, state: .lending, joinedAt: .now))
+            macs.append(PoolMac(macID: s.thisMacID, lendGB: s.share(in: pool.id)?.gb ?? 0, state: .lending, joinedAt: .now))
         }
         let crowd = pool.crowdGB
         let total = Double(max(1, macs.reduce(crowd) { $0 + $1.lendGB }))
@@ -456,17 +465,17 @@ struct ContributionCard: View {
     }
 }
 
-/// Before your Mac lends here: what it would add, and the button to add it.
+/// Before you join: what your Mac would add (what your other pools leave), and the button to join. With nothing left
+/// to lend, joining still lets you ask the pool.
 struct JoinCard: View {
     @Environment(AppModel.self) private var model
     var pool: Pool
 
     var body: some View {
         let s = model.state
-        let add = max(1, s.lending.limitGB)
+        let add = s.mostGB(for: pool.id)
         let after = pool.pooledGB + add
         let next = pool.nextModel
-        let elsewhere = s.lendingPool.flatMap { $0.id == pool.id ? nil : $0 }
         VStack(alignment: .leading, spacing: 0) {
             CardHeader("Your \(s.thisMac.kind)", note: "\(s.thisMac.memoryGB) GB")
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -475,7 +484,10 @@ struct JoinCard: View {
             }
             .padding(.top, 10)
             Group {
-                if let next, after >= next.minGB {
+                if add == 0 {
+                    Text("Your other pools have all this Mac lends. Join to ask \(pool.name), and give it a share later.")
+                        .foregroundStyle(D.t3)
+                } else if let next, after >= next.minGB {
                     Text("Takes \(pool.name) to \(after.grouped) GB, past \(next.name)'s line, for everyone here.")
                         .foregroundStyle(D.accentText)
                 } else if let next {
@@ -485,10 +497,9 @@ struct JoinCard: View {
                 }
             }
             .font(D.ui(13)).fixedSize(horizontal: false, vertical: true).padding(.top, 10)
-            Button(elsewhere != nil ? "Lend Here Instead" : "Add My Mac") { model.join(pool) }
+            Button(add > 0 ? "Add My Mac" : "Join \(pool.name)") { model.join(pool) }
                 .buttonStyle(DButtonStyle(kind: .primary, large: true))
-                .disabled(s.thisMac.maxLendGB == 0)
-                .help("About \(pool.creditsPerHour(lendGB: add).counted("credit")) an hour while it lends." + (elsewhere.map { " It stops lending to \($0.name)." } ?? ""))
+                .help(add > 0 ? "About \(pool.creditsPerHour(lendGB: add).counted("credit")) an hour while it lends." : "")
                 .padding(.top, 16)
         }
         .panel()

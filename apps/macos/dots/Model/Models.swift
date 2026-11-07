@@ -107,6 +107,8 @@ struct PoolMac: Codable, Hashable, Identifiable {
 
 struct UnlockEvent: Codable, Hashable, Identifiable {
     var id = UUID()
+    /// The pool it happened in, when the cloud says
+    var poolID: String?
     var modelID: String
     var byMacID: String
     var fromGB: Int
@@ -239,12 +241,21 @@ extension Pool {
 
 // MARK: - You
 
+/// This Mac's rules for lending, the same for every pool it lends to. How much each pool gets is its share.
 struct LendingSettings: Codable, Hashable {
     var isOn = false
-    var limitGB = 0
     var onlyWhenPluggedIn = true
     var pauseWhileInUse = false
     var pausedUntil: Date?
+}
+
+/// What this Mac lends one pool: some of its memory, held by a worker of its own for that pool.
+struct LendingShare: Codable, Hashable {
+    var poolID: String
+    var gb: Int
+    var since: Date?
+    /// The pool's name at the hub, which its worker gives: the hub's own pool is its default ("")
+    var hubPool: String?
 }
 
 struct CreditEvent: Codable, Hashable, Identifiable {
@@ -356,9 +367,9 @@ struct NetworkState: Codable {
     var apiKeys: [APIKey]
     var requests: [RequestRecord]
     var lending: LendingSettings
-    var lendingPoolID: String?
+    /// The pools this Mac lends to, an amount to each
+    var lendingShares: [LendingShare]
     var networkLendingNow: Int
-    var lendingSince: Date?
     /// Pools endorsed before this history starts (the sample profile has a past).
     var endorsedBefore = 0
     /// Hours this Mac has lent, and the compute the hub measured for it, all time
@@ -380,7 +391,16 @@ struct NetworkState: Codable {
     func pool(_ id: String?) -> Pool? { guard let id else { return nil }; return pools.first { $0.id == id } }
     var myPools: [Pool] { pools.filter { $0.isMember(meID) } }
     var publicPools: [Pool] { pools.filter(\.isPublic) }
-    var lendingPool: Pool? { pool(lendingPoolID) }
+    func share(in poolID: String?) -> LendingShare? { lendingShares.first { $0.poolID == poolID } }
+    func isLending(to poolID: String?) -> Bool { share(in: poolID) != nil }
+    var lendingPools: [Pool] { lendingShares.compactMap { pool($0.poolID) } }
+    var lendingPoolIDs: Set<String> { Set(lendingShares.map(\.poolID)) }
+    /// What this Mac lends in all, across its pools
+    var lentGB: Int { lendingShares.reduce(0) { $0 + $1.gb } }
+    /// The most a pool's share can be: what this Mac can lend, less what its other pools have
+    func mostGB(for poolID: String) -> Int {
+        max(0, thisMac.maxLendGB - lentGB + (share(in: poolID)?.gb ?? 0))
+    }
     /// People you know in a pool, as Explore shows them
     func friends(in pool: Pool) -> [Person] { pool.memberIDs.filter { $0 != meID }.compactMap { person($0) } }
     var poolsEndorsed: Int { endorsedBefore + pools.filter(\.endorsedByMe).count }

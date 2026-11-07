@@ -117,7 +117,8 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 1. The backend reads a link: kind, family where it can tell, size, what Macs need, whether dots runs it. Done.
 2. A pool stores its model (and kind). Done: the cloud keeps it and says it in each pool's sync.
 3. The hub knows each worker's pool and runs each request on its pool's Macs with its pool's model. Done.
-4. Lending per pool: an amount to each pool, one worker each.
+4. Lending per pool: an amount to each pool, one worker each. Done: the cloud keeps a share per pool, the app runs a
+   worker for each with its pool and memory, and each worker has its own identity at the hub.
 5. Workers learn what to run from their pool; runners by kind, no models in code.
 6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
 7. For people beyond one Wi-Fi: the cloud and the hub on a public server.

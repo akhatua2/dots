@@ -76,7 +76,7 @@ async def env(tmp_path):
 
 def dates_in(value) -> list[str]:
     if isinstance(value, dict):
-        return [d for k, v in value.items() for d in ([v] if k in {"date", "joinedAt", "createdAt", "expires", "issued", "lendingSince", "starts"} else dates_in(v))]
+        return [d for k, v in value.items() for d in ([v] if k in {"date", "joinedAt", "createdAt", "expires", "issued", "since", "starts"} else dates_in(v))]
     if isinstance(value, list):
         return [d for v in value for d in dates_in(v)]
     return []
@@ -130,11 +130,39 @@ async def test_start_join_and_leave_a_pool(env):
     body = await r.json()
     assert r.status == 200 and body["pool"]["name"] == "Late Night Lab"
     assert any(b["id"] == "starter" for b in body["sync"]["state"]["badges"])
-    r = await client.post("/v1/pools/late-night-lab/join")
+    r = await client.post("/v1/pools/late-night-lab/join", json={"gb": 6})
     body = await r.json()
-    assert body["macNumber"] == 1 and body["sync"]["state"]["lendingPoolID"] == "late-night-lab"
+    shares = body["sync"]["state"]["lendingShares"]
+    assert body["macNumber"] == 1 and [(x["poolID"], x["gb"]) for x in shares] == [("late-night-lab", 6)]
     r = await client.post("/v1/pools/late-night-lab/leave")
-    assert "lendingPoolID" not in (await r.json())["sync"]["state"]
+    assert (await r.json())["sync"]["state"]["lendingShares"] == []
+
+
+async def test_a_mac_lends_an_amount_to_each_of_several_pools(env):
+    client, _ = env
+    await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True})
+    await client.post("/v1/pools/hub/join", json={"gb": 4})
+    await client.post("/v1/pools/prism/join", json={"gb": 2})
+    state = (await (await client.post("/hub/v1/heartbeat", json={"active": True, "seconds": 60})).json())["sync"]["state"]
+    shares = {x["poolID"]: x for x in state["lendingShares"]}
+    assert {p: x["gb"] for p, x in shares.items()} == {"hub": 4, "prism": 2}
+    assert shares["hub"]["hubPool"] == "" and shares["prism"]["hubPool"] == "prism", "the hub's own pool is its default"
+    prism = next(p for p in state["pools"] if p["id"] == "prism")
+    assert [(m["lendGB"], m["state"]) for m in prism["macs"]] == [(2, "lending")], "each pool sees only its share"
+    assert {n["poolID"] for n in state["nights"]} >= {"hub", "prism"}, "lending time counts in every pool lent to"
+
+    state = (await (await client.post("/v1/pools/prism/share", json={"gb": 5})).json())["sync"]["state"]
+    assert {x["poolID"]: x["gb"] for x in state["lendingShares"]} == {"hub": 4, "prism": 5}
+    state = (await (await client.post("/v1/pools/prism/share", json={"gb": 0})).json())["sync"]["state"]
+    assert [x["poolID"] for x in state["lendingShares"]] == ["hub"]
+    assert any(p["id"] == "prism" and state["meID"] in p["memberIDs"] for p in state["pools"]), "lending nothing still leaves you in it"
+    assert (await client.post("/v1/pools/nowhere/share", json={"gb": 1})).status == 404
+
+
+async def test_join_without_a_share_asks_but_does_not_lend(env):
+    client, _ = env
+    body = await (await client.post("/v1/pools/hub/join")).json()
+    assert body["sync"]["state"]["lendingShares"] == [] and body["unlock"] is None
 
 
 async def test_endorsing_twice_counts_once_and_earns_early_backer(env):
@@ -158,9 +186,9 @@ async def test_an_invite_says_what_your_mac_would_add_then_joins(env):
 async def test_heartbeats_record_lending_and_an_unlock(env):
     client, _ = env
     await client.post("/v1/pools", json={"id": "studio", "name": "Studio", "isPublic": False})
-    await client.post("/v1/pools/studio/join")
+    await client.post("/v1/pools/studio/join", json={"gb": 10})
     body = await (await client.post("/hub/v1/heartbeat",
-                                     json={"active": True, "lendGB": 10, "seconds": 120, "macKind": "MacBook Air", "memoryGB": 24})).json()
+                                     json={"active": True, "seconds": 120, "macKind": "MacBook Air", "memoryGB": 24})).json()
     s = body["sync"]["state"]
     assert body["unlock"] is None, "a pool with no model to serve unlocks nothing, whatever its memory"
     assert s["nights"][0]["minutes"] == 2 and s["hoursLent"] > 0
@@ -227,8 +255,8 @@ async def test_the_hub_pool_unlocks_its_model_once_this_macs_worker_is_in(tmp_pa
     cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
     my_worker = {"id": "w-me", "account_id": ME, "ready": True, "layer_range": [0, 24], "ram_gb": 4.0}
     async with TestClient(TestServer(cloud.app())) as client:
-        await client.post("/v1/pools/hub/join")
-        beat = {"active": True, "lendGB": 8, "seconds": 5, "macKind": "Mac", "memoryGB": 16}
+        await client.post("/v1/pools/hub/join", json={"gb": 8})
+        beat = {"active": True, "seconds": 5, "macKind": "Mac", "memoryGB": 16}
 
         async def heartbeat() -> dict:
             return await (await client.post("/hub/v1/heartbeat", json=beat)).json()
@@ -243,7 +271,7 @@ async def test_the_hub_pool_unlocks_its_model_once_this_macs_worker_is_in(tmp_pa
         assert first["unlock"]["modelID"] == MODEL, "the served model is an unlock; Llama's rung is not"
         hub_pool = next(p for p in first["sync"]["state"]["pools"] if p["id"] == "hub")
         assert hub_pool["servesModelID"] == MODEL
-        assert hub_pool["macs"][0]["lendGB"] == 4, "the pool counts what the worker lends, not the setting"
+        assert hub_pool["macs"][0]["lendGB"] == 4, "the pool counts what the worker lends, not the share"
 
         nodes.clear()  # the worker restarts
         await heartbeat()
@@ -293,3 +321,11 @@ async def test_a_pool_runs_the_model_its_link_names(env, monkeypatch):
     assert pool["modelName"] and pool["isPublic"] is True
     r = await client.post("/v1/pools", json={"id": "talk", "name": "Talk", "model": "owner/speech"})
     assert r.status == 400 and "can't run" in (await r.json())["error"]["message"]
+
+
+def test_a_database_from_one_pool_lending_keeps_its_pool_as_a_share(tmp_path):
+    path = tmp_path / "old.db"
+    Store(path).run("update lending set pool_id = 'hub', lend_gb = 6, since = '2026-10-01T00:00:00Z' where id = 1")
+    store = Store(path)
+    assert [(r["pool_id"], r["gb"]) for r in store.shares()] == [("hub", 6)]
+    assert store.lending()["pool_id"] is None

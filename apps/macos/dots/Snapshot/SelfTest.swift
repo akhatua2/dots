@@ -320,8 +320,9 @@ enum SelfTest {
         model.join(model.state.pool("studio-9")!)
         await model.backend.settled()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
-        check("Lending to Studio 9: the hub has this Mac lending \(model.state.lending.limitGB) GB",
-              mine("studio-9")?.state == .lending && mine("studio-9")?.lendGB == model.state.lending.limitGB)
+        let studioShare = model.state.share(in: "studio-9")?.gb ?? 0
+        check("Joining Studio 9 lends it all this Mac has to lend: \(studioShare) GB, and the hub has it lending",
+              studioShare == model.state.thisMac.maxLendGB && mine("studio-9")?.state == .lending && mine("studio-9")?.lendGB == studioShare)
         let worker = model.backend.worker
         check("The hub gives this Mac its share of the model's layers",
               worker?.poolName == "Studio 9" && worker?.layers == model.state.pool("studio-9")?.model?.layers && (worker.map { $0.lastLayer >= $0.firstLayer } ?? false))
@@ -341,6 +342,7 @@ enum SelfTest {
         model.refreshLending()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
         check("Plugged back in, it lends again", mine("studio-9")?.state == .lending)
+        await launcherChecks()
 
         story(8, "Credits for measured work, every entry visible")
         cloud.forcedWorking = true
@@ -348,7 +350,7 @@ enum SelfTest {
         await model.backend.beatNow(active: true, adding: 3_600)
         let after = cloud.world.state
         let studio = after.pool("studio-9")!
-        let lend = after.lending.limitGB
+        let lend = after.share(in: "studio-9")?.gb ?? 0
         let rate = studio.creditsPerHour(lendGB: lend)
         let compute = Simulation.computePF(pool: studio, lendGB: lend, seconds: 3_600)
         let entry = after.creditLog.first
@@ -423,14 +425,34 @@ enum SelfTest {
 
         story(12, "Joining a pool is a moment")
         let union = model.state.pool("student-union")!
+        let studio = model.state.pool("studio-9")!
+        // Studio 9 has all this Mac lends: give it nothing, staying in it, so Student Union can have it all
+        model.setShare(studio, gb: 0)
         model.join(union)
         let joined = joinedMoment(model, "student-union")
         check("Joining Student Union shows the moment: this Mac is its \(union.totalMacs + 1)th", joined?.macNumber == union.totalMacs + 1)
         await model.backend.settled()
+        await model.backend.beatNow(active: model.lendingStatus.isActive)
         let inCloud = cloud.world.state.pool("student-union")
-        check("The cloud has you in it, lending there, and only there",
+        check("The cloud has you in it, lending there, and only there; still in Studio 9, lending it nothing",
               inCloud?.isMember(model.state.meID) == true && inCloud?.macs.first { $0.macID == me }?.state == .lending
-              && cloud.world.state.lendingPoolID == "student-union" && cloud.world.state.pool("studio-9")?.macs.contains { $0.macID == me } == false)
+              && cloud.world.state.lendingShares.map(\.poolID) == ["student-union"]
+              && cloud.world.state.pool("studio-9")?.macs.contains { $0.macID == me } == false
+              && cloud.world.state.pool("studio-9")?.isMember(model.state.meID) == true)
+        let half = model.state.thisMac.maxLendGB / 2
+        model.setShare(union, gb: half)
+        model.setShare(studio, gb: model.state.thisMac.maxLendGB)
+        await model.backend.settled()
+        await model.backend.beatNow(active: model.lendingStatus.isActive)
+        let split = cloud.world.state
+        check("One Mac lends to two pools, an amount to each: \(half) GB to Student Union, the other \(split.share(in: "studio-9")?.gb ?? 0) to Studio 9",
+              split.share(in: "student-union")?.gb == half && split.share(in: "studio-9")?.gb == split.thisMac.maxLendGB - half
+              && split.pool("student-union")?.macs.first { $0.macID == me }?.lendGB == half
+              && split.pool("studio-9")?.macs.first { $0.macID == me }?.lendGB == split.thisMac.maxLendGB - half)
+        check("...and neither can take what the other has", model.state.mostGB(for: "studio-9") == split.thisMac.maxLendGB - half)
+        model.setShare(studio, gb: 0)
+        model.setShare(union, gb: model.state.thisMac.maxLendGB)
+        await model.backend.settled()
 
         story(13, "An unlock names the Mac that tipped it")
         check("This Mac took Student Union from \(union.pooledGB) GB over GLM 5.3's line",
@@ -486,11 +508,14 @@ enum SelfTest {
         model.openInviteLink("dots://invite/LATE7Q")
         let loaded = await until { model.openInvite?.preview != nil }
         check("dots://invite/LATE7Q opens the invite sheet, with the preview", model.sheet == .openInvite && loaded)
+        // Make room: Late Night Lab gets all this Mac lends
+        model.setShare(union, gb: 0)
         if let p = model.openInvite?.preview { model.acceptInvite(p) }
         let accepted = await until(5) { joinedMoment(model, "late-night-lab") != nil }
         let late = joinedMoment(model, "late-night-lab")
         check("Accepting joins the pool, with the moment and the unlock this Mac caused",
-              accepted && late?.unlock?.modelID == Ladder.best(for: lateGB + model.state.lending.limitGB)?.id && late?.unlock?.byMacID == me)
+              accepted && late?.unlock?.modelID == Ladder.best(for: lateGB + (model.state.share(in: "late-night-lab")?.gb ?? 0))?.id
+              && late?.unlock?.byMacID == me)
         check("...and the invite is used up", !(cloud.world.state.invitesForMe ?? []).contains("LATE7Q") && model.backend.invites.isEmpty)
         let invite = model.backend.createInvite(poolID: "studio-9")
         await model.backend.settled()
@@ -523,16 +548,16 @@ enum SelfTest {
         check("Count Me In pledges this Mac's \(spare) GB, as a member", pledged?.gb == spare && pledged?.guest == false
               && model.state.pool("late-night-lab")?.boost?.pledgedGB == 296 + spare)
         if let b = model.state.pool("late-night-lab")?.boost {
-            let wasPool = model.state.lendingPoolID, wasLimit = model.state.lending.limitGB
-            model.setLimit(4)
+            let lab = model.state.pool("late-night-lab")!
+            let was = model.state.share(in: lab.id)?.gb ?? 0
+            model.setShare(lab, gb: 4)
             model.runBoosts(now: b.starts.addingTimeInterval(60))
             check("When the boost starts, this Mac lends its \(spare) GB there, awake",
-                  model.boosting == "late-night-lab" && model.state.lendingPoolID == "late-night-lab"
-                  && model.state.lending.limitGB == spare && model.state.lending.isOn)
+                  model.boosting == "late-night-lab" && model.state.share(in: lab.id)?.gb == spare && model.state.lending.isOn)
             model.runBoosts(now: b.ends.addingTimeInterval(60))
-            check("...and when it ends, lending goes back to how it was", model.boosting == nil && model.state.lending.limitGB == 4
-                  && model.state.lendingPoolID == wasPool)
-            model.setLimit(wasLimit)
+            check("...and when it ends, lending goes back to how it was",
+                  model.boosting == nil && model.state.share(in: lab.id)?.gb == 4)
+            model.setShare(lab, gb: was)
         }
         model.backend.pledgeBoost(poolID: "late-night-lab", gb: nil)
         await model.backend.settled()
@@ -680,6 +705,45 @@ enum SelfTest {
     }
 
     // MARK: Helpers
+
+    /// The real worker launcher, with a stand-in for the worker: a worker for each pool, held to its share.
+    private static func launcherChecks() async {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("dots-workers-\(UUID().uuidString)").path
+        let standIn = home + "/stand-in"
+        try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        try? "#!/bin/sh\ntrap 'kill $!; exit 0' TERM\nsleep 30 &\nwait\n".write(toFile: standIn, atomically: true, encoding: .utf8)
+        chmod(standIn, 0o755)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let launcher = WorkerProcess(environment: ["DOTS_WORKER": standIn, "DOTS_HOME": home])
+        func pid(_ file: String) -> String? {
+            (try? String(contentsOfFile: home + "/" + file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commandLine(_ file: String) -> String {
+            guard let pid = pid(file) else { return "" }
+            let ps = Process()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+            ps.arguments = ["-o", "command=", "-p", pid]
+            let out = Pipe()
+            ps.standardOutput = out
+            guard (try? ps.run()) != nil else { return "" }
+            ps.waitUntilExit()
+            return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        }
+        let home4 = LendingShare(poolID: "hub", gb: 4, hubPool: ""), prism2 = LendingShare(poolID: "prism", gb: 2, hubPool: "prism")
+        launcher.reconcile(lend: true, shares: [home4, prism2], ticket: "the-ticket")
+        let hubLine = commandLine("worker.pid"), prismLine = commandLine("worker-prism.pid")
+        check("Lending to two pools runs a worker for each, held to its share: 4 GB in the hub's own pool, 2 GB in Prism",
+              hubLine.contains("the-ticket --pool  --max-ram 4") && prismLine.contains("the-ticket --pool prism --max-ram 2"))
+        let hubPid = pid("worker.pid")
+        launcher.reconcile(lend: true, shares: [home4, LendingShare(poolID: "prism", gb: 3, hubPool: "prism")], ticket: "the-ticket")
+        check("Changing Prism's share restarts only Prism's worker",
+              pid("worker.pid") == hubPid && commandLine("worker-prism.pid").contains("--pool prism --max-ram 3"))
+        launcher.reconcile(lend: true, shares: [home4], ticket: "the-ticket")
+        check("Stopping lending to Prism stops its worker, and the other goes on", pid("worker-prism.pid") == nil && pid("worker.pid") == hubPid)
+        launcher.reconcile(lend: false, shares: [home4], ticket: "the-ticket")
+        try? await Task.sleep(for: .milliseconds(200))
+        check("Pausing stops every worker", pid("worker.pid") == nil && !launcher.isRunning)
+    }
 
     private static func story(_ n: Int, _ title: String) {
         print("\n\(n). \(title)")

@@ -79,7 +79,7 @@ struct ProfileView: View {
         let live = model.lendingStatus.isActive
         return VStack(spacing: 0) {
             ZStack {
-                RecordArt(nights: nights, currentPoolID: s.lendingPoolID, size: 400, live: live)
+                RecordArt(nights: nights, currentPoolIDs: s.lendingPoolIDs, size: 400, live: live)
                 VStack(spacing: 3) {
                     Text("\(nights.count)").font(D.ui(30, .light).monospacedDigit()).foregroundStyle(D.t2)
                     Text("NIGHTS").font(D.ui(9, .bold)).tracking(1.6).foregroundStyle(Color(hex: 0x6E6E6E))
@@ -95,7 +95,7 @@ struct ProfileView: View {
                 }
                 .font(D.ui(12.5)).foregroundStyle(Color(hex: 0x8A8A8A))
                 Spacer()
-                RecordShare(nights: nights, currentPoolID: s.lendingPoolID)
+                RecordShare(nights: nights, currentPoolIDs: s.lendingPoolIDs)
             }
             .frame(height: 28)
             .padding(.top, 8)
@@ -113,7 +113,7 @@ struct ProfileView: View {
 /// Share your contribution fingerprint as an image.
 struct RecordShare: View {
     var nights: [NightLent]
-    var currentPoolID: String?
+    var currentPoolIDs: Set<String>
     @Environment(\.isSnapshot) private var isSnapshot
     @State private var image: Image?
 
@@ -142,7 +142,7 @@ struct RecordShare: View {
 
     private func render() {
         guard !isSnapshot else { return }
-        let art = RecordArt(nights: nights, currentPoolID: currentPoolID, size: 1_200)
+        let art = RecordArt(nights: nights, currentPoolIDs: currentPoolIDs, size: 1_200)
             .background(D.bg0)
             .environment(\.artClock, .now)
         let renderer = ImageRenderer(content: art)
@@ -277,9 +277,9 @@ struct WhereLentCard: View {
                 .frame(height: 22, alignment: .bottom)
                 ForEach(Array(pools.enumerated()), id: \.element) { i, pid in
                     let pool = s.pool(pid)
-                    let tone = Color(hex: RecordArt.tone(for: pid, in: nights, current: s.lendingPoolID))
+                    let tone = Color(hex: RecordArt.tone(for: pid, in: nights, current: s.lendingPoolIDs))
                     let total = nights.filter { $0.poolID == pid }.count
-                    let tonight = pid == s.lendingPoolID && nights.last?.poolID == pid && nights.last?.date == Date().nightStart
+                    let tonight = s.isLending(to: pid) && nights.contains { $0.poolID == pid && $0.date == Date().nightStart }
                     HStack(spacing: 16) {
                         HStack(spacing: 10) {
                             Circle().fill(tone).frame(width: 9, height: 9)

@@ -28,8 +28,8 @@ final class Simulation: DotsBackend {
     private(set) var state: NetworkState
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     @ObservationIgnored private var sinceSave: Double = 0
-    @ObservationIgnored private var sessionEventID: UUID?
-    @ObservationIgnored private var sessionEarned: Double = 0
+    /// Each pool's credit line for this lending session, and what it has earned so far
+    @ObservationIgnored private var sessions: [String: (eventID: UUID, earned: Double)] = [:]
     /// Runs part-way done, carried to the next tick
     @ObservationIgnored private var runCarry: Double = 0
     /// Where it's saved. Nil for snapshots, the self-test and the app's mirror, which never write over a saved network
@@ -52,10 +52,6 @@ final class Simulation: DotsBackend {
         if let i = state.devices.firstIndex(where: { $0.id == state.thisMacID }) {
             state.devices[i].memoryGB = ThisMac.memoryGB
             state.devices[i].kind = ThisMac.kind
-        }
-        // Only clamp to what this Mac can lend once the cloud knows its memory.
-        if state.thisMac.memoryGB > 0 {
-            state.lending.limitGB = min(state.lending.limitGB, state.thisMac.maxLendGB)
         }
     }
 
@@ -82,7 +78,7 @@ final class Simulation: DotsBackend {
         CloudState(meID: state.meID, thisMacID: state.thisMacID, people: state.people, devices: state.devices, pools: state.pools,
                    credits: state.credits, earnedAllTime: state.earnedAllTime, questionsHelped: state.questionsHelped,
                    creditLog: Array(state.creditLog.prefix(200)), badges: state.badges, networkLendingNow: state.networkLendingNow,
-                   lendingPoolID: state.lendingPoolID, lendingSince: state.lendingSince, endorsedBefore: state.endorsedBefore,
+                   lendingShares: state.lendingShares, endorsedBefore: state.endorsedBefore,
                    hoursLent: state.hoursLent, computePF: state.computePF, nights: state.nights)
     }
 
@@ -99,13 +95,11 @@ final class Simulation: DotsBackend {
         state.creditLog = c.creditLog
         state.badges = c.badges
         state.networkLendingNow = c.networkLendingNow
-        state.lendingPoolID = c.lendingPoolID
-        state.lendingSince = c.lendingSince
+        state.lendingShares = c.lendingShares
         state.endorsedBefore = c.endorsedBefore
         state.hoursLent = c.hoursLent
         state.computePF = c.computePF
         state.nights = c.nights
-        state.lending.limitGB = min(state.lending.limitGB, state.thisMac.maxLendGB)
     }
 
     /// This Mac's own part: keys, request log and lending rules, kept on this Mac.
@@ -113,7 +107,6 @@ final class Simulation: DotsBackend {
         state.apiKeys = keys
         state.requests = requests
         state.lending = lending
-        state.lending.limitGB = min(state.lending.limitGB, state.thisMac.maxLendGB)
     }
 
     func updateKey(id: String, _ change: (inout APIKey) -> Void) {
@@ -122,24 +115,40 @@ final class Simulation: DotsBackend {
 
     // MARK: Pools
 
-    func join(poolID: String) -> JoinOutcome {
-        let macID = state.thisMacID
+    /// Joins a pool to ask it, and lends it `gb` when that is more than 0.
+    func join(poolID: String, gb: Int) -> JoinOutcome {
         mutate { s in
             guard let i = s.pools.firstIndex(where: { $0.id == poolID }) else { return }
-            // A Mac lends to one pool at a time: leave the old pool's lending set
-            if let old = s.lendingPoolID, old != poolID, let o = s.pools.firstIndex(where: { $0.id == old }) {
-                s.pools[o].macs.removeAll { $0.macID == macID }
-            }
             if !s.pools[i].memberIDs.contains(s.meID) { s.pools[i].memberIDs.append(s.meID) }
-            if !s.pools[i].macs.contains(where: { $0.macID == macID }) {
-                s.pools[i].macs.append(PoolMac(macID: macID, lendGB: s.lending.limitGB, state: .online, joinedAt: .now))
-            }
-            s.lendingPoolID = poolID
-            s.lending.isOn = true
-            s.lending.pausedUntil = nil
+        }
+        if gb > 0 {
+            setShare(poolID: poolID, gb: gb)
+            mutate { s in s.lending.isOn = true; s.lending.pausedUntil = nil }
         }
         let pool = state.pool(poolID)!
         return JoinOutcome(macNumber: pool.totalMacs, pool: pool)
+    }
+
+    /// How much this Mac lends a pool it is in: at most what its other pools leave. 0 stops lending there.
+    func setShare(poolID: String, gb: Int) {
+        let gb = min(gb, state.mostGB(for: poolID))
+        let macID = state.thisMacID
+        mutate { s in
+            guard let i = s.pools.firstIndex(where: { $0.id == poolID }), s.pools[i].memberIDs.contains(s.meID) else { return }
+            guard gb > 0 else {
+                s.lendingShares.removeAll { $0.poolID == poolID }
+                s.pools[i].macs.removeAll { $0.macID == macID }
+                return
+            }
+            if let k = s.lendingShares.firstIndex(where: { $0.poolID == poolID }) {
+                s.lendingShares[k].gb = gb
+            } else {
+                s.lendingShares.append(LendingShare(poolID: poolID, gb: gb, since: .now, hubPool: poolID))
+            }
+            if !s.pools[i].macs.contains(where: { $0.macID == macID }) {
+                s.pools[i].macs.append(PoolMac(macID: macID, lendGB: gb, state: .online, joinedAt: .now))
+            }
+        }
     }
 
     func leave(poolID: String) {
@@ -147,7 +156,7 @@ final class Simulation: DotsBackend {
             guard let i = s.pools.firstIndex(where: { $0.id == poolID }) else { return }
             s.pools[i].memberIDs.removeAll { $0 == s.meID }
             s.pools[i].macs.removeAll { $0.macID == s.thisMacID }
-            if s.lendingPoolID == poolID { s.lendingPoolID = nil; s.lendingSince = nil }
+            s.lendingShares.removeAll { $0.poolID == poolID }
         }
     }
 
@@ -226,18 +235,20 @@ final class Simulation: DotsBackend {
     // MARK: Lending
 
     func updateLending(_ change: (inout LendingSettings) -> Void) {
-        mutate { s in
-            change(&s.lending)
-            s.lending.limitGB = max(0, min(s.lending.limitGB, s.thisMac.maxLendGB))
-        }
+        mutate { s in change(&s.lending) }
     }
 
+    /// Moves this Mac in or out of each pool it lends to, and reports the first unlock that caused.
     func applyLendingStatus(active: Bool) -> UnlockEvent? {
-        guard let pid = state.lendingPoolID,
-              let pi = state.pools.firstIndex(where: { $0.id == pid }),
+        state.lendingShares.compactMap { applyLendingStatus(active: active, share: $0) }.first
+    }
+
+    private func applyLendingStatus(active: Bool, share: LendingShare) -> UnlockEvent? {
+        let pid = share.poolID
+        guard let pi = state.pools.firstIndex(where: { $0.id == pid }),
               let mi = state.pools[pi].macs.firstIndex(where: { $0.macID == state.thisMacID }) else { return nil }
         let target: MacState = active ? .lending : .online
-        let lend = state.lending.limitGB
+        let lend = share.gb
         let current = state.pools[pi].macs[mi]
         guard current.state != target || current.lendGB != lend else { return nil }
 
@@ -250,7 +261,8 @@ final class Simulation: DotsBackend {
             let afterGB = s.pools[pi].pooledGB
             if active, let model = s.pools[pi].model, model.minGB > (beforeModel?.minGB ?? -1),
                !s.pools[pi].unlocks.contains(where: { $0.modelID == model.id }) {
-                let event = UnlockEvent(modelID: model.id, byMacID: s.thisMacID, fromGB: beforeGB, toGB: afterGB, date: .now)
+                let event = UnlockEvent(poolID: pid, modelID: model.id, byMacID: s.thisMacID, fromGB: beforeGB, toGB: afterGB,
+                                        date: .now)
                 s.pools[pi].unlocks.append(event)
                 unlock = event
                 let badgeID = "unlock-\(pid)-\(model.id)"
@@ -259,13 +271,8 @@ final class Simulation: DotsBackend {
                                           detail: "Took \(s.pools[pi].name) to \(model.name)", date: .now, isNew: true), at: 0)
                 }
             }
-            if active {
-                if s.lendingSince == nil { s.lendingSince = .now }
-            } else {
-                s.lendingSince = nil
-            }
         }
-        if active { sessionEventID = nil }
+        if active { sessions[pid] = nil }
         return unlock
     }
 
@@ -368,30 +375,12 @@ final class Simulation: DotsBackend {
             }
         }
         // Your Mac earns while it lends: more while it's working on someone's question
-        if lendingActive, let pool = state.lendingPool {
-            let perHour = Double(pool.creditsPerHour(lendGB: state.lending.limitGB))
-            let earned = perHour * seconds / 3_600 * (working ? 1.0 : 0.6)
-            let compute = working ? Self.computePF(pool: pool, lendGB: state.lending.limitGB, seconds: seconds) : 0
+        if lendingActive, !state.lendingShares.isEmpty {
             let hoursBefore = state.hoursLent ?? 0
-            state.credits += earned
-            state.earnedAllTime += earned
             state.hoursLent = hoursBefore + seconds / 3_600
-            state.computePF = (state.computePF ?? 0) + compute
-            noteNight(pool: pool, seconds: seconds, working: working)
-            // One credit line per lending session, updated as it grows, with the time and the measured compute
-            let kind = network ? "network" : "lend"
-            if let id = sessionEventID, let i = state.creditLog.firstIndex(where: { $0.id == id }), state.creditLog[i].kind ?? "lend" == kind {
-                sessionEarned += earned
-                state.creditLog[i].amount = Int(sessionEarned.rounded(.down))
-                state.creditLog[i].minutes = (state.creditLog[i].minutes ?? 0) + seconds / 60
-                state.creditLog[i].computePF = (state.creditLog[i].computePF ?? 0) + compute
-            } else if earned > 0 {
-                sessionEarned = earned
-                let note = network ? "Network work through \(pool.name)" : "Your Mac lent to \(pool.name)"
-                let event = CreditEvent(date: .now, amount: Int(earned.rounded(.down)), note: note, kind: kind, poolID: pool.id,
-                                        minutes: seconds / 60, computePF: compute)
-                state.creditLog.insert(event, at: 0)
-                sessionEventID = event.id
+            for share in state.lendingShares {
+                guard let pool = state.pool(share.poolID) else { continue }
+                earn(in: pool, gb: share.gb, seconds: seconds, working: working, network: network)
             }
             // A badge for showing up, whatever the Mac
             if hoursBefore < 100, state.hoursLent ?? 0 >= 100, !state.badges.contains(where: { $0.id == "hours-100" }) {
@@ -401,6 +390,32 @@ final class Simulation: DotsBackend {
         }
         sinceSave += 1
         if sinceSave > 30 { sinceSave = 0; scheduleSave() }
+    }
+
+    /// What lending `gb` to a pool for `seconds` earns, in one credit line per pool and lending session that grows
+    /// with the time and the measured compute.
+    private func earn(in pool: Pool, gb: Int, seconds: Double, working: Bool, network: Bool) {
+        let earned = Double(pool.creditsPerHour(lendGB: gb)) * seconds / 3_600 * (working ? 1.0 : 0.6)
+        let compute = working ? Self.computePF(pool: pool, lendGB: gb, seconds: seconds) : 0
+        state.credits += earned
+        state.earnedAllTime += earned
+        state.computePF = (state.computePF ?? 0) + compute
+        noteNight(pool: pool, seconds: seconds, working: working)
+        let kind = network ? "network" : "lend"
+        if let session = sessions[pool.id], let i = state.creditLog.firstIndex(where: { $0.id == session.eventID }),
+           state.creditLog[i].kind ?? "lend" == kind {
+            let total = session.earned + earned
+            sessions[pool.id] = (session.eventID, total)
+            state.creditLog[i].amount = Int(total.rounded(.down))
+            state.creditLog[i].minutes = (state.creditLog[i].minutes ?? 0) + seconds / 60
+            state.creditLog[i].computePF = (state.creditLog[i].computePF ?? 0) + compute
+        } else if earned > 0 {
+            let note = network ? "Network work through \(pool.name)" : "Your Mac lent to \(pool.name)"
+            let event = CreditEvent(date: .now, amount: Int(earned.rounded(.down)), note: note, kind: kind, poolID: pool.id,
+                                    minutes: seconds / 60, computePF: compute)
+            state.creditLog.insert(event, at: 0)
+            sessions[pool.id] = (event.id, earned)
+        }
     }
 
     /// Tonight in this Mac's history: the time it lent, and the runs it took part in at the pool's speed.
@@ -413,7 +428,7 @@ final class Simulation: DotsBackend {
         state.questionsHelped += runs
         let night = Date().nightStart
         var nights = state.nights ?? []
-        if let i = nights.indices.last, nights[i].date == night, nights[i].poolID == pool.id {
+        if let i = nights.lastIndex(where: { $0.date == night && $0.poolID == pool.id }) {
             nights[i].minutes += lent / 60
             nights[i].runs += runs
             nights[i].from = nights[i].from ?? Date().addingTimeInterval(-lent)
@@ -423,7 +438,7 @@ final class Simulation: DotsBackend {
                                     from: Date().addingTimeInterval(-lent), to: .now))
         }
         state.nights = nights
-        let tonight = nights.last?.runs ?? 0
+        let tonight = nights.last { $0.date == night && $0.poolID == pool.id }?.runs ?? 0
         guard !pool.isPublic, tonight >= 20, let pi = state.pools.firstIndex(where: { $0.id == pool.id }) else { return }
         let thanked = (state.pools[pi].activity ?? []).contains { $0.kind == "thanks" && $0.date >= night }
         let friend = pool.macs.first { $0.macID != state.thisMacID && $0.state == .lending }
@@ -436,7 +451,7 @@ final class Simulation: DotsBackend {
 
     func reset() {
         state = Simulation(fresh: true, persists: false).state
-        sessionEventID = nil
+        sessions = [:]
         saveNow()
     }
 

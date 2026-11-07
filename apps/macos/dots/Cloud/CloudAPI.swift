@@ -19,8 +19,7 @@ struct CloudState: Codable {
     var creditLog: [CreditEvent]
     var badges: [Badge]
     var networkLendingNow: Int
-    var lendingPoolID: String?
-    var lendingSince: Date?
+    var lendingShares: [LendingShare]
     var endorsedBefore: Int
     var hoursLent: Double?
     var computePF: Double?
@@ -116,12 +115,14 @@ struct LadderData: Codable {
 /// This Mac's report to the hub, every couple of seconds.
 struct Heartbeat: Codable {
     var active: Bool
-    var lendGB: Int
     /// Seconds of simulated time since the last report (the demo speed is already applied)
     var seconds: Double
     var macKind: String
     var memoryGB: Int
 }
+
+/// How much this Mac lends a pool, when joining or after
+struct Share: Codable { var gb: Int }
 
 struct HeartbeatReply: Codable { var sync: CloudSync; var unlock: UnlockEvent? }
 struct JoinReply: Codable { var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }

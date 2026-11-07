@@ -145,7 +145,8 @@ enum Snapshots {
         _ = model.backend.createInvite(poolID: "studio-9")
         save(InviteSheet(poolID: "studio-9"), model, CGSize(width: 480, height: 520), dir, "12-invite-sheet", fitHeight: true)
         save(Shell(route: .pool("studio-9")), model, window, dir, "13-studio-9")
-        model.setLimit(10)
+        // Room for Sam's invite: Student Union gives back what it has
+        model.setShare(union, gb: 0)
         await model.backend.beatNow(active: model.lendingStatus.isActive)
         if let invite = model.backend.invites.first {
             model.openInvite = OpenInvite(code: invite.code, preview: invite)
@@ -174,7 +175,7 @@ enum Snapshots {
             save(MenuBarPanel(), model, CGSize(width: 320, height: 600), dir, "21-menubar-lab", fitHeight: true, clock: lateNight)
             save(Shell(route: .profile), model, window, dir, "18-profile-lab", clock: lateNight)
             // Lending 6 GB more takes it to Level 2
-            model.setLimit(16)
+            model.setShare(model.state.pool("late-night-lab")!, gb: 16)
             await model.backend.beatNow(active: true)
             if let moment = model.moment {
                 save(Shell(route: .pool("late-night-lab")).overlay(MomentView(moment: moment, frozenAt: 3.2)), model, window, dir, "19-level-up", clock: lateNight)

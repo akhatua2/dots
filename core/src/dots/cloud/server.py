@@ -19,7 +19,7 @@ from . import catalog, gateway, links, timefmt
 from .config import CloudConfig
 from .hub import HubClient, HubError
 from .store import Store, expires_in, is_expired
-from .sync import HUB_POOL, HubView, SyncBuilder
+from .sync import HUB_POOL, HubView, SyncBuilder, hub_pool
 
 _POOL_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 
@@ -60,6 +60,7 @@ class Cloud:
         r.add_patch("/v1/pools/{pool}", self.update_pool)
         r.add_post("/v1/pools/{pool}/join", self.join)
         r.add_post("/v1/pools/{pool}/leave", self.leave)
+        r.add_post("/v1/pools/{pool}/share", self.set_share)
         r.add_post("/v1/pools/{pool}/endorse", self.endorse)
         r.add_post("/v1/pools/{pool}/invite", self.create_invite)
         r.add_delete("/v1/pools/{pool}/invite", self.delete_invite)
@@ -162,23 +163,32 @@ class Cloud:
         return await self.whole()
 
     async def join(self, request: web.Request) -> web.Response:
-        return await self._join(request.match_info["pool"])
+        body = await _body(request)
+        return await self._join(request.match_info["pool"], _gb(body))
 
-    async def _join(self, pool_id: str) -> web.Response:
+    async def _join(self, pool_id: str, gb: int) -> web.Response:
+        """Joining lets this Mac ask the pool; a share (`gb` above 0) also lends it that much."""
         if not self.pool_row(pool_id):
             return error(404, f"No pool called {pool_id}.", "not_found_error")
         hub = await HubView.read(self.hub, self.config.pool_model)
         others = [m for m in self.sync.pool_macs(pool_id, hub) if m["macID"] != self.sync.this_mac]
         self.store.add_member(pool_id, self.me)
-        self.store.lend_to(pool_id)
-        unlock = self._unlock(pool_id, hub)
+        self.store.lend(pool_id, gb)
+        unlock = self._unlock(pool_id, hub) if gb > 0 else None
         return await self.whole(macNumber=len(others) + 1, poolID=pool_id, unlock=unlock)
 
     async def leave(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]
         self.store.remove_member(pool_id, self.me)
-        if self.store.lending()["pool_id"] == pool_id:
-            self.store.lend_to(None)
+        self.store.lend(pool_id, 0)
+        return await self.whole()
+
+    async def set_share(self, request: web.Request) -> web.Response:
+        """How much this Mac lends to a pool it is in; 0 stops lending there but stays in the pool."""
+        pool_id = request.match_info["pool"]
+        if not self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool_id, self.me):
+            return error(404, "Join the pool before lending to it.", "not_found_error")
+        self.store.lend(pool_id, _gb(await _body(request)))
         return await self.whole()
 
     async def endorse(self, request: web.Request) -> web.Response:
@@ -243,7 +253,7 @@ class Cloud:
         invite = self.store.one("select * from invites where code = ?", request.match_info["code"].upper())
         if not invite or is_expired(invite["expires"]):
             return error(404, "That invite has expired or never existed.", "not_found_error")
-        return await self._join(invite["pool_id"])
+        return await self._join(invite["pool_id"], _gb(await _body(request)))
 
     async def pledge(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]
@@ -264,12 +274,10 @@ class Cloud:
     async def heartbeat(self, request: web.Request) -> web.Response:
         beat = await _body(request)
         self.store.set_device(self.this_mac, self.me, str(beat.get("macKind") or "Mac"), int(beat.get("memoryGB") or 0))
-        pool_id = self.store.lending()["pool_id"]
         hub = await HubView.read(self.hub, self.config.pool_model)
-        self.store.record_lending(active=bool(beat.get("active")), lend_gb=int(beat.get("lendGB") or 0),
-                                  seconds=float(beat.get("seconds") or 0))
-        unlock = self._unlock(pool_id, hub) if pool_id else None
-        return await self.whole(unlock=unlock)
+        self.store.record_lending(active=bool(beat.get("active")), seconds=float(beat.get("seconds") or 0))
+        unlocks = (self._unlock(share["pool_id"], hub) for share in self.store.shares())
+        return await self.whole(unlock=next((u for u in unlocks if u), None))
 
     def _unlock(self, pool_id: str, hub: HubView) -> dict | None:
         """The first time this Mac's share takes a pool over the line for a model it can really run: record it and
@@ -289,17 +297,13 @@ class Cloud:
         if not crossed:
             return None
         tier = crossed[-1]
-        event = {"id": str(uuid.uuid4()).upper(), "modelID": tier["id"], "byMacID": self.this_mac, "fromGB": before_gb,
-                 "toGB": after_gb, "date": timefmt.iso(timefmt.now())}
+        event = {"id": str(uuid.uuid4()).upper(), "poolID": pool_id, "modelID": tier["id"], "byMacID": self.this_mac,
+                 "fromGB": before_gb, "toGB": after_gb, "date": timefmt.iso(timefmt.now())}
         self.store.run("insert into unlocks (id, pool_id, model_id, by_mac_id, from_gb, to_gb, date) values (?, ?, ?, ?, ?, ?, ?)",
                        event["id"], pool_id, tier["id"], self.this_mac, before_gb, after_gb, event["date"])
         pool = self.pool_row(pool_id)
         self.store.award(f"unlock-{pool_id}-{tier['id']}", "bolt.fill", "Unlocker", f"Took {pool['name']} to {tier['name']}")
         return event
-
-    def hub_pool(self, pool_id: str) -> str:
-        """The pool's name at the hub: the hub's own pool is its default"""
-        return "" if pool_id == HUB_POOL else pool_id
 
     async def pool_answer(self, request: web.Request) -> web.StreamResponse:
         """A pool's answer, from its own model on its own Macs, through the hub."""
@@ -316,7 +320,7 @@ class Cloud:
                 for m in self.sync.pool_macs(pool_id, hub) if m["state"] == "lending"]
         receipt = {"pool": row["name"], "model": catalog.short_name(model), "credits": 0, "simulated": False}
         body["model"] = model
-        body["pool"] = self.hub_pool(pool_id)
+        body["pool"] = hub_pool(pool_id)
         if not body.get("stream"):
             try:
                 reply = await self.hub.complete(body, self.me)
@@ -334,7 +338,7 @@ class Cloud:
         row = self.pool_row(pool_id)
         if row is None or row["model_kind"] != "pictures":
             return error(404, "This pool doesn't draw pictures.", "not_found_error")
-        body = {**await _body(request), "pool": self.hub_pool(pool_id)}
+        body = {**await _body(request), "pool": hub_pool(pool_id)}
         out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await out.prepare(request)
         try:
@@ -401,3 +405,11 @@ async def _body(request: web.Request) -> dict:
     except (json.JSONDecodeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _gb(body: dict) -> int:
+    """A share's size from a request body: whole GB, 0 when it doesn't say"""
+    try:
+        return max(0, int(body.get("gb") or 0))
+    except (TypeError, ValueError):
+        return 0

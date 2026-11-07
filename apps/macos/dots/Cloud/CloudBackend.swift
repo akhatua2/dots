@@ -32,6 +32,9 @@ final class CloudBackend: DotsBackend {
     var pendingUnlock: (poolID: String, event: UnlockEvent)?
 
     @ObservationIgnored private var beating = false
+    /// Changes sent that the cloud hasn't answered yet: until it has, a heartbeat's state is older than this Mac's
+    @ObservationIgnored private var unanswered = 0
+    @ObservationIgnored private var wantActive = false
     @ObservationIgnored private var pendingSeconds: Double = 0
     @ObservationIgnored private var lastBeat = Date.distantPast
     @ObservationIgnored private var lastActive: Bool?
@@ -86,11 +89,17 @@ final class CloudBackend: DotsBackend {
     }
 
     /// Sends a change, and takes the cloud's answer as the truth. A heartbeat sent before this change can't undo it.
+    /// Changes reach the cloud in the order they were made: giving one pool less, then another pool more, must not
+    /// arrive the other way round.
     private func send(_ op: @escaping () async throws -> CloudSync) {
         serial += 1
+        unanswered += 1
+        let previous = inFlight.last
         inFlight.removeAll { $0.isCancelled }
         inFlight.append(Task {
+            await previous?.value
             do { adopt(try await op()) } catch { failed(error) }
+            unanswered -= 1
         })
     }
 
@@ -103,12 +112,14 @@ final class CloudBackend: DotsBackend {
         }
     }
 
-    /// The worker's report to the hub: lending or not, how much, and how much simulated time has passed.
+    /// The worker's report to the hub: lending or not, and how much simulated time has passed. One goes at a time;
+    /// when lending starts or stops while one is on its way, another follows it with the change.
     func beat(active: Bool) {
+        wantActive = active
         guard !beating else { return }
         beating = true
         Task {
-            await beatNow(active: active)
+            repeat { await beatNow(active: wantActive) } while lastActive != wantActive
             beating = false
         }
     }
@@ -120,11 +131,13 @@ final class CloudBackend: DotsBackend {
         lastBeat = .now
         lastActive = active
         let atSerial = serial
-        let report = Heartbeat(active: active, lendGB: state.lending.limitGB, seconds: seconds, macKind: ThisMac.kind, memoryGB: ThisMac.memoryGB)
+        let report = Heartbeat(active: active, seconds: seconds, macKind: ThisMac.kind, memoryGB: ThisMac.memoryGB)
         do {
             let reply: HeartbeatReply = try await client.send("POST", "hub/v1/heartbeat", body: report)
-            if atSerial == serial { adopt(reply.sync) } else { worker = reply.sync.worker }
-            if let u = reply.unlock, u.byMacID == state.thisMacID, let pool = state.lendingPoolID { pendingUnlock = (pool, u) }
+            if atSerial == serial, unanswered == 0 { adopt(reply.sync) } else { worker = reply.sync.worker }
+            if let u = reply.unlock, u.byMacID == state.thisMacID, let pool = u.poolID ?? state.lendingShares.first?.poolID {
+                pendingUnlock = (pool, u)
+            }
         } catch {
             pendingSeconds += seconds
             failed(error)
@@ -136,8 +149,9 @@ final class CloudBackend: DotsBackend {
         try await client.get("v1/invites/\(code)", query: [URLQueryItem(name: "memory_gb", value: "\(ThisMac.memoryGB)")])
     }
 
-    func accept(code: String) async throws -> JoinReply {
-        let reply: JoinReply = try await client.send("POST", "v1/invites/\(code)/accept")
+    func accept(code: String, gb: Int) async throws -> JoinReply {
+        await settled()  // after the changes made before it, which may have made the room it lends
+        let reply: JoinReply = try await client.send("POST", "v1/invites/\(code)/accept", body: Share(gb: gb))
         serial += 1
         adopt(reply.sync)
         return reply
@@ -155,11 +169,16 @@ final class CloudBackend: DotsBackend {
 
     // MARK: The network (the cloud's part)
 
-    func join(poolID: String) -> JoinOutcome {
-        let outcome = mirror.join(poolID: poolID)
+    func join(poolID: String, gb: Int) -> JoinOutcome {
+        let outcome = mirror.join(poolID: poolID, gb: gb)
         saveLocal()
-        send { (try await self.client.send("POST", "v1/pools/\(poolID)/join") as JoinReply).sync }
+        send { (try await self.client.send("POST", "v1/pools/\(poolID)/join", body: Share(gb: gb)) as JoinReply).sync }
         return outcome
+    }
+
+    func setShare(poolID: String, gb: Int) {
+        mirror.setShare(poolID: poolID, gb: gb)
+        send { try await self.client.send("POST", "v1/pools/\(poolID)/share", body: Share(gb: gb)) }
     }
 
     func leave(poolID: String) {

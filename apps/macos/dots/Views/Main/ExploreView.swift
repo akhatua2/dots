@@ -116,7 +116,7 @@ struct PoolCard: View {
     var body: some View {
         let s = model.state
         let friends = s.friends(in: pool)
-        let lendingHere = s.lendingPoolID == pool.id
+        let lendingHere = s.isLending(to: pool.id)
         let isMember = pool.isMember(s.meID)
 
         VStack(alignment: .leading, spacing: 0) {
@@ -141,7 +141,7 @@ struct PoolCard: View {
             }
             .padding(.top, 10)
             IconLine(symbol: "smallcircle.filled.circle",
-                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.lending.limitGB)).counted("credit")) an hour for your Mac", size: 12)
+                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.mostGB(for: pool.id))).counted("credit")) an hour for your Mac", size: 12)
                 .padding(.top, 7)
             Group {
                 if !friends.isEmpty {
@@ -179,6 +179,8 @@ struct PoolCard: View {
                     HoverAccentButton(title: isMember ? "Lend Here" : "Add My Mac", alwaysAccent: hovering && !isMember) {
                         model.join(pool)
                     }
+                    .disabled(isMember && s.mostGB(for: pool.id) == 0)
+                    .help(isMember && s.mostGB(for: pool.id) == 0 ? "Your other pools have all this Mac lends" : "")
                 }
             }
         }

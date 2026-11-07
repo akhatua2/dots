@@ -54,6 +54,7 @@ create table if not exists lending (
     id integer primary key check (id = 1), pool_id text, since text, lend_gb integer not null default 0,
     active integer not null default 0, seconds real not null default 0
 );
+create table if not exists shares (pool_id text primary key, gb integer not null, since text not null);
 create table if not exists nights (
     date text not null, pool_id text not null, minutes real not null, runs integer not null,
     first text, last text, primary key (date, pool_id)
@@ -71,6 +72,7 @@ class Store:
         self.db.executescript(_SCHEMA)
         self._add_missing_columns()
         self.db.execute("insert or ignore into lending (id) values (1)")
+        self._move_old_lending()
 
     # Columns added since a database was first made: (table, column, type)
     _ADDED = [("pools", "model_kind", "text")]
@@ -80,6 +82,14 @@ class Store:
             have = {row["name"] for row in self.rows(f"pragma table_info({table})")}
             if column not in have:
                 self.db.execute(f"alter table {table} add column {column} {kind}")
+
+    def _move_old_lending(self) -> None:
+        """A database from when a Mac lent to one pool keeps that pool in `lending`: it becomes a share."""
+        row = self.lending()
+        if row["pool_id"]:
+            self.run("insert or ignore into shares (pool_id, gb, since) values (?, ?, ?)",
+                     row["pool_id"], row["lend_gb"], row["since"] or timefmt.iso(timefmt.now()))
+            self.run("update lending set pool_id = null, since = null where id = 1")
 
     def rows(self, sql: str, *args) -> list[sqlite3.Row]:
         return self.db.execute(sql, args).fetchall()
@@ -156,30 +166,42 @@ class Store:
                  str(uuid.uuid4()).upper(), timefmt.iso(timefmt.now()), -abs(amount), note)
 
     # ---- lending -------------------------------------------------------------
+    # This Mac lends an amount to each of any number of pools (its shares). Whether it is lending right now, and
+    # for how long it has, is one row: the Mac's rules (plugged in, not in use) apply to all its shares at once.
 
     def lending(self) -> sqlite3.Row:
         return self.one("select * from lending where id = 1")
 
-    def lend_to(self, pool_id: str | None) -> None:
-        since = timefmt.iso(timefmt.now()) if pool_id else None
-        self.run("update lending set pool_id = ?, since = ? where id = 1", pool_id, since)
+    def shares(self) -> list[sqlite3.Row]:
+        return self.rows("select * from shares order by since")
 
-    def record_lending(self, *, active: bool, lend_gb: int, seconds: float) -> None:
-        """A heartbeat: while this Mac lends, its time counts toward tonight in its pool."""
-        self.run("update lending set active = ?, lend_gb = ? where id = 1", int(active), lend_gb)
-        row = self.lending()
-        if not active or not row["pool_id"] or seconds <= 0:
+    def share(self, pool_id: str) -> sqlite3.Row | None:
+        return self.one("select * from shares where pool_id = ?", pool_id)
+
+    def lend(self, pool_id: str, gb: int) -> None:
+        """Lend `gb` to a pool, or change how much; 0 stops lending to it."""
+        if gb <= 0:
+            self.run("delete from shares where pool_id = ?", pool_id)
+            return
+        self.run("insert into shares (pool_id, gb, since) values (?, ?, ?) "
+                 "on conflict(pool_id) do update set gb = excluded.gb", pool_id, gb, timefmt.iso(timefmt.now()))
+
+    def record_lending(self, *, active: bool, seconds: float) -> None:
+        """A heartbeat: while this Mac lends, its time counts toward tonight in each pool it lends to."""
+        self.run("update lending set active = ? where id = 1", int(active))
+        shares = self.shares()
+        if not active or not shares or seconds <= 0:
             return
         self.run("update lending set seconds = seconds + ? where id = 1", seconds)
         now = timefmt.now()
         night = timefmt.iso(timefmt.night_of(now))
         stamp = timefmt.iso(now)
-        self.run(
-            "insert into nights (date, pool_id, minutes, runs, first, last) values (?, ?, ?, 0, ?, ?) "
-            "on conflict(date, pool_id) do update set minutes = minutes + excluded.minutes, last = excluded.last",
-            night, row["pool_id"], seconds / 60, stamp, stamp,
-        )
-
+        for share in shares:
+            self.run(
+                "insert into nights (date, pool_id, minutes, runs, first, last) values (?, ?, ?, 0, ?, ?) "
+                "on conflict(date, pool_id) do update set minutes = minutes + excluded.minutes, last = excluded.last",
+                night, share["pool_id"], seconds / 60, stamp, stamp,
+            )
 
 def _phase(pool_id: str) -> float:
     """A stable number in [0, 1) per pool, for its emblem."""

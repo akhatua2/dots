@@ -181,26 +181,32 @@ final class AppModel {
         let s = state
         guard s.thisMac.maxLendGB > 0 else { return .cantLend }
         guard s.lending.isOn else { return .off }
-        guard let pool = s.lendingPool else { return .noPool }
+        guard !s.lendingPools.isEmpty else { return .noPool }
         if let until = s.lending.pausedUntil, until > .now { return .paused(until: until) }
         if s.lending.onlyWhenPluggedIn && !signals.onPower { return .waitingForPower }
         if s.lending.pauseWhileInUse && signals.inUse { return .inUse }
-        return .lending(pool: pool.name, working: backend.worker?.working ?? false)
+        return .lending(pool: s.lendingPools.map(\.name).formatted(.list(type: .and)), working: backend.worker?.working ?? false)
     }
 
     /// The sidebar's earning line: what the ledger says this Mac earned in the last hour, or, from the mock,
     /// its estimate for an hour of lending.
     var earningLine: String {
         if let earning = backend.earning { return "+\(earning.lastHour.grouped) this hour" }
-        guard let pool = state.lendingPool else { return "" }
-        return "+\(pool.creditsPerHour(lendGB: state.lending.limitGB)) an hour"
+        let s = state
+        guard !s.lendingShares.isEmpty else { return "" }
+        let perHour = s.lendingShares.reduce(0) { sum, share in sum + (s.pool(share.poolID)?.creditsPerHour(lendGB: share.gb) ?? 0) }
+        return "+\(perHour) an hour"
     }
 
     func setLendingOn(_ on: Bool) {
         backend.updateLending { $0.isOn = on; if on { $0.pausedUntil = nil } }
         refreshLending()
     }
-    func setLimit(_ gb: Int) { backend.updateLending { $0.limitGB = gb }; refreshLending() }
+    /// How much this Mac lends a pool it is in, at most what its other pools leave; 0 stops lending there.
+    func setShare(_ pool: Pool, gb: Int) {
+        backend.setShare(poolID: pool.id, gb: min(max(0, gb), state.mostGB(for: pool.id)))
+        refreshLending()
+    }
     func setOnlyWhenPluggedIn(_ on: Bool) { backend.updateLending { $0.onlyWhenPluggedIn = on }; refreshLending() }
     func setPauseWhileInUse(_ on: Bool) { backend.updateLending { $0.pauseWhileInUse = on }; refreshLending() }
     func pauseForAnHour() { backend.updateLending { $0.pausedUntil = Date().addingTimeInterval(3_600) }; refreshLending() }
@@ -233,10 +239,10 @@ final class AppModel {
         let active = lendingStatus.isActive
         // With a real cloud, lending runs the real worker; the mock simulates the work instead.
         if !backend.isMock {
-            workerProcess.reconcile(lend: active, gb: state.lending.limitGB, ticket: backend.hub?.ticket)
+            workerProcess.reconcile(lend: active, shares: state.lendingShares, ticket: backend.hub?.ticket)
         }
         let unlock = backend.applyLendingStatus(active: active)
-        if let unlock, let pid = state.lendingPoolID { show(unlock, in: pid) }
+        if let unlock, let pid = unlock.poolID ?? state.lendingShares.first?.poolID { show(unlock, in: pid) }
         return unlock
     }
 
@@ -278,12 +284,12 @@ final class AppModel {
 
     /// The pool this Mac is boosting right now
     private(set) var boosting: String?
-    /// How lending was set before the boost took over, to put back after it
-    @ObservationIgnored private var beforeBoost: (poolID: String?, limit: Int, isOn: Bool)?
+    /// How lending to the boosted pool was before the boost, to put back after it
+    @ObservationIgnored private var beforeBoost: (poolID: String, gb: Int, wasMember: Bool, isOn: Bool)?
     @ObservationIgnored private var boostActivity: NSObjectProtocol?
 
     /// Boosts you counted yourself in for. An hour before one, a heads-up. During it, this Mac stays awake and lends
-    /// what you pledged to that pool, whatever it was doing. After it, lending goes back to how it was.
+    /// that pool what you pledged, as far as its other pools leave room. After it, lending goes back to how it was.
     func runBoosts(now: Date = .now) {
         let s = state
         let mine = s.pools.compactMap { p -> (pool: Pool, boost: PoolBoost, gb: Int)? in
@@ -299,10 +305,12 @@ final class AppModel {
                 notifyOnce("dots.boost.soon.\(key)", "Boost in an hour. Your \(s.thisMac.kind) is ready with \(gb) GB.")
             }
             guard boosting == nil, boost.starts <= now, now < boost.ends else { continue }
-            beforeBoost = (s.lendingPoolID, s.lending.limitGB, s.lending.isOn)
+            let wasMember = pool.isMember(s.meID)
+            beforeBoost = (pool.id, s.share(in: pool.id)?.gb ?? 0, wasMember, s.lending.isOn)
             boosting = pool.id
-            if s.lendingPoolID != pool.id { _ = backend.join(poolID: pool.id) }
-            backend.updateLending { $0.limitGB = gb; $0.isOn = true; $0.pausedUntil = nil }
+            let lend = min(gb, s.mostGB(for: pool.id))
+            if wasMember { backend.setShare(poolID: pool.id, gb: lend) } else { _ = backend.join(poolID: pool.id, gb: lend) }
+            backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
             refreshLending()
             if persistsSettings {
                 boostActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
@@ -320,8 +328,8 @@ final class AppModel {
         boosting = nil
         guard let before = beforeBoost else { return }
         beforeBoost = nil
-        if let pid = before.poolID, pid != state.lendingPoolID, state.pool(pid) != nil { _ = backend.join(poolID: pid) }
-        backend.updateLending { $0.limitGB = before.limit; $0.isOn = before.isOn }
+        if before.wasMember { backend.setShare(poolID: before.poolID, gb: before.gb) } else { backend.leave(poolID: before.poolID) }
+        backend.updateLending { $0.isOn = before.isOn }
         refreshLending()
     }
 
@@ -375,9 +383,11 @@ final class AppModel {
         if case .profile = route { backend.markBadgesSeen() }
     }
 
-    func join(_ pool: Pool) {
+    /// Joins a pool, lending it `gb`, or by default all this Mac has left to lend (which may be nothing: then it
+    /// joins to ask, and lends nothing until another pool makes room).
+    func join(_ pool: Pool, gb: Int? = nil) {
         let wasMember = pool.isMember(state.meID)
-        let outcome = backend.join(poolID: pool.id)
+        let outcome = backend.join(poolID: pool.id, gb: min(gb ?? .max, state.mostGB(for: pool.id)))
         let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
         let waiting: String? = lendingStatus.isActive ? nil : lendingStatus.headline
         route = .pool(pool.id)
@@ -440,11 +450,11 @@ final class AppModel {
 
     func acceptInvite(_ preview: InviteDetails, lendGB: Int? = nil) {
         sheet = nil
-        if let lendGB { setLimit(lendGB) }
+        let gb = min(lendGB ?? .max, state.mostGB(for: preview.poolID))
         Task {
             do {
                 await backend.beatNow(active: lendingStatus.isActive)
-                let reply = try await backend.accept(code: preview.code)
+                let reply = try await backend.accept(code: preview.code, gb: gb)
                 route = .pool(reply.poolID)
                 backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
                 let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)

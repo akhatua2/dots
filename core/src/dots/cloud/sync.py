@@ -19,6 +19,11 @@ from .store import Store, is_expired
 HUB_POOL = "hub"
 
 
+def hub_pool(pool_id: str) -> str:
+    """The pool's name at the hub: the hub's own pool is its default"""
+    return "" if pool_id == HUB_POOL else pool_id
+
+
 @dataclass
 class HubView:
     """One read of the hub. Empty when the hub is down, so the app still opens and says so."""
@@ -66,18 +71,18 @@ class SyncBuilder:
         """A pool's Macs: the workers lending to it at the hub, and this Mac while it lends there."""
         macs: list[dict] = []
         # The Macs whose workers lend to this pool; the hub's own pool is its default ("")
-        at_hub = "" if pool_id == HUB_POOL else pool_id
+        at_hub = hub_pool(pool_id)
         for node in (n for n in hub.nodes if (n.get("pool") or "") == at_hub):
             mac_id = self.this_mac if node.get("account_id") == self.me else node["id"]
             # A worker in the hub is lending, whether or not a model is loaded yet: the hub loads one on the first
             # question, which the pool would never get if it waited for the model before counting the Mac
             macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending"))
-        lending = self.store.lending()
-        if lending["pool_id"] == pool_id and lending["active"] and all(m["macID"] != self.this_mac for m in macs):
+        share = self.store.share(pool_id)
+        if share and self.store.lending()["active"] and all(m["macID"] != self.this_mac for m in macs):
             # In the hub's pool this Mac lends only once its worker is in the hub; until then it is starting up and
             # adds nothing, so a worker restarting never moves the pool's level.
             state = "online" if pool_id == HUB_POOL else "lending"
-            macs.append(self._mac(self.this_mac, lending["lend_gb"], state))
+            macs.append(self._mac(self.this_mac, share["gb"], state))
         return macs
 
     def _mac(self, mac_id: str, lend_gb: int, state: str) -> dict:
@@ -227,9 +232,9 @@ class SyncBuilder:
             "computePF": round(float(mine.get("earned_cu") or 0) / 1000, 4),
             "nights": self.nights(hub),
         }
-        if lending["pool_id"]:
-            state["lendingPoolID"] = lending["pool_id"]
-            state["lendingSince"] = lending["since"]
+        # Each pool this Mac lends to, how much, and the pool its worker names at the hub
+        state["lendingShares"] = [{"poolID": r["pool_id"], "gb": r["gb"], "since": r["since"],
+                                   "hubPool": hub_pool(r["pool_id"])} for r in s.shares()]
 
         sync = {
             "state": state,

@@ -150,14 +150,18 @@ def load_dotenv_into_env() -> str | None:
     return None
 
 
-def load_or_create_identity() -> str:
+def load_or_create_identity(pool: str = "") -> str:
     """Return this machine's stable worker UUID. Generated on first call and
     persisted to {dots_home}/identity so it survives reboots and reconnects.
     Once issued, the hub uses it to recognize a returning worker — opens the
-    door to per-worker preferences, auth, and contribution stats later."""
+    door to per-worker preferences, auth, and contribution stats later.
+
+    A Mac lending to several pools runs a worker for each, and each needs its
+    own identity: the default pool's is `identity`, another pool's
+    `identity-<pool>`."""
     home = dots_home()
     home.mkdir(parents=True, exist_ok=True)
-    f = home / "identity"
+    f = home / ("identity" if not pool else f"identity-{_file_safe(pool)}")
     if f.exists():
         existing = f.read_text().strip()
         if existing:
@@ -165,6 +169,10 @@ def load_or_create_identity() -> str:
     new_id = str(uuid.uuid4())
     f.write_text(new_id + "\n")
     return new_id
+
+
+def _file_safe(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
 
 
 def load_or_create_account() -> str:

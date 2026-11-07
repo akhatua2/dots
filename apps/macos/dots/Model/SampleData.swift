@@ -118,8 +118,8 @@ enum SampleData {
             meID: me.id, thisMacID: thisMac.id, people: people, devices: devices, pools: pools,
             credits: 1_245, earnedAllTime: 4_812, questionsHelped: 12_406, creditLog: log, badges: badges,
             apiKeys: keys, requests: requests,
-            lending: LendingSettings(isOn: false, limitGB: myLend, onlyWhenPluggedIn: true, pauseWhileInUse: false),
-            lendingPoolID: nil, networkLendingNow: 2_914, lendingSince: nil, endorsedBefore: 12)
+            lending: LendingSettings(isOn: false, onlyWhenPluggedIn: true, pauseWhileInUse: false),
+            lendingShares: [], networkLendingNow: 2_914, endorsedBefore: 12)
     }
 
     /// Initials for the anonymous Macs a public pool shows on its page.

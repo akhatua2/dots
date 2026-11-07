@@ -130,7 +130,7 @@ struct Sidebar: View {
                     SidebarSection(title: "Your pools", folded: $poolsFolded) {
                         ForEach(model.state.myPools) { pool in
                             PoolRow(pool: pool, selected: model.route == .pool(pool.id),
-                                    lending: model.state.lendingPoolID == pool.id) { model.open(.pool(pool.id)) }
+                                    lending: model.state.isLending(to: pool.id)) { model.open(.pool(pool.id)) }
                         }
                         Button { model.sheet = .startPool } label: {
                             HStack(spacing: 11) {
@@ -279,7 +279,7 @@ struct ThisMacCard: View {
                 } else {
                     LiveDot(live: false, size: 7)
                 }
-                Text(status.isActive ? "Live in \(s.lendingPool?.name ?? "your pool")" : status.headline)
+                Text(status.isActive ? "Live in \(s.lendingPools.map(\.name).formatted(.list(type: .and)))" : status.headline)
                     .font(D.ui(13, .semibold)).foregroundStyle(D.t1).lineLimit(1)
             }
             Text(status.isActive ? "\(Int(s.credits).grouped) credits · \(model.earningLine)" : "\(Int(s.credits).grouped) credits")

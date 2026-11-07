@@ -108,7 +108,7 @@ class Worker:
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
-        self.identity = identity if identity is not None else load_or_create_identity()
+        self.identity = identity if identity is not None else load_or_create_identity(pool)
         # Human-owner account: who earns/spends CU. Persisted across
         # devices (copy ~/.dots/account to attribute multiple workers to
         # the same account). Tests pass an explicit one to avoid touching

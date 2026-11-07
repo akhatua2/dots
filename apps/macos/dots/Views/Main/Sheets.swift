@@ -380,7 +380,7 @@ struct OpenInviteSheet: View {
                 if let p = open?.preview {
                     let pool = s.pool(p.poolID)
                     poolCard(p, pool)
-                    if !p.isMember, let pool { lendChoice(pool) }
+                    if !p.isMember, let pool, !options.isEmpty { lendChoice(pool) }
                 } else if let error = open?.error {
                     Text(error).font(D.ui(13)).foregroundStyle(D.t3)
                 } else if open != nil, !(open?.code.isEmpty ?? true) {
@@ -403,9 +403,8 @@ struct OpenInviteSheet: View {
                             .buttonStyle(DButtonStyle(kind: .primary, large: true)).keyboardShortcut(.defaultAction)
                     } else {
                         let gb = chosen
-                        Button("Join and Lend \(gb) GB") { model.acceptInvite(p, lendGB: gb) }
+                        Button(gb > 0 ? "Join and Lend \(gb) GB" : "Join \(p.poolName)") { model.acceptInvite(p, lendGB: gb) }
                             .buttonStyle(DButtonStyle(kind: .primary, large: true)).keyboardShortcut(.defaultAction)
-                            .disabled(s.thisMac.maxLendGB == 0)
                     }
                 } else {
                     Button("Open") { model.openInviteLink(link) }
@@ -460,12 +459,13 @@ struct OpenInviteSheet: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(D.panelEdge, lineWidth: 0.5))
     }
 
+    /// Half of what this Mac has left to lend, or all of it
     private var options: [Int] {
-        let s = model.state
-        return Array(Set([max(1, s.lending.limitGB), s.thisMac.maxLendGB])).filter { $0 > 0 }.sorted()
+        let left = model.openInvite?.preview.map { model.state.mostGB(for: $0.poolID) } ?? model.state.thisMac.maxLendGB
+        return Array(Set([left / 2, left])).filter { $0 > 0 }.sorted()
     }
 
-    private var chosen: Int { choice ?? options.last ?? model.state.thisMac.maxLendGB }
+    private var chosen: Int { choice ?? options.last ?? 0 }
 
     /// How much to lend, and what it does: the next level reached, or how far short.
     private func lendChoice(_ pool: Pool) -> some View {

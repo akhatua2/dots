@@ -60,7 +60,7 @@ The second half of this page covers the API dots serves to your own apps on `loc
 | `badges` | `{id, symbol, title, detail, date, isNew}`. The ids are `hours-100`, `unlock-<pool>-<model>`, `backer-<pool>` and `starter`. |
 | `questionsHelped`, `hoursLent`, `computePF` | Your Mac's totals: the runs it took part in, the hours it lent, and `computePF`, the compute the hub measured, in petaFLOPs. |
 | `nights` | The nights this Mac lent, oldest first: `{date, poolID, minutes, runs, from, to}`. Nights run from noon to noon; `date` is the noon one began. Tonight's grows as the Mac lends. |
-| `lendingPoolID`, `lendingSince` | The one pool this Mac lends to |
+| `lendingShares` | The pools this Mac lends to, an amount to each: `{poolID, gb, since, hubPool}`. `hubPool` is the pool's name at the hub, which that pool's worker gives (`--pool`); the hub's own pool is `""`. The app runs one worker per share, held to its `gb`. |
 | `networkLendingNow`, `endorsedBefore` | Macs lending across the network, and endorsements from before this history |
 
 ### A pool
@@ -111,15 +111,15 @@ Lending adds one entry per session. The entry grows as the session goes on.
 
 ### POST /hub/v1/heartbeat
 
-The app's worker reports every couple of seconds. `active` is the result of this Mac's own rules: switched on, plugged in, idle, not paused.
+The app's worker reports every couple of seconds. `active` is the result of this Mac's own rules: switched on, plugged in, idle, not paused. They apply to all its shares at once; the time counts in each pool it lends to.
 
 ```json
-{ "active": true, "lendGB": 16, "seconds": 2.0, "macKind": "MacBook Air", "memoryGB": 24 }
+{ "active": true, "seconds": 2.0, "macKind": "MacBook Air", "memoryGB": 24 }
 ```
 
 `seconds` is the time since the last report. The demo speed in Settings scales it.
 
-The answer is `{sync, unlock}`. `unlock` is set when this report took the pool over a line.
+The answer is `{sync, unlock}`. `unlock` is set when this report took a pool over a line; its `poolID` says which.
 
 While a Mac lends, the hub does three things:
 
@@ -160,7 +160,8 @@ The mock simulates the words, unless pools are given a model to come from. The a
 | Call | Body | Answer |
 | --- | --- | --- |
 | `POST /v1/pools` | `{id, name, isPublic}` | `{pool, sync}`. The app picks the id, so its pool and the cloud's are the same one. |
-| `POST /v1/pools/:id/join` | | `{macNumber, poolID, unlock, sync}`. A Mac lends to one pool at a time. |
+| `POST /v1/pools/:id/join` | `{gb}` | `{macNumber, poolID, unlock, sync}`. Joining lets you ask the pool; `gb` above 0 also lends it that much. A Mac can lend to several pools, an amount to each. |
+| `POST /v1/pools/:id/share` | `{gb}` | sync. How much this Mac lends a pool it is in; 0 stops lending there and stays in it. |
 | `POST /v1/pools/:id/leave` | | sync |
 | `POST /v1/pools/:id/endorse` | | `{badge, sync}`. Once per person. Under 20 Macs, it earns Early backer. |
 | `POST /v1/pools/:id/invite` | `{code}` | `{invite, sync}`. Good for a week. |
@@ -169,7 +170,7 @@ The mock simulates the words, unless pools are given a model to come from. The a
 | `POST /v1/pools/:id/boost/pledge` | `{gb}` | sync. Counts you in for the pool's boost, as a guest if you're not in the pool. |
 | `DELETE /v1/pools/:id/boost/pledge` | | sync. Counts you out. |
 | `GET /v1/invites/:code?memory_gb=24` | | The invite, and what a Mac with that memory would add and unlock (below) |
-| `POST /v1/invites/:code/accept` | | As join |
+| `POST /v1/invites/:code/accept` | `{gb}` | As join |
 | `PATCH /v1/me` | `{name}` | sync |
 | `POST /v1/badges/seen` | | sync |
 | `GET /v1/pricing` | | `terms` |
