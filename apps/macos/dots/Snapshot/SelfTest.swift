@@ -72,6 +72,7 @@ enum SelfTest {
             await lendingStories(rig)
             await communityStories(rig)
             await privacyStories(rig)
+            await friendsCloudStory(rig)
         } else {
             print("\nThis Mac can't lend (it needs more than 8 GB of memory), so stories 7 to 17 can't run here.")
         }
@@ -736,6 +737,31 @@ enum SelfTest {
     }
 
     // MARK: Helpers
+
+    /// Story 21: an invite to a friend's cloud. A second mock cloud plays the friend's; the app joins it there and uses
+    /// it from then on. Last, because the app stays on the friend's cloud.
+    private static func friendsCloudStory(_ rig: Rig) async {
+        let model = rig.model
+        story(21, "An invite link names the friend's cloud, and joining it makes you one of its people")
+        let friends = MockCloud(port: UInt16.random(in: 19_700..<19_900), fresh: true, persists: false)
+        do { try friends.start() } catch { check("The friend's cloud starts", false); return }
+        defer { friends.stop() }
+        let invite = friends.world.createInvite(poolID: "studio-9", code: "FRIEND1")
+        let address = "http://127.0.0.1:\(friends.port)"
+        let link = invite.link(cloud: address)
+        check("The link names the cloud: \(link)", link == "dots://invite/FRIEND1?cloud=http://127.0.0.1:\(friends.port)")
+        check("...and reads back as the code and the cloud",
+              AppModel.invite(in: link)?.code == "FRIEND1" && AppModel.invite(in: link)?.cloud?.port == Int(friends.port))
+        model.openInviteLink(link)
+        let loaded = await until(5) { model.openInvite?.preview != nil }
+        check("Opened, it shows the invite from the friend's cloud, with no token yet",
+              loaded && model.openInvite?.cloud?.port == Int(friends.port) && model.openInvite?.preview?.poolName == "Studio 9")
+        if let p = model.openInvite?.preview { model.acceptInvite(p, lendGB: 2) }
+        let switched = await until(5) { model.settings.cloud.address == address && model.backend.isConnected }
+        check("Joining keeps the token it gives and moves the app to that cloud",
+              switched && model.cloudToken == AppModel.mockToken && !model.settings.cloud.useMock
+              && model.backend.client.baseURL.port == Int(friends.port))
+    }
 
     /// Story 20: three levels of privacy, held to, never widened.
     private static func privacyStories(_ rig: Rig) async {

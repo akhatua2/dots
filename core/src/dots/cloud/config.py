@@ -17,6 +17,8 @@ class CloudConfig:
     hub_token: str = ""
     # When set, every call must carry it as a Bearer token. Unset means open, for a cloud on localhost.
     token: str = ""
+    # Where friends reach this cloud from their own Macs, for invite links; unset, invites name no cloud.
+    public_url: str = ""
     # The name the hub's pool goes by in the apps.
     pool_name: str = "Home"
     pool_blurb: str = "A small model for quick, simple questions."
@@ -37,6 +39,7 @@ class CloudConfig:
             hub_url=env.get("DOTS_CLOUD_HUB", cls.hub_url),
             hub_token=env.get("DOTS_JOIN_TOKEN", cls.hub_token),
             token=env.get("DOTS_CLOUD_TOKEN", cls.token),
+            public_url=env.get("DOTS_CLOUD_PUBLIC_URL", cls.public_url),
             pool_name=env.get("DOTS_POOL_NAME", cls.pool_name),
             pool_blurb=env.get("DOTS_POOL_BLURB", cls.pool_blurb),
             pool_model=env.get("DOTS_POOL_MODEL", cls.pool_model),

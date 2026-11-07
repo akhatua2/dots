@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 
 from aiohttp import web
 
@@ -25,6 +26,16 @@ from .sync import HUB_POOL, HubView, SyncBuilder, hub_pool
 log = logging.getLogger(__name__)
 
 _POOL_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+# An account as the hub writes it: the same id a person's workers carry, so the hub knows their Macs
+_ACCOUNT = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Who a request is from: a person, from one of their Macs."""
+
+    person: str
+    mac: str
 
 
 def error(status: int, message: str, kind: str = "invalid_request_error") -> web.Response:
@@ -32,14 +43,18 @@ def error(status: int, message: str, kind: str = "invalid_request_error") -> web
 
 
 class Cloud:
+    """The cloud for its owner and the friends they invite. The owner's requests carry the cloud's token (or none,
+    when it has none, on this Mac); a friend's carry the token they got when they joined through an invite."""
+
     def __init__(self, store: Store, hub: HubClient, config: CloudConfig, *, me: str, my_name: str) -> None:
         self.store = store
         self.hub = hub
         self.config = config
         self.me = me
         self.this_mac = f"mac-{me}"
-        self.sync = SyncBuilder(store, config, me, self.this_mac)
+        self.owner = Caller(me, self.this_mac)
         store.ensure_person(me, my_name)
+        store.adopt_owner(me, self.this_mac)
         # The cloud runs beside this Mac's hub, so it knows the Mac's memory before the first heartbeat.
         if not store.one("select 1 from devices where id = ?", self.this_mac):
             store.set_device(self.this_mac, me, "Mac", _memory_gb())
@@ -96,6 +111,7 @@ class Cloud:
         r.add_delete("/v1/pools/{pool}/boost/pledge", self.unpledge)
         r.add_get("/v1/invites/{code}", self.invite_details)
         r.add_post("/v1/invites/{code}/accept", self.accept_invite)
+        r.add_post("/v1/invites/{code}/join", self.join_as_newcomer)
         r.add_post("/hub/v1/heartbeat", self.heartbeat)
         r.add_post("/hub/v1/pools/{pool}/chat/completions", self.pool_answer)
         r.add_post("/hub/v1/pools/{pool}/images/{kind:generations|edits}", self.pool_picture)
@@ -106,15 +122,32 @@ class Cloud:
 
     @web.middleware
     async def _auth(self, request: web.Request, handler):
-        if self.config.token and request.path != "/healthz":
-            header = request.headers.get("Authorization", "")
-            given = header[7:].strip() if header.startswith("Bearer ") else request.headers.get("x-api-key", "")
-            if not hmac.compare_digest(given, self.config.token):
-                return error(401, "Pass the cloud's token as a Bearer token.", "authentication_error")
+        caller = self._caller(request)
+        # Someone new may look at an invite and join through it, which is how they get a token of their own
+        newcomer = request.path == "/healthz" or (request.path.startswith("/v1/invites/")
+                                                  and (request.method == "GET" or request.path.endswith("/join")))
+        if caller is None and not newcomer:
+            return error(401, "Pass your token as a Bearer token.", "authentication_error")
+        request["caller"] = caller
         return await handler(request)
 
-    async def whole(self, **extra) -> web.Response:
-        return web.json_response({**extra, "sync": await self.sync.build(self.hub)})
+    def _caller(self, request: web.Request) -> Caller | None:
+        header = request.headers.get("Authorization", "")
+        given = header[7:].strip() if header.startswith("Bearer ") else request.headers.get("x-api-key", "")
+        if not given:
+            return None if self.config.token else self.owner  # a cloud without a token serves its owner on this Mac
+        if self.config.token and hmac.compare_digest(given, self.config.token):
+            return self.owner
+        found = self.store.token_owner(given)
+        return Caller(*found) if found else None
+
+    def you(self, request: web.Request) -> SyncBuilder:
+        """The sync as the person asking sees it"""
+        caller = request["caller"]
+        return SyncBuilder(self.store, self.config, caller.person, caller.mac)
+
+    async def whole(self, request: web.Request, **extra) -> web.Response:
+        return web.json_response({**extra, "sync": await self.you(request).build(self.hub)})
 
     def pool_row(self, pool_id: str):
         return self.store.one("select * from pools where id = ?", pool_id)
@@ -125,14 +158,14 @@ class Cloud:
         hub = await HubView.read(self.hub, self.config.pool_model)
         return web.json_response({"ok": True, "hub": hub.online, "model": hub.model})
 
-    async def state(self, _r: web.Request) -> web.Response:
-        return web.json_response(await self.sync.build(self.hub))
+    async def state(self, request: web.Request) -> web.Response:
+        return web.json_response(await self.you(request).build(self.hub))
 
     async def pricing(self, _r: web.Request) -> web.Response:
         return web.json_response(catalog.TERMS)
 
-    async def latest_note(self, _r: web.Request) -> web.Response:
-        note = (await self.sync.build(self.hub)).get("note")
+    async def latest_note(self, request: web.Request) -> web.Response:
+        note = (await self.you(request).build(self.hub)).get("note")
         return web.json_response(note) if note else error(404, "No note yet: this Mac hasn't lent this week.", "not_found_error")
 
     # ---- you -----------------------------------------------------------------
@@ -141,12 +174,12 @@ class Cloud:
         name = str((await _body(request)).get("name", "")).strip()
         if not name:
             return error(400, "Send a name.")
-        self.store.set_person(self.me, name[:60])
-        return await self.whole()
+        self.store.set_person(request["caller"].person, name[:60])
+        return await self.whole(request)
 
-    async def badges_seen(self, _r: web.Request) -> web.Response:
-        self.store.run("update badges set seen = 1")
-        return await self.whole()
+    async def badges_seen(self, request: web.Request) -> web.Response:
+        self.store.run("update person_badges set seen = 1 where person_id = ?", request["caller"].person)
+        return await self.whole(request)
 
     async def describe_model(self, request: web.Request) -> web.Response:
         """What a Hugging Face link runs, for starting a pool from it (links.py)."""
@@ -173,11 +206,12 @@ class Cloud:
                 return error(400, str(e))
             if model.runs is False:
                 return error(400, f"dots can't run {model.name}: {model.why}")
-        self.store.ensure_pool(pool_id, name[:60], self.me, is_public=bool(body.get("isPublic")))
+        caller = request["caller"]
+        self.store.ensure_pool(pool_id, name[:60], caller.person, is_public=bool(body.get("isPublic")))
         if model is not None:
             self.store.set_pool_model(pool_id, model.id, model.kind, model.gb, model.original)
-        self.store.award("starter", "sparkles", "Pool starter", f"Started {name}")
-        sync = await self.sync.build(self.hub)
+        self.store.award(caller.person, "starter", "sparkles", "Pool starter", f"Started {name}")
+        sync = await self.you(request).build(self.hub)
         pool = next(p for p in sync["state"]["pools"] if p["id"] == pool_id)
         return web.json_response({"pool": pool, "sync": sync})
 
@@ -188,52 +222,54 @@ class Cloud:
         body = await _body(request)
         if "offersIdleToNetwork" in body:
             self.store.run("update pools set offers_idle = ? where id = ?", int(bool(body["offersIdleToNetwork"])), pool_id)
-        return await self.whole()
+        return await self.whole(request)
 
     async def join(self, request: web.Request) -> web.Response:
         body = await _body(request)
-        return await self._join(request.match_info["pool"], _gb(body))
+        return await self._join(request, request.match_info["pool"], _gb(body))
 
-    async def _join(self, pool_id: str, gb: int) -> web.Response:
-        """Joining lets this Mac ask the pool; a share (`gb` above 0) also lends it that much."""
+    async def _join(self, request: web.Request, pool_id: str, gb: int, **extra) -> web.Response:
+        """Joining lets a Mac ask the pool; a share (`gb` above 0) also lends it that much."""
         if not self.pool_row(pool_id):
             return error(404, f"No pool called {pool_id}.", "not_found_error")
+        caller, you = request["caller"], self.you(request)
         hub = await HubView.read(self.hub, self.config.pool_model)
-        others = [m for m in self.sync.pool_macs(pool_id, hub) if m["macID"] != self.sync.this_mac]
-        self.store.add_member(pool_id, self.me)
-        self.store.lend(pool_id, gb)
-        unlock = self._unlock(pool_id, hub) if gb > 0 else None
-        return await self.whole(macNumber=len(others) + 1, poolID=pool_id, unlock=unlock)
+        others = [m for m in you.pool_macs(pool_id, hub) if m["macID"] != caller.mac]
+        self.store.add_member(pool_id, caller.person)
+        self.store.lend(caller.mac, pool_id, gb)
+        unlock = self._unlock(you, pool_id, hub) if gb > 0 else None
+        return await self.whole(request, macNumber=len(others) + 1, poolID=pool_id, unlock=unlock, **extra)
 
     async def leave(self, request: web.Request) -> web.Response:
-        pool_id = request.match_info["pool"]
-        self.store.remove_member(pool_id, self.me)
-        self.store.lend(pool_id, 0)
-        return await self.whole()
+        pool_id, caller = request.match_info["pool"], request["caller"]
+        self.store.remove_member(pool_id, caller.person)
+        self.store.lend(caller.mac, pool_id, 0)
+        return await self.whole(request)
 
     async def set_share(self, request: web.Request) -> web.Response:
-        """How much this Mac lends to a pool it is in; 0 stops lending there but stays in the pool."""
-        pool_id = request.match_info["pool"]
-        if not self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool_id, self.me):
+        """How much a Mac lends to a pool its owner is in; 0 stops lending there but stays in the pool."""
+        pool_id, caller = request.match_info["pool"], request["caller"]
+        if not self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool_id, caller.person):
             return error(404, "Join the pool before lending to it.", "not_found_error")
-        self.store.lend(pool_id, _gb(await _body(request)))
-        return await self.whole()
+        self.store.lend(caller.mac, pool_id, _gb(await _body(request)))
+        return await self.whole(request)
 
     async def endorse(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]
         row = self.pool_row(pool_id)
         if not row:
             return error(404, f"No pool called {pool_id}.", "not_found_error")
-        if self.store.one("select 1 from endorsements where pool_id = ? and person_id = ?", pool_id, self.me):
-            return await self.whole(badge=None)
-        macs = len(self.sync.pool_macs(pool_id, await HubView.read(self.hub, self.config.pool_model)))
+        person = request["caller"].person
+        if self.store.one("select 1 from endorsements where pool_id = ? and person_id = ?", pool_id, person):
+            return await self.whole(request, badge=None)
+        macs = len(self.you(request).pool_macs(pool_id, await HubView.read(self.hub, self.config.pool_model)))
         self.store.run("insert into endorsements (pool_id, person_id, at, macs_at) values (?, ?, ?, ?)",
-                       pool_id, self.me, timefmt.iso(timefmt.now()), macs)
+                       pool_id, person, timefmt.iso(timefmt.now()), macs)
         badge = None
         if macs < 20:
-            badge = self.store.award(f"backer-{pool_id}", "checkmark.seal", "Early backer",
+            badge = self.store.award(person, f"backer-{pool_id}", "checkmark.seal", "Early backer",
                                      f"Endorsed {row['name']} at {macs} {'Mac' if macs == 1 else 'Macs'}")
-        return await self.whole(badge=badge)
+        return await self.whole(request, badge=badge)
 
     async def create_invite(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]
@@ -242,30 +278,33 @@ class Cloud:
             return error(400, "Send a code of 4 to 16 letters and digits, for a pool that exists.")
         expires = expires_in(7)
         self.store.run("insert or replace into invites (code, pool_id, from_id, expires) values (?, ?, ?, ?)",
-                       code, pool_id, self.me, expires)
-        return await self.whole(invite={"code": code, "expires": expires})
+                       code, pool_id, request["caller"].person, expires)
+        return await self.whole(request, invite={"code": code, "expires": expires})
 
     async def delete_invite(self, request: web.Request) -> web.Response:
         self.store.run("delete from invites where pool_id = ?", request.match_info["pool"])
-        return await self.whole()
+        return await self.whole(request)
 
     async def invite_details(self, request: web.Request) -> web.Response:
         invite = self.store.one("select * from invites where code = ?", request.match_info["code"].upper())
         if not invite or is_expired(invite["expires"]):
             return error(404, "That invite has expired or never existed.", "not_found_error")
         pool = self.pool_row(invite["pool_id"])
+        caller = request["caller"]
+        you = self.you(request) if caller else SyncBuilder(self.store, self.config, "", "")
         hub = await HubView.read(self.hub, self.config.pool_model)
         memory = int(request.query.get("memory_gb", "0") or 0)
         add_gb = max(0, memory - max(memory // 4, 8))
-        pooled = self.sync.pooled_gb(pool["id"], hub)
-        tiers = self.sync.tiers(hub)["tiers"]
+        pooled = you.pooled_gb(pool["id"], hub)
+        tiers = you.tiers(hub)["tiers"]
         now_model = catalog.best_for(tiers, pooled)
         then_model = catalog.best_for(tiers, pooled + add_gb)
         details = {
             "code": invite["code"], "poolID": pool["id"], "poolName": pool["name"], "blurb": pool["blurb"],
             "fromName": (self.store.one("select name from people where id = ?", invite["from_id"]) or {"name": None})["name"],
-            "macs": len(self.sync.pool_macs(pool["id"], hub)), "pooledGB": pooled, "addGB": add_gb,
-            "isMember": bool(self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool["id"], self.me)),
+            "macs": len(you.pool_macs(pool["id"], hub)), "pooledGB": pooled, "addGB": add_gb,
+            "isMember": bool(caller and self.store.one("select 1 from members where pool_id = ? and person_id = ?",
+                                                       pool["id"], caller.person)),
         }
         if now_model:
             details["modelNow"] = now_model["name"]
@@ -281,56 +320,77 @@ class Cloud:
         invite = self.store.one("select * from invites where code = ?", request.match_info["code"].upper())
         if not invite or is_expired(invite["expires"]):
             return error(404, "That invite has expired or never existed.", "not_found_error")
-        return await self._join(invite["pool_id"], _gb(await _body(request)))
+        return await self._join(request, invite["pool_id"], _gb(await _body(request)))
+
+    async def join_as_newcomer(self, request: web.Request) -> web.Response:
+        """Someone new joins the pool an invite is for: they become a person here, with a Mac and a token of their
+        own, which this answer carries once. `account` is the account their Mac's workers carry, so the hub knows
+        which Macs are theirs; one already here can't be taken again."""
+        invite = self.store.one("select * from invites where code = ?", request.match_info["code"].upper())
+        if not invite or is_expired(invite["expires"]):
+            return error(404, "That invite has expired or never existed.", "not_found_error")
+        body = await _body(request)
+        name, account = str(body.get("name", "")).strip(), str(body.get("account", "")).strip()
+        if not name or not _ACCOUNT.match(account):
+            return error(400, "Send your name and your Mac's account (letters, digits, - and _).")
+        if self.store.one("select 1 from people where id = ?", account):
+            return error(409, "That account is already here. Use the token it got when it joined.", "conflict_error")
+        mac = f"mac-{account}"
+        self.store.set_person(account, name[:60])
+        token = self.store.make_token(account, mac)
+        request["caller"] = Caller(account, mac)
+        return await self._join(request, invite["pool_id"], _gb(body), token=token, personID=account, macID=mac)
 
     async def pledge(self, request: web.Request) -> web.Response:
         pool_id = request.match_info["pool"]
         if not self.store.one("select 1 from boosts where pool_id = ?", pool_id):
             return error(404, "This pool has no boost planned.", "not_found_error")
         gb = int((await _body(request)).get("gb", 0))
-        guest = not self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool_id, self.me)
+        person = request["caller"].person
+        guest = not self.store.one("select 1 from members where pool_id = ? and person_id = ?", pool_id, person)
         self.store.run("insert or replace into pledges (pool_id, person_id, gb, guest) values (?, ?, ?, ?)",
-                       pool_id, self.me, max(0, gb), int(guest))
-        return await self.whole()
+                       pool_id, person, max(0, gb), int(guest))
+        return await self.whole(request)
 
     async def unpledge(self, request: web.Request) -> web.Response:
-        self.store.run("delete from pledges where pool_id = ? and person_id = ?", request.match_info["pool"], self.me)
-        return await self.whole()
+        self.store.run("delete from pledges where pool_id = ? and person_id = ?", request.match_info["pool"],
+                       request["caller"].person)
+        return await self.whole(request)
 
     # ---- the hub -------------------------------------------------------------
 
     async def heartbeat(self, request: web.Request) -> web.Response:
-        beat = await _body(request)
-        self.store.set_device(self.this_mac, self.me, str(beat.get("macKind") or "Mac"), int(beat.get("memoryGB") or 0))
+        beat, caller, you = await _body(request), request["caller"], self.you(request)
+        self.store.set_device(caller.mac, caller.person, str(beat.get("macKind") or "Mac"), int(beat.get("memoryGB") or 0))
         hub = await HubView.read(self.hub, self.config.pool_model)
-        self.store.record_lending(active=bool(beat.get("active")), seconds=float(beat.get("seconds") or 0))
-        unlocks = (self._unlock(share["pool_id"], hub) for share in self.store.shares())
-        return await self.whole(unlock=next((u for u in unlocks if u), None))
+        self.store.record_lending(caller.mac, active=bool(beat.get("active")), seconds=float(beat.get("seconds") or 0))
+        unlocks = (self._unlock(you, share["pool_id"], hub) for share in self.store.shares(caller.mac))
+        return await self.whole(request, unlock=next((u for u in unlocks if u), None))
 
-    def _unlock(self, pool_id: str, hub: HubView) -> dict | None:
+    def _unlock(self, you: SyncBuilder, pool_id: str, hub: HubView) -> dict | None:
         """The first time this Mac's share takes a pool over the line for a model it can really run: record it and
         give the badge. Only models the pool's hub serves count, and a model is unlocked once, so a worker that
         restarts and comes back is not news.
         """
-        macs = self.sync.pool_macs(pool_id, hub)
-        mine = next((m for m in macs if m["macID"] == self.this_mac and m["state"] == "lending"), None)
+        macs = you.pool_macs(pool_id, hub)
+        mine = next((m for m in macs if m["macID"] == you.this_mac and m["state"] == "lending"), None)
         if mine is None:
             return None
         after_gb = sum(m["lendGB"] for m in macs if m["state"] == "lending")
         before_gb = after_gb - mine["lendGB"]
         servable = {hub.model} if pool_id == HUB_POOL else set()
-        crossed = [t for t in self.sync.tiers(hub)["tiers"]
+        crossed = [t for t in you.tiers(hub)["tiers"]
                    if t["id"] in servable and before_gb < t["minGB"] <= after_gb
                    and not self.store.one("select 1 from unlocks where pool_id = ? and model_id = ?", pool_id, t["id"])]
         if not crossed:
             return None
         tier = crossed[-1]
-        event = {"id": str(uuid.uuid4()).upper(), "poolID": pool_id, "modelID": tier["id"], "byMacID": self.this_mac,
+        event = {"id": str(uuid.uuid4()).upper(), "poolID": pool_id, "modelID": tier["id"], "byMacID": you.this_mac,
                  "fromGB": before_gb, "toGB": after_gb, "date": timefmt.iso(timefmt.now())}
         self.store.run("insert into unlocks (id, pool_id, model_id, by_mac_id, from_gb, to_gb, date) values (?, ?, ?, ?, ?, ?, ?)",
-                       event["id"], pool_id, tier["id"], self.this_mac, before_gb, after_gb, event["date"])
+                       event["id"], pool_id, tier["id"], you.this_mac, before_gb, after_gb, event["date"])
         pool = self.pool_row(pool_id)
-        self.store.award(f"unlock-{pool_id}-{tier['id']}", "bolt.fill", "Unlocker", f"Took {pool['name']} to {tier['name']}")
+        self.store.award(you.me, f"unlock-{pool_id}-{tier['id']}", "bolt.fill", "Unlocker", f"Took {pool['name']} to {tier['name']}")
         return event
 
     async def pool_answer(self, request: web.Request) -> web.StreamResponse:
@@ -344,21 +404,22 @@ class Cloud:
         if not hub.online:
             return error(503, "The hub isn't answering right now.", "api_error")
         model = hub.model if pool_id == HUB_POOL else row["serves_model_id"]
-        macs = [{"id": m["macID"], "initial": _initial(self, m["macID"]), "name": _name(self, m["macID"])}
-                for m in self.sync.pool_macs(pool_id, hub) if m["state"] == "lending"]
+        caller = request["caller"]
+        macs = [{"id": m["macID"], "initial": _initial(self, caller, m["macID"]), "name": _name(self, caller, m["macID"])}
+                for m in self.you(request).pool_macs(pool_id, hub) if m["state"] == "lending"]
         receipt = {"pool": row["name"], "model": catalog.short_name(model), "credits": 0, "simulated": False}
         body["model"] = model
         body["pool"] = hub_pool(pool_id)
         _keep_privacy(request, body, receipt)
         if not body.get("stream"):
             try:
-                reply = await self.hub.complete(body, self.me)
+                reply = await self.hub.complete(body, caller.person)
             except HubError as e:
                 return error(e.status, str(e), "api_error")
             reply["dots"] = {**receipt, "macs": macs}
             return web.json_response(reply)
         speculate = request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
-        return await _relay(request, self.hub.stream(body, self.me, speculate), first={"event": "macs", "macs": macs, **receipt},
+        return await _relay(request, self.hub.stream(body, caller.person, speculate), first={"event": "macs", "macs": macs, **receipt},
                             last=receipt)
 
     async def pool_picture(self, request: web.Request) -> web.StreamResponse:
@@ -374,7 +435,7 @@ class Cloud:
         out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await out.prepare(request)
         try:
-            async for line in self.hub.picture(request.match_info["kind"], body, self.me):
+            async for line in self.hub.picture(request.match_info["kind"], body, request["caller"].person):
                 await out.write(line)
         except HubError as e:
             await out.write(f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n".encode())
@@ -411,15 +472,15 @@ def _event(payload: dict) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
-def _name(cloud: Cloud, mac_id: str) -> str:
+def _name(cloud: Cloud, caller: Caller, mac_id: str) -> str:
     device = cloud.store.one("select owner_id from devices where id = ?", mac_id)
-    owner = device["owner_id"] if device else (cloud.me if mac_id == cloud.this_mac else None)
+    owner = device["owner_id"] if device else (caller.person if mac_id == caller.mac else None)
     person = cloud.store.one("select name from people where id = ?", owner) if owner else None
     return person["name"] if person else "A Mac"
 
 
-def _initial(cloud: Cloud, mac_id: str) -> str:
-    return "You" if mac_id == cloud.this_mac else _name(cloud, mac_id)[:1].upper()
+def _initial(cloud: Cloud, caller: Caller, mac_id: str) -> str:
+    return "You" if mac_id == caller.mac else _name(cloud, caller, mac_id)[:1].upper()
 
 
 def _memory_gb() -> int:

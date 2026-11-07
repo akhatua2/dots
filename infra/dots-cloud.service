@@ -1,0 +1,21 @@
+[Unit]
+Description=dots cloud (pools, people and invites, beside the hub)
+After=network-online.target dots-hub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The cloud's settings, kept in the persistent ~/.dots dir: at least DOTS_CLOUD_TOKEN (the owner's token) and
+# DOTS_CLOUD_PUBLIC_URL (where friends reach it, which invite links carry). See infra/README.md.
+EnvironmentFile=-__HOME__/.dots/cloud.env
+# The hub's API on this machine; the cloud listens on localhost, behind an HTTPS proxy.
+ExecStart=__HOME__/.local/bin/uv run dots cloud --port 8800 --hub-url http://127.0.0.1:8080
+Restart=always
+RestartSec=2
+# Pools, people and tokens live in ~/.dots/cloud.db: persist it.
+
+[Install]
+WantedBy=multi-user.target

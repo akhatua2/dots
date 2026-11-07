@@ -37,6 +37,20 @@ final class WorkerProcess {
     private let home: String
 
     var isAvailable: Bool { command != nil }
+
+    /// The account this Mac's workers carry, so the hub knows which Macs are whose: read from the workers' home, or
+    /// made there the way the engine makes it ("acc-" and 32 hex digits) when no worker has run yet.
+    var account: String {
+        let path = home + "/account"
+        if let text = try? String(contentsOfFile: path, encoding: .utf8) {
+            let existing = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !existing.isEmpty { return existing }
+        }
+        let made = "acc-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        try? (made + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        return made
+    }
     var isRunning: Bool { running.values.contains { $0.process.isRunning } }
 
     /// Brings the workers in line with the rules: one for each share, running with its pool and memory, or none.

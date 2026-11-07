@@ -212,7 +212,20 @@ final class MockCloud {
 
     func handle(_ r: HTTPRequest, _ res: HTTPResponder) async {
         if r.method == "OPTIONS" { res.empty(204); return }
-        // Every call carries the app's token, as it will for the real cloud
+        // Every call carries the app's token, as it will for the real cloud. Someone new may look at an invite and join
+        // through it, which is how they get a token of their own.
+        if let c = match(r, "GET", "/v1/invites/:code"), (r.bearer ?? "").isEmpty {
+            guard let p = preview(code: c[0], memoryGB: r.query["memory_gb"].flatMap { Int($0) }) else {
+                res.error(404, "That invite isn't valid any more.", type: "not_found_error"); return
+            }
+            res.encoded(200, p); return
+        }
+        if let c = match(r, "POST", "/v1/invites/:code/join") {
+            guard let p = preview(code: c[0], memoryGB: nil) else { res.error(404, "That invite isn't valid any more.", type: "not_found_error"); return }
+            let joined = join(p.poolID, gb: r.object["gb"] as? Int ?? 0)
+            res.encoded(200, NewcomerReply(token: AppModel.mockToken, macNumber: joined.macNumber, poolID: joined.poolID,
+                                           unlock: joined.unlock, sync: joined.sync)); return
+        }
         guard (r.bearer ?? r.headers["x-api-key"]) == AppModel.mockToken else {
             res.error(401, "Pass the cloud's token as a Bearer token.", type: "authentication_error"); return
         }

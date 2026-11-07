@@ -23,6 +23,7 @@ The second half of this page covers the API dots serves to your own apps on `loc
 ## Conventions
 
 - One base URL and one token for all three parts, sent as `Authorization: Bearer <token>`. The mock's token is `dots_mock_local`. Without it, every call is a 401.
+- A cloud serves its owner (the cloud's own token) and every friend who joined through an invite (each with a token of their own). Each sees the sync as themselves: their lending, shares, badges and spends. Looking at an invite and joining through one need no token.
 - Bodies are JSON with ISO 8601 dates and camelCase fields. The hub's and the gateway's answers use OpenAI's and Anthropic's own formats.
 - Errors are `{"error": {"message": "…", "type": "…"}}`. The types are `authentication_error` (401), `invalid_request_error` (400), `insufficient_credits` (402), `permission_error` (403) and `not_found_error` (404). The gateway's `/messages` uses Anthropic's error shape instead.
 - Every change answers with the whole sync (below), so the app sees the result without a second call.
@@ -132,6 +133,8 @@ While a Mac lends, the hub does three things:
 
 A pool's answer, in OpenAI's chat completions format. Public pools charge the model's credits. Your own pools are free.
 
+The sync's `cloud.address` is where friends reach this cloud, when it says (`DOTS_CLOUD_PUBLIC_URL`); invite links carry it as `dots://invite/CODE?cloud=…`.
+
 `X-Dots-Privacy: mine` asks for Only my Macs: the hub runs it only when every Mac holding the model is yours, and otherwise answers 409 without running it anywhere. The same header on a pool's pictures draws only on a Mac of yours. The app sends it for your documents and photos; questions that look personal stay in your pools by the app's routing, and the rest may go anywhere.
 
 A streamed answer carries `dots` events beside the usual chunks:
@@ -176,6 +179,7 @@ The mock simulates the words, unless pools are given a model to come from. The a
 | `DELETE /v1/pools/:id/boost/pledge` | | sync. Counts you out. |
 | `GET /v1/invites/:code?memory_gb=24` | | The invite, and what a Mac with that memory would add and unlock (below) |
 | `POST /v1/invites/:code/accept` | `{gb}` | As join |
+| `POST /v1/invites/:code/join` | `{name, account, gb}` | For someone new, with no token: as join, plus `{token, personID, macID}`. `account` is the account their Mac's workers carry; one already here is refused (409). The token is shown this once. |
 | `PATCH /v1/me` | `{name}` | sync |
 | `POST /v1/badges/seen` | | sync |
 | `GET /v1/pricing` | | `terms` |

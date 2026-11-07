@@ -119,7 +119,13 @@ struct UnlockEvent: Codable, Hashable, Identifiable {
 struct Invite: Codable, Hashable {
     var code: String
     var expires: Date
-    var url: String { "https://dots.link/\(code)" }
+
+    /// The link to send: it names the cloud when friends reach it from elsewhere, so their app joins it there
+    func link(cloud: String?) -> String {
+        var link = URLComponents(string: "dots://invite/\(code)")!
+        if let cloud, !cloud.isEmpty { link.queryItems = [URLQueryItem(name: "cloud", value: cloud)] }
+        return link.string ?? "dots://invite/\(code)"
+    }
 }
 
 struct Pool: Codable, Hashable, Identifiable {

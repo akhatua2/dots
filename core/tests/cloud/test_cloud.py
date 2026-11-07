@@ -336,12 +336,20 @@ async def test_a_pool_runs_the_model_its_link_names(env, monkeypatch):
     assert r.status == 400 and "can't run" in (await r.json())["error"]["message"]
 
 
-def test_a_database_from_one_pool_lending_keeps_its_pool_as_a_share(tmp_path):
+def test_an_older_database_moves_to_its_owner(tmp_path):
+    """One pool lent to, its time, a night, a badge and a spend, as an older cloud kept them for its one person"""
     path = tmp_path / "old.db"
-    Store(path).run("update lending set pool_id = 'hub', lend_gb = 6, since = '2026-10-01T00:00:00Z' where id = 1")
+    old = Store(path)
+    old.run("update lending set pool_id = 'hub', lend_gb = 6, since = '2026-10-01T00:00:00Z', seconds = 7200 where id = 1")
+    old.run("insert into nights (date, pool_id, minutes, runs) values ('2026-10-01T12:00:00Z', 'hub', 90, 3)")
+    old.run("insert into badges (id, symbol, title, detail, date) values ('starter', 's', 'Pool starter', 'd', '2026-10-01')")
+    old.run("insert into spends (id, date, amount, note) values ('S1', '2026-10-02', -5, 'Claude')")
     store = Store(path)
-    assert [(r["pool_id"], r["gb"]) for r in store.shares()] == [("hub", 6)]
-    assert store.lending()["pool_id"] is None
+    store.adopt_owner("me", "mac-me")
+    assert [(r["pool_id"], r["gb"]) for r in store.shares("mac-me")] == [("hub", 6)]
+    assert store.lending("mac-me")["seconds"] == 7200 and len(store.nights("mac-me")) == 1
+    assert [b["id"] for b in store.badges("me")] == ["starter"] and len(store.spends("me")) == 1
+    assert not store.shares("mac-friend") and not store.badges("friend"), "nothing of it is anyone else's"
 
 
 async def test_the_hub_pool_reads_what_it_runs_from_its_repo(tmp_path, monkeypatch):
@@ -398,4 +406,60 @@ async def test_a_pool_made_before_the_cloud_kept_originals_learns_its_own(tmp_pa
         await asyncio.sleep(0.05)
         row = store.one("select * from pools where id = 'prism'")
         assert row["model_original"] == "owner/draw" and row["model_gb"] == 4.6
+    await hub_server.close()
+
+
+async def test_a_friend_joins_through_an_invite_and_sees_their_own_cloud(env):
+    client, _ = env
+    await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True})
+    await client.post("/v1/pools/prism/invite", json={"code": "PRISM1"})
+    look = await client.get("/v1/invites/PRISM1", headers={"Authorization": "Bearer not-a-token"})
+    assert look.status == 200, "anyone with the link may look before joining"
+
+    joined = await client.post("/v1/invites/PRISM1/join", json={"name": "Mangala", "account": "acc-mangala", "gb": 4},
+                               headers={"Authorization": "Bearer not-a-token"})
+    body = await joined.json()
+    token, state = body["token"], body["sync"]["state"]
+    assert joined.status == 200 and token.startswith("dots_")
+    assert state["meID"] == "acc-mangala" and state["thisMacID"] == "mac-acc-mangala"
+    assert [(x["poolID"], x["gb"]) for x in state["lendingShares"]] == [("prism", 4)]
+    assert not any(b["id"] == "starter" for b in state["badges"]), "the owner's badges stay the owner's"
+
+    friend = {"Authorization": f"Bearer {token}"}
+    mine = (await (await client.get("/v1/state", headers=friend)).json())["state"]
+    assert mine["meID"] == "acc-mangala"
+    owner = (await (await client.get("/v1/state")).json())["state"]
+    assert owner["meID"] == ME and owner["lendingShares"] == [], "the owner's lending is the owner's own"
+    assert "acc-mangala" in next(p for p in owner["pools"] if p["id"] == "prism")["memberIDs"]
+
+    again = await client.post("/v1/invites/PRISM1/join", json={"name": "Someone", "account": "acc-mangala"})
+    assert again.status == 409, "an account already here can't be taken"
+    assert (await client.get("/v1/state", headers={"Authorization": "Bearer dots_wrong"})).status == 401
+
+
+async def test_a_cloud_with_a_token_serves_only_its_token_and_its_friends(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL, token="owner-secret")
+    store = Store(tmp_path / "c.db")
+    cloud = Cloud(store, HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        assert (await client.get("/v1/state")).status == 401, "no token, no cloud"
+        owner = await client.get("/v1/state", headers={"Authorization": "Bearer owner-secret"})
+        assert (await owner.json())["state"]["meID"] == ME
+        friend_token = store.make_token("acc-ana", "mac-acc-ana")
+        store.set_person("acc-ana", "Ana")
+        friend = await client.get("/v1/state", headers={"Authorization": f"Bearer {friend_token}"})
+        assert (await friend.json())["state"]["meID"] == "acc-ana"
+    assert "dots_" not in str(store.rows("select * from tokens")[0]["hash"]), "only a hash of a token is kept"
+    await hub_server.close()
+
+
+async def test_the_sync_says_where_friends_reach_this_cloud(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), public_url="https://dots.example.org")
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        assert (await state(client))["cloud"] == {"address": "https://dots.example.org"}
     await hub_server.close()

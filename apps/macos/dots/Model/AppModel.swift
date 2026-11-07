@@ -75,6 +75,8 @@ struct OpenInvite: Equatable {
     var code: String
     var preview: InviteDetails?
     var error: String?
+    /// A friend's cloud the invite is for, when it isn't the one this Mac uses
+    var cloud: URL?
 }
 
 @MainActor
@@ -141,16 +143,28 @@ final class AppModel {
 
     static let mockToken = "dots_mock_local"
 
-    static func client(for settings: AppSettings) -> CloudClient {
+    static func client(for settings: AppSettings, token: String? = Keychain.get(cloudTokenAccount)) -> CloudClient {
         if settings.cloud.useMock || URL(string: settings.cloud.address)?.host == nil {
             return CloudClient(baseURL: URL(string: "http://127.0.0.1:\(settings.cloud.mockPort)")!, token: mockToken)
         }
-        return CloudClient(baseURL: URL(string: settings.cloud.address)!, token: Keychain.get("dots-cloud") ?? "")
+        return CloudClient(baseURL: URL(string: settings.cloud.address)!, token: token ?? "")
+    }
+
+    /// Where the token for this Mac's cloud is kept
+    static let cloudTokenAccount = "dots-cloud"
+    /// The self-test's token, kept in memory so it never touches the Keychain
+    @ObservationIgnored private var testCloudToken: String?
+    /// The token this Mac uses with its cloud: in the Keychain, or in memory for the self-test and snapshots
+    var cloudToken: String? {
+        get { persistsSettings ? Keychain.get(Self.cloudTokenAccount) : testCloudToken }
+        set {
+            if persistsSettings { Keychain.set(newValue ?? "", for: Self.cloudTokenAccount) } else { testCloudToken = newValue }
+        }
     }
 
     /// Starts the mock cloud on this Mac when it's the one in use, and points the app at the right cloud.
     func connectCloud() {
-        backend.client = Self.client(for: settings)
+        backend.client = Self.client(for: settings, token: cloudToken)
         if settings.cloud.useMock {
             if mock?.port != UInt16(settings.cloud.mockPort) {
                 mock?.stop()
@@ -416,28 +430,70 @@ final class AppModel {
 
     // MARK: Invites
 
-    /// The code in an invite link, whatever form it was pasted in: dots://invite/CODE, https://dots.link/CODE, or CODE.
-    static func inviteCode(in text: String) -> String? {
+    /// Joins a friend's cloud through their invite: you become a person there, with your name and the account your
+    /// Mac's workers carry, and the token it gives you is kept for it. The app uses that cloud from then on.
+    private func joinCloud(_ cloud: URL, through preview: InviteDetails, lendGB: Int?) {
+        let me = Newcomer(name: state.me.name, account: workerProcess.account,
+                          gb: min(lendGB ?? .max, state.thisMac.maxLendGB))
+        Task {
+            do {
+                let reply: NewcomerReply = try await CloudClient(baseURL: cloud, token: "")
+                    .send("POST", "v1/invites/\(preview.code)/join", body: me)
+                cloudToken = reply.token
+                settings.cloud.address = cloud.absoluteString
+                settings.cloud.useMock = false
+                connectCloud()
+                await backend.syncNow()
+                backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
+                refreshLending()
+                route = .pool(reply.poolID)
+                moment = .joined(poolID: reply.poolID, macNumber: reply.macNumber, unlock: reply.unlock,
+                                 waiting: lendingStatus.isActive ? nil : lendingStatus.headline)
+            } catch {
+                openInvite = OpenInvite(code: preview.code, preview: preview, error: error.localizedDescription, cloud: cloud)
+                sheet = .openInvite
+            }
+        }
+    }
+
+    /// The code in an invite link, whatever form it was pasted in: dots://invite/CODE, a web link ending in the code,
+    /// or CODE.
+    static func inviteCode(in text: String) -> String? { invite(in: text)?.code }
+
+    /// An invite link's code, and the cloud it names, if any: dots://invite/CODE?cloud=https://…
+    static func invite(in text: String) -> (code: String, cloud: URL?)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let last = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
+        let path = trimmed.split(separator: "?", maxSplits: 1).first.map(String.init) ?? trimmed
+        let last = path.split(separator: "/").last.map(String.init) ?? path
         let code = last.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-        return code.count >= 4 ? code : nil
+        guard code.count >= 4 else { return nil }
+        let named = URLComponents(string: trimmed)?.queryItems?.first { $0.name == "cloud" }?.value.flatMap(URL.init(string:))
+        let cloud = named.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") && $0.host != nil ? $0 : nil }
+        return (code, cloud)
     }
 
     func openInviteLink(_ text: String) {
-        guard let code = Self.inviteCode(in: text) else {
+        guard let link = Self.invite(in: text) else {
             openInvite = OpenInvite(code: text, preview: nil, error: "That doesn't look like an invite link.")
             sheet = .openInvite
             return
         }
-        openInvite = OpenInvite(code: code)
+        let code = link.code
+        // An invite for a friend's cloud is read there; one for this Mac's own cloud, here
+        let elsewhere = link.cloud.flatMap { $0.host == backend.client.baseURL.host && $0.port == backend.client.baseURL.port ? nil : $0 }
+        openInvite = OpenInvite(code: code, cloud: elsewhere)
         sheet = .openInvite
         Task {
             // A link can open dots before its cloud answers, so a connection error gets two more tries
             for attempt in 1...3 {
                 do {
-                    openInvite?.preview = try await backend.preview(code: code)
+                    if let elsewhere {
+                        openInvite?.preview = try await CloudClient(baseURL: elsewhere, token: "")
+                            .get("v1/invites/\(code)", query: [URLQueryItem(name: "memory_gb", value: "\(ThisMac.memoryGB)")])
+                    } else {
+                        openInvite?.preview = try await backend.preview(code: code)
+                    }
                     return
                 } catch let error as TransportError {
                     if case .http(_, _) = error { break }
@@ -450,6 +506,10 @@ final class AppModel {
 
     func acceptInvite(_ preview: InviteDetails, lendGB: Int? = nil) {
         sheet = nil
+        if let cloud = openInvite?.cloud {
+            joinCloud(cloud, through: preview, lendGB: lendGB)
+            return
+        }
         let gb = min(lendGB ?? .max, state.mostGB(for: preview.poolID))
         Task {
             do {

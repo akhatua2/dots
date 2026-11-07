@@ -55,6 +55,8 @@ class HubView:
 
 
 class SyncBuilder:
+    """The sync as one person sees it, from one of their Macs."""
+
     def __init__(self, store: Store, config: CloudConfig, me: str, this_mac: str) -> None:
         self.store = store
         self.config = config
@@ -77,8 +79,8 @@ class SyncBuilder:
             # A worker in the hub is lending, whether or not a model is loaded yet: the hub loads one on the first
             # question, which the pool would never get if it waited for the model before counting the Mac
             macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending"))
-        share = self.store.share(pool_id)
-        if share and self.store.lending()["active"] and all(m["macID"] != self.this_mac for m in macs):
+        share = self.store.share(self.this_mac, pool_id)
+        if share and self.store.lending(self.this_mac)["active"] and all(m["macID"] != self.this_mac for m in macs):
             # In the hub's pool this Mac lends only once its worker is in the hub; until then it is starting up and
             # adds nothing, so a worker restarting never moves the pool's level.
             state = "online" if pool_id == HUB_POOL else "lending"
@@ -189,11 +191,11 @@ class SyncBuilder:
             for day, e in days.items()
         ]
         log += [{"id": r["id"], "date": r["date"], "amount": r["amount"], "note": r["note"], "kind": "spend"}
-                for r in self.store.rows("select * from spends")]
+                for r in self.store.spends(self.me)]
         return sorted(log, key=lambda e: e["date"], reverse=True)
 
     def balance(self, hub: HubView) -> float:
-        spent = self.store.one("select coalesce(sum(amount), 0) as total from spends")["total"]
+        spent = sum(r["amount"] for r in self.store.spends(self.me))
         return round(float(self.my_ledger(hub).get("balance_cu") or 0) * self.config.credits_per_cu + spent)
 
     # ---- the whole sync --------------------------------------------------------
@@ -202,7 +204,7 @@ class SyncBuilder:
         hub = await HubView.read(hub_client, self.config.pool_model)
         s = self.store
         mine = self.my_ledger(hub)
-        lending = s.lending()
+        lending = s.lending(self.this_mac)
         pools = [self.pool(row, hub) for row in s.rows("select * from pools order by created_at")]
 
         people = {r["id"]: r["name"] for r in s.rows("select id, name from people")}
@@ -227,7 +229,7 @@ class SyncBuilder:
             "questionsHelped": int(mine.get("turns_as_worker") or 0),
             "creditLog": self.credit_log(hub),
             "badges": [{"id": b["id"], "symbol": b["symbol"], "title": b["title"], "detail": b["detail"],
-                        "date": b["date"], "isNew": not b["seen"]} for b in s.rows("select * from badges order by date desc")],
+                        "date": b["date"], "isNew": not b["seen"]} for b in s.badges(self.me)],
             "networkLendingNow": sum(1 for n in hub.nodes if n.get("ready")),
             "endorsedBefore": 0,
             "hoursLent": round(lending["seconds"] / 3600, 2),
@@ -236,7 +238,7 @@ class SyncBuilder:
         }
         # Each pool this Mac lends to, how much, and the pool its worker names at the hub
         state["lendingShares"] = [{"poolID": r["pool_id"], "gb": r["gb"], "since": r["since"],
-                                   "hubPool": hub_pool(r["pool_id"])} for r in s.shares()]
+                                   "hubPool": hub_pool(r["pool_id"])} for r in s.shares(self.this_mac)]
 
         sync = {
             "state": state,
@@ -245,6 +247,8 @@ class SyncBuilder:
             "mock": False,
             "ladder": self.tiers(hub),
             "hub": {"online": hub.online, "model": hub.model, "ticket": self.config.hub_ticket or None},
+            # Where friends reach this cloud, for the invite links you send them
+            "cloud": {"address": self.config.public_url or None},
             "earning": {"lastHour": self.earned_since(hub, timedelta(hours=1))},
         }
         worker = self.worker(hub)
@@ -264,7 +268,7 @@ class SyncBuilder:
                 runs[night] = runs.get(night, 0) + 1
                 tokens[night] = tokens.get(night, 0) + int(turn.get("prefill_tokens") or 0) + int(turn.get("decode_tokens") or 0)
         out = []
-        for n in self.store.rows("select * from nights order by date"):
+        for n in self.store.nights(self.this_mac):
             entry = {"date": n["date"], "poolID": n["pool_id"], "minutes": round(n["minutes"], 2),
                      "runs": runs.get(n["date"], 0) if n["pool_id"] == HUB_POOL else 0,
                      "tokens": tokens.get(n["date"], 0) if n["pool_id"] == HUB_POOL else 0}

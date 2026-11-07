@@ -94,7 +94,11 @@ struct CloudSync: Codable {
     var hub: HubInfo?
     /// What this Mac earned lately, from the hub's ledger. The mock doesn't send it.
     var earning: Earning?
+    /// Where friends reach this cloud, for invite links. Unset: invites name no cloud.
+    var cloud: CloudInfo?
 }
+
+struct CloudInfo: Codable, Equatable { var address: String? }
 
 struct Earning: Codable, Equatable {
     var lastHour: Int
@@ -126,6 +130,9 @@ struct Share: Codable { var gb: Int }
 
 struct HeartbeatReply: Codable { var sync: CloudSync; var unlock: UnlockEvent? }
 struct JoinReply: Codable { var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
+/// Joining a friend's cloud through their invite: who you are there, and the token to use there from now on
+struct Newcomer: Codable { var name: String; var account: String; var gb: Int }
+struct NewcomerReply: Codable { var token: String; var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
 struct BadgeReply: Codable { var badge: Badge?; var sync: CloudSync }
 struct PoolReply: Codable { var pool: Pool; var sync: CloudSync }
 struct InviteReply: Codable { var invite: Invite; var sync: CloudSync }
@@ -167,7 +174,7 @@ struct CloudClient {
         guard let url = parts.url else { throw TransportError.badEndpoint }
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder.dots.encode(AnyEncodable(body))

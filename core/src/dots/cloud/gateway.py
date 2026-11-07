@@ -45,7 +45,7 @@ async def answer(cloud: "Cloud", request: web.Request, *, fmt: str) -> web.Strea
         return _error(fmt, 400, f"The gateway doesn't serve {model or 'that model'}.", "invalid_request_error")
 
     # Refuse up front when even a typical answer is more than the balance.
-    balance = cloud.sync.balance(await HubView.read(cloud.hub, cloud.config.pool_model))
+    balance = cloud.you(request).balance(await HubView.read(cloud.hub, cloud.config.pool_model))
     typical, _ = catalog.gateway_credits(model, catalog.TERMS["typicalInput"], catalog.TERMS["typicalOutput"])
     if balance < typical:
         return _error(fmt, 402, f"Not enough credits: about {typical} needed, {int(balance)} left.", "insufficient_credits")
@@ -72,7 +72,7 @@ async def answer(cloud: "Cloud", request: web.Request, *, fmt: str) -> web.Strea
     tokens_out = int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
     credits, list_credits = catalog.gateway_credits(model, tokens_in, tokens_out)
     name = model.replace("claude-", "Claude ").replace("-", " ").title().replace(" 5 5", " 5.5").replace(" 5 1", " 5.1")
-    cloud.store.spend(credits, f"{name}, through the gateway")
+    cloud.store.spend(request["caller"].person, credits, f"{name}, through the gateway")
     receipt = {"credits": credits, "list_credits": list_credits, "discount": catalog.TERMS["discount"], "simulated": False}
 
     if not wants_stream:

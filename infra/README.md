@@ -44,6 +44,27 @@ sudo systemctl restart dots-hub
 Clients then connect with that token in their environment:
 `DOTS_JOIN_TOKEN=some-long-secret dots chat <TICKET>`.
 
+### Optional: the cloud beside the hub, for friends beyond one Wi-Fi
+
+The cloud keeps pools, people and invites. On the hub's VM it serves its owner and every friend who joins through
+an invite, each with a token of their own (only its hash is stored). It listens on localhost; put an HTTPS proxy
+(Caddy, nginx) in front of it for the public address.
+
+```bash
+cat >> ~/.dots/cloud.env <<'ENV'
+DOTS_CLOUD_TOKEN=a-long-secret-only-you-keep
+DOTS_CLOUD_PUBLIC_URL=https://dots.example.org
+ENV
+sudo cp ~/dots/infra/dots-cloud.service /etc/systemd/system/dots-cloud.service
+sudo sed -i -e "s|__USER__|$USER|g" -e "s|__HOME__|$HOME|g" -e "s|__APP_DIR__|$HOME/dots|g" \
+  /etc/systemd/system/dots-cloud.service
+sudo systemctl daemon-reload && sudo systemctl enable --now dots-cloud
+```
+
+In the Mac app's Settings, connect to the public address with the owner's token. Invite links you make then name
+the cloud (`dots://invite/CODE?cloud=https://…`): a friend who opens one joins there with their name and their
+Mac's account, and their app keeps the token it gets and uses that cloud from then on.
+
 ## 2. One-time CI/CD setup (Workload Identity Federation — keyless)
 
 So GitHub Actions can deploy without storing a service-account key. Run locally

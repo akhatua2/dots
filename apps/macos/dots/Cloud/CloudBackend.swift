@@ -22,6 +22,8 @@ final class CloudBackend: DotsBackend {
     private(set) var worker: WorkerStatus?
     /// The hub behind a real cloud, with the ticket this Mac's worker dials. Nil from the mock.
     private(set) var hub: HubInfo?
+    /// Where friends reach this cloud, when it says
+    private(set) var cloudAddress: String?
     /// What this Mac earned in the last hour, from the ledger. Nil from the mock.
     private(set) var earning: Earning?
     private(set) var invites: [InviteDetails] = []
@@ -74,6 +76,7 @@ final class CloudBackend: DotsBackend {
         Pricing.terms = sync.terms
         if let ladder = sync.ladder { Ladder.adopt(ladder) }
         hub = sync.hub
+        cloudAddress = sync.cloud?.address
         earning = sync.earning
         note = sync.note
         worker = sync.worker

@@ -128,7 +128,10 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend. Done:
    a pool says its model, kind and size; its page shows what it runs, needs and has in place of the ladder; a Mac
    that can't hold a drawing pool's model joins it to ask, lending nothing.
-7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
+7. For people beyond one Wi-Fi: the cloud and the hub on a public server. The cloud's part is done: it serves its
+   owner and every friend who joins through an invite, each with a token of their own and their own lending,
+   badges and spends; invite links name the cloud, and the app joins a friend's cloud from one. `infra/README.md`
+   says how to run it beside the hub; deploying it is left to the owner.
 8. Privacy levels on every request (Only my Macs, My pools, Anywhere), never falling back to a wider one; your
    question's head on your own Mac within the shared levels (see Who can see what). Levels done: the app routes by
    level and the receipt names it; Only my Macs travels to the hub, which refuses a model held partly on someone

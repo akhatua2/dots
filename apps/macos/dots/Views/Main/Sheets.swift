@@ -182,9 +182,11 @@ struct InviteSheet: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let pool, let invite = pool.invite {
                     HStack(spacing: 10) {
-                        Text(invite.url).font(D.mono(14, .medium)).foregroundStyle(D.t1).textSelection(.enabled)
+                        let link = invite.link(cloud: model.backend.cloudAddress)
+                        Text(link).font(D.mono(14, .medium)).foregroundStyle(D.t1).textSelection(.enabled)
+                            .lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        CopyButton(text: invite.url, copied: $copied, tag: "invite")
+                        CopyButton(text: link, copied: $copied, tag: "invite")
                     }
                     .padding(.leading, 14).padding(.trailing, 7).frame(height: 46)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(D.bg0))
@@ -371,7 +373,7 @@ struct OpenInviteSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(open?.preview.map { "Join \($0.poolName)" } ?? "Open an invite link").font(D.ui(19, .bold)).foregroundStyle(D.t1)
                 Text(open?.preview.map { p in p.fromName.map { "An invite from \($0)" } ?? "You're invited" }
-                     ?? "Paste a link a friend sent you, like https://dots.link/LATE7Q.")
+                     ?? "Paste a link a friend sent you, like dots://invite/LATE7Q.")
                     .font(D.ui(13)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.horizontal, 28).padding(.top, 26)
@@ -387,7 +389,7 @@ struct OpenInviteSheet: View {
                     Text("Opening the invite…").font(D.ui(13)).foregroundStyle(D.t3)
                 }
                 if open?.preview == nil {
-                    Field(placeholder: "https://dots.link/…", text: $link, mono: true)
+                    Field(placeholder: "dots://invite/…", text: $link, mono: true)
                         .onSubmit { model.openInviteLink(link) }
                 }
             }

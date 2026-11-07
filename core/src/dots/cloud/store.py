@@ -1,13 +1,19 @@
 """The cloud's own state, in one SQLite file: everything about pools and people the hub doesn't keep.
 
 Pools' Macs, credits earned and answers come from the hub. This keeps the rest: pool names and members,
-invites, endorsements, boosts and pledges, activity, badges, spends through the gateway, where this Mac
-lends and the nights it lent. Writes are small and come from one process, so one connection, used from
-the event loop's thread, is enough.
+invites, endorsements, boosts and pledges, activity, and for each person their badges and spends through the
+gateway, and for each Mac where it lends and the nights it lent. Writes are small and come from one process,
+so one connection, used from the event loop's thread, is enough.
+
+A cloud serves several people: its owner, and friends who joined through an invite, each with a token of their
+own (kept only as a hash). Older databases had one person's lending, badges and nights in single rows; the
+owner's are moved into the per-person tables once (`adopt_owner`).
 """
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
@@ -59,6 +65,19 @@ create table if not exists nights (
     date text not null, pool_id text not null, minutes real not null, runs integer not null,
     first text, last text, primary key (date, pool_id)
 );
+create table if not exists tokens (hash text primary key, person_id text not null, mac_id text not null, made text not null);
+create table if not exists mac_lending (mac_id text primary key, active integer not null default 0,
+    seconds real not null default 0);
+create table if not exists mac_shares (mac_id text not null, pool_id text not null, gb integer not null, since text not null,
+    primary key (mac_id, pool_id));
+create table if not exists mac_nights (
+    mac_id text not null, date text not null, pool_id text not null, minutes real not null, runs integer not null,
+    first text, last text, primary key (mac_id, date, pool_id)
+);
+create table if not exists person_badges (
+    person_id text not null, id text not null, symbol text not null, title text not null, detail text not null,
+    date text not null, seen integer not null default 0, primary key (person_id, id)
+);
 """
 
 
@@ -75,7 +94,8 @@ class Store:
         self._move_old_lending()
 
     # Columns added since a database was first made: (table, column, type)
-    _ADDED = [("pools", "model_kind", "text"), ("pools", "model_gb", "real"), ("pools", "model_original", "text")]
+    _ADDED = [("pools", "model_kind", "text"), ("pools", "model_gb", "real"), ("pools", "model_original", "text"),
+              ("spends", "person_id", "text")]
 
     def _add_missing_columns(self) -> None:
         for table, column, kind in self._ADDED:
@@ -85,11 +105,29 @@ class Store:
 
     def _move_old_lending(self) -> None:
         """A database from when a Mac lent to one pool keeps that pool in `lending`: it becomes a share."""
-        row = self.lending()
+        row = self.one("select * from lending where id = 1")
         if row["pool_id"]:
             self.run("insert or ignore into shares (pool_id, gb, since) values (?, ?, ?)",
                      row["pool_id"], row["lend_gb"], row["since"] or timefmt.iso(timefmt.now()))
             self.run("update lending set pool_id = null, since = null where id = 1")
+
+    def adopt_owner(self, person_id: str, mac_id: str) -> None:
+        """Moves what an older, one-person database kept in single rows to its owner and the owner's Mac."""
+        old = self.one("select active, seconds from lending where id = 1")
+        if old["seconds"] or old["active"]:
+            self.run("insert or ignore into mac_lending (mac_id, active, seconds) values (?, ?, ?)",
+                     mac_id, old["active"], old["seconds"])
+            self.run("update lending set active = 0, seconds = 0 where id = 1")
+        self.run("insert or ignore into mac_shares (mac_id, pool_id, gb, since) select ?, pool_id, gb, since from shares",
+                 mac_id)
+        self.run("delete from shares")
+        self.run("insert or ignore into mac_nights (mac_id, date, pool_id, minutes, runs, first, last) "
+                 "select ?, date, pool_id, minutes, runs, first, last from nights", mac_id)
+        self.run("delete from nights")
+        self.run("insert or ignore into person_badges (person_id, id, symbol, title, detail, date, seen) "
+                 "select ?, id, symbol, title, detail, date, seen from badges", person_id)
+        self.run("delete from badges")
+        self.run("update spends set person_id = ? where person_id is null", person_id)
 
     def rows(self, sql: str, *args) -> list[sqlite3.Row]:
         return self.db.execute(sql, args).fetchall()
@@ -155,60 +193,91 @@ class Store:
 
     # ---- badges and spends ---------------------------------------------------
 
-    def award(self, badge_id: str, symbol: str, title: str, detail: str) -> dict | None:
-        """Gives a badge once. Returns it the first time, None after."""
-        if self.one("select 1 from badges where id = ?", badge_id):
+    def award(self, person_id: str, badge_id: str, symbol: str, title: str, detail: str) -> dict | None:
+        """Gives a person a badge once. Returns it the first time, None after."""
+        if self.one("select 1 from person_badges where person_id = ? and id = ?", person_id, badge_id):
             return None
         date = timefmt.iso(timefmt.now())
-        self.run("insert into badges (id, symbol, title, detail, date) values (?, ?, ?, ?, ?)",
-                 badge_id, symbol, title, detail, date)
+        self.run("insert into person_badges (person_id, id, symbol, title, detail, date) values (?, ?, ?, ?, ?, ?)",
+                 person_id, badge_id, symbol, title, detail, date)
         return {"id": badge_id, "symbol": symbol, "title": title, "detail": detail, "date": date, "isNew": True}
 
-    def spend(self, amount: int, note: str) -> None:
-        self.run("insert into spends (id, date, amount, note) values (?, ?, ?, ?)",
-                 str(uuid.uuid4()).upper(), timefmt.iso(timefmt.now()), -abs(amount), note)
+    def badges(self, person_id: str) -> list[sqlite3.Row]:
+        return self.rows("select * from person_badges where person_id = ? order by date desc", person_id)
+
+    def spend(self, person_id: str, amount: int, note: str) -> None:
+        self.run("insert into spends (id, date, amount, note, person_id) values (?, ?, ?, ?, ?)",
+                 str(uuid.uuid4()).upper(), timefmt.iso(timefmt.now()), -abs(amount), note, person_id)
+
+    def spends(self, person_id: str) -> list[sqlite3.Row]:
+        return self.rows("select * from spends where person_id = ?", person_id)
+
+    # ---- tokens --------------------------------------------------------------
+
+    def make_token(self, person_id: str, mac_id: str) -> str:
+        """A new token for a person's Mac. Only its hash is kept, so it is shown once."""
+        token = "dots_" + secrets.token_urlsafe(32)
+        self.run("insert into tokens (hash, person_id, mac_id, made) values (?, ?, ?, ?)",
+                 _hash(token), person_id, mac_id, timefmt.iso(timefmt.now()))
+        return token
+
+    def token_owner(self, token: str) -> tuple[str, str] | None:
+        """(person, Mac) a token was made for, or None"""
+        row = self.one("select person_id, mac_id from tokens where hash = ?", _hash(token))
+        return (row["person_id"], row["mac_id"]) if row else None
 
     # ---- lending -------------------------------------------------------------
-    # This Mac lends an amount to each of any number of pools (its shares). Whether it is lending right now, and
-    # for how long it has, is one row: the Mac's rules (plugged in, not in use) apply to all its shares at once.
+    # A Mac lends an amount to each of any number of pools (its shares). Whether it is lending right now, and for
+    # how long it has, is one row per Mac: its rules (plugged in, not in use) apply to all its shares at once.
 
-    def lending(self) -> sqlite3.Row:
-        return self.one("select * from lending where id = 1")
+    def lending(self, mac_id: str) -> dict:
+        row = self.one("select active, seconds from mac_lending where mac_id = ?", mac_id)
+        return dict(row) if row else {"active": 0, "seconds": 0.0}
 
-    def shares(self) -> list[sqlite3.Row]:
-        return self.rows("select * from shares order by since")
+    def shares(self, mac_id: str) -> list[sqlite3.Row]:
+        return self.rows("select * from mac_shares where mac_id = ? order by since", mac_id)
 
-    def share(self, pool_id: str) -> sqlite3.Row | None:
-        return self.one("select * from shares where pool_id = ?", pool_id)
+    def share(self, mac_id: str, pool_id: str) -> sqlite3.Row | None:
+        return self.one("select * from mac_shares where mac_id = ? and pool_id = ?", mac_id, pool_id)
 
-    def lend(self, pool_id: str, gb: int) -> None:
+    def lend(self, mac_id: str, pool_id: str, gb: int) -> None:
         """Lend `gb` to a pool, or change how much; 0 stops lending to it."""
         if gb <= 0:
-            self.run("delete from shares where pool_id = ?", pool_id)
+            self.run("delete from mac_shares where mac_id = ? and pool_id = ?", mac_id, pool_id)
             return
-        self.run("insert into shares (pool_id, gb, since) values (?, ?, ?) "
-                 "on conflict(pool_id) do update set gb = excluded.gb", pool_id, gb, timefmt.iso(timefmt.now()))
+        self.run("insert into mac_shares (mac_id, pool_id, gb, since) values (?, ?, ?, ?) "
+                 "on conflict(mac_id, pool_id) do update set gb = excluded.gb",
+                 mac_id, pool_id, gb, timefmt.iso(timefmt.now()))
 
-    def record_lending(self, *, active: bool, seconds: float) -> None:
-        """A heartbeat: while this Mac lends, its time counts toward tonight in each pool it lends to."""
-        self.run("update lending set active = ? where id = 1", int(active))
-        shares = self.shares()
+    def record_lending(self, mac_id: str, *, active: bool, seconds: float) -> None:
+        """A heartbeat: while a Mac lends, its time counts toward tonight in each pool it lends to."""
+        self.run("insert into mac_lending (mac_id, active) values (?, ?) "
+                 "on conflict(mac_id) do update set active = excluded.active", mac_id, int(active))
+        shares = self.shares(mac_id)
         if not active or not shares or seconds <= 0:
             return
-        self.run("update lending set seconds = seconds + ? where id = 1", seconds)
+        self.run("update mac_lending set seconds = seconds + ? where mac_id = ?", seconds, mac_id)
         now = timefmt.now()
         night = timefmt.iso(timefmt.night_of(now))
         stamp = timefmt.iso(now)
         for share in shares:
             self.run(
-                "insert into nights (date, pool_id, minutes, runs, first, last) values (?, ?, ?, 0, ?, ?) "
-                "on conflict(date, pool_id) do update set minutes = minutes + excluded.minutes, last = excluded.last",
-                night, share["pool_id"], seconds / 60, stamp, stamp,
+                "insert into mac_nights (mac_id, date, pool_id, minutes, runs, first, last) values (?, ?, ?, ?, 0, ?, ?) "
+                "on conflict(mac_id, date, pool_id) do update set minutes = minutes + excluded.minutes, last = excluded.last",
+                mac_id, night, share["pool_id"], seconds / 60, stamp, stamp,
             )
+
+    def nights(self, mac_id: str) -> list[sqlite3.Row]:
+        return self.rows("select * from mac_nights where mac_id = ? order by date", mac_id)
+
 
 def _phase(pool_id: str) -> float:
     """A stable number in [0, 1) per pool, for its emblem."""
     return (uuid.uuid5(uuid.NAMESPACE_URL, pool_id).int % 1000) / 1000
+
+
+def _hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def expires_in(days: int) -> str:
