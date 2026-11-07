@@ -5,7 +5,13 @@ struct ExploreView: View {
     @Environment(\.isSnapshot) private var isSnapshot
     @State private var query = ""
     @State private var filter = "All"
-    private let filters = ["All", "Code", "Research", "Writing", "Nearby"]
+    /// The tags the public pools carry, most common first, after "All". None when there is nothing to filter.
+    private var filters: [String] {
+        let tags = model.state.publicPools.flatMap(\.tags)
+        let counts = Dictionary(tags.map { ($0, 1) }, uniquingKeysWith: +)
+        let ordered = counts.keys.sorted { (counts[$0]!, $1) > (counts[$1]!, $0) }
+        return ordered.isEmpty ? [] : ["All"] + ordered
+    }
 
     private var pools: [Pool] {
         model.state.publicPools
@@ -14,7 +20,7 @@ struct ExploreView: View {
                 let q = query.trimmingCharacters(in: .whitespaces).lowercased()
                 guard !q.isEmpty else { return true }
                 return $0.name.lowercased().contains(q) || $0.blurb.lowercased().contains(q)
-                    || ($0.model?.name.lowercased().contains(q) ?? false)
+                    || ($0.modelLabel?.lowercased().contains(q) ?? false)
             }
             .sorted { $0.totalMacs > $1.totalMacs }
     }
@@ -26,7 +32,7 @@ struct ExploreView: View {
                     HStack(spacing: 14) {
                         HStack(spacing: 7) {
                             Circle().fill(D.t4).frame(width: 7, height: 7)
-                            Text("\(model.state.networkLendingNow.grouped) Macs lending right now")
+                            Text("\(model.state.networkLendingNow.counted("Mac")) lending right now")
                                 .font(D.ui(12.5, .medium)).foregroundStyle(D.t3)
                                 .contentTransition(.numericText())
                         }
@@ -68,14 +74,13 @@ struct ExploreView: View {
                     ForEach(pools) { pool in PoolCard(pool: pool) }
                 }
                 if pools.isEmpty {
-                    Text("No pools match that.")
+                    Text(model.state.publicPools.isEmpty
+                         ? "No public pools yet. Start one and make it public, or invite friends to yours."
+                         : "No pools match that. Try another word.")
                         .font(D.ui(13)).foregroundStyle(D.t4).padding(.top, 20)
-                        .help("Try another word, or start one yourself.")
                 }
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 34)
-            .padding(.bottom, 32)
+            .page()
         }
     }
 }
@@ -108,10 +113,17 @@ struct PoolCard: View {
     var pool: Pool
     @State private var hovering = false
 
+    /// What the pool has and what its model needs: "6 GB lent of 2 GB" or, for pictures, "needs 5 GB on one Mac"
+    private var resources: String {
+        let lent = "\(pool.pooledGB.grouped) GB lent"
+        guard let needs = pool.needsGB else { return lent }
+        return lent + (pool.draws ? ", \(needs) GB a picture" : " of \(needs) GB")
+    }
+
     var body: some View {
         let s = model.state
         let friends = s.friends(in: pool)
-        let lendingHere = s.lendingPoolID == pool.id
+        let lendingHere = s.isLending(to: pool.id)
         let isMember = pool.isMember(s.meID)
 
         VStack(alignment: .leading, spacing: 0) {
@@ -119,7 +131,7 @@ struct PoolCard: View {
                 MiniRings(pool: pool, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pool.name).font(D.ui(15, .bold)).foregroundStyle(D.t1).lineLimit(1)
-                    Text("\(pool.model?.name ?? "No model yet") · \(pool.totalMacs.grouped) Macs")
+                    Text("\(pool.modelLabel ?? "No model yet") · \(pool.totalMacs.counted("Mac"))")
                         .font(D.ui(12)).foregroundStyle(D.t3).lineLimit(1)
                 }
             }
@@ -132,12 +144,21 @@ struct PoolCard: View {
                     Circle().fill(D.t4).frame(width: 7, height: 7)
                     Text("\(pool.lendingMacs.grouped) lending").font(D.ui(12, .medium)).foregroundStyle(D.t2)
                 }
-                IconLine(symbol: "gauge.with.dots.needle.33percent", text: "\(pool.tokPerSec) tok/s for you", color: D.t4, size: 12)
+                if pool.runsOneModel {
+                    IconLine(symbol: "memorychip", text: resources, color: D.t4, size: 12)
+                } else {
+                    IconLine(symbol: "gauge.with.dots.needle.33percent", text: "\(pool.tokPerSec) tok/s for you", color: D.t4, size: 12)
+                }
             }
             .padding(.top, 10)
-            IconLine(symbol: "smallcircle.filled.circle",
-                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.lending.limitGB))) credits an hour for your Mac", size: 12)
-                .padding(.top, 7)
+            if let why = pool.whyCantLend(s.thisMac) {
+                IconLine(symbol: "laptopcomputer", text: why.replacingOccurrences(of: "Your Mac can't lend here: ", with: "Can't lend: "), size: 12)
+                    .padding(.top, 7)
+            } else {
+                IconLine(symbol: "smallcircle.filled.circle",
+                         text: "About \(pool.creditsPerHour(lendGB: max(1, s.mostGB(for: pool.id))).counted("credit")) an hour for your Mac", size: 12)
+                    .padding(.top, 7)
+            }
             Group {
                 if !friends.isEmpty {
                     HStack(spacing: 8) {
@@ -171,9 +192,13 @@ struct PoolCard: View {
                     .padding(.horizontal, 12).frame(height: 28)
                     .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
                 } else {
-                    HoverAccentButton(title: isMember ? "Lend Here" : "Add My Mac", alwaysAccent: hovering && !isMember) {
+                    HoverAccentButton(title: isMember ? "Lend Here" : s.offerGB(for: pool) > 0 ? "Add My Mac" : "Join",
+                                      alwaysAccent: hovering && !isMember) {
                         model.join(pool)
                     }
+                    .disabled(isMember && s.offerGB(for: pool) == 0)
+                    .opacity(isMember && s.offerGB(for: pool) == 0 ? 0.4 : 1)
+                    .help(pool.whyCantLend(s.thisMac) ?? (isMember && s.offerGB(for: pool) == 0 ? "Your other pools have what this Mac lends" : ""))
                 }
             }
         }
@@ -204,7 +229,7 @@ struct InviteCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(invite.fromName ?? "A friend") invited you to \(invite.poolName)").font(D.ui(14, .semibold)).foregroundStyle(D.t1)
                 Text(invite.unlocks.map { "Your Mac would unlock \($0) for everyone in it." }
-                     ?? "\(invite.macs) Macs · runs \(invite.modelNow ?? "nothing yet")")
+                     ?? "\(invite.macs.counted("Mac")) · runs \(invite.modelNow ?? "nothing yet")")
                     .font(D.ui(12.5)).foregroundStyle(invite.unlocks == nil ? D.t3 : D.accentText)
             }
             Spacer()

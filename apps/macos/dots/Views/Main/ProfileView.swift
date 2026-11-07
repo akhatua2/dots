@@ -33,11 +33,7 @@ struct ProfileView: View {
                 }
                 CreditsCard()
             }
-            .padding(.horizontal, 40)
-            .padding(.top, 36)
-            .padding(.bottom, 40)
-            .frame(maxWidth: 1_100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .page()
         }
     }
 
@@ -83,7 +79,7 @@ struct ProfileView: View {
         let live = model.lendingStatus.isActive
         return VStack(spacing: 0) {
             ZStack {
-                RecordArt(nights: nights, currentPoolID: s.lendingPoolID, size: 400, live: live)
+                RecordArt(nights: nights, currentPoolIDs: s.lendingPoolIDs, size: 400, live: live)
                 VStack(spacing: 3) {
                     Text("\(nights.count)").font(D.ui(30, .light).monospacedDigit()).foregroundStyle(D.t2)
                     Text("NIGHTS").font(D.ui(9, .bold)).tracking(1.6).foregroundStyle(Color(hex: 0x6E6E6E))
@@ -99,7 +95,7 @@ struct ProfileView: View {
                 }
                 .font(D.ui(12.5)).foregroundStyle(Color(hex: 0x8A8A8A))
                 Spacer()
-                RecordShare(nights: nights, currentPoolID: s.lendingPoolID)
+                RecordShare(nights: nights, currentPoolIDs: s.lendingPoolIDs)
             }
             .frame(height: 28)
             .padding(.top, 8)
@@ -117,7 +113,7 @@ struct ProfileView: View {
 /// Share your contribution fingerprint as an image.
 struct RecordShare: View {
     var nights: [NightLent]
-    var currentPoolID: String?
+    var currentPoolIDs: Set<String>
     @Environment(\.isSnapshot) private var isSnapshot
     @State private var image: Image?
 
@@ -146,7 +142,7 @@ struct RecordShare: View {
 
     private func render() {
         guard !isSnapshot else { return }
-        let art = RecordArt(nights: nights, currentPoolID: currentPoolID, size: 1_200)
+        let art = RecordArt(nights: nights, currentPoolIDs: currentPoolIDs, size: 1_200)
             .background(D.bg0)
             .environment(\.artClock, .now)
         let renderer = ImageRenderer(content: art)
@@ -162,6 +158,11 @@ struct AllTimeCard: View {
     @Environment(AppModel.self) private var model
     var nights: [NightLent]
 
+    /// 0.9 -> "0.9", 127.4 -> "127": a decimal only while it still says something.
+    static func hours(_ h: Double) -> String {
+        h < 10 ? String(format: "%.1f", h) : Int(h.rounded()).grouped
+    }
+
     var body: some View {
         let s = model.state
         let weeks = Self.weeks(nights)
@@ -169,13 +170,13 @@ struct AllTimeCard: View {
         VStack(alignment: .leading, spacing: 0) {
             CardHeader("All time", note: nights.first.map { "Since \($0.date.formatted(.dateTime.month(.wide).day()))" })
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(Runs.tokens(s.questionsHelped)).font(D.ui(40, .semibold).monospacedDigit()).tracking(-1).foregroundStyle(D.t1)
+                Text(Runs.short(s.served().tokens)).font(D.ui(40, .semibold).monospacedDigit()).tracking(-1).foregroundStyle(D.t1)
                     .contentTransition(.numericText())
                 Text("tokens run").font(D.ui(14)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.top, 14)
             Rule().padding(.top, 18)
-            StatRow(stats: [.init(value: Int(s.hoursLent ?? 0).grouped, label: "hours lent"),
+            StatRow(stats: [.init(value: Self.hours(s.hoursLent ?? 0), label: "hours lent"),
                             .init(value: s.questionsHelped.grouped, label: "runs"),
                             .init(value: Int(s.credits).grouped, label: "credits")])
                 .padding(.top, 16)
@@ -264,7 +265,7 @@ struct WhereLentCard: View {
         let first = window.first?.date ?? .now
         let pools = poolOrder(window)
         VStack(alignment: .leading, spacing: 0) {
-            CardHeader("Where your Mac lent", note: "\(nights.count) nights")
+            CardHeader("Where your Mac lent", note: nights.count.counted("night"))
             VStack(spacing: 0) {
                 HStack(spacing: 16) {
                     Text("Pool").frame(width: 210, alignment: .leading)
@@ -276,9 +277,9 @@ struct WhereLentCard: View {
                 .frame(height: 22, alignment: .bottom)
                 ForEach(Array(pools.enumerated()), id: \.element) { i, pid in
                     let pool = s.pool(pid)
-                    let tone = Color(hex: RecordArt.tone(for: pid, in: nights, current: s.lendingPoolID))
+                    let tone = Color(hex: RecordArt.tone(for: pid, in: nights, current: s.lendingPoolIDs))
                     let total = nights.filter { $0.poolID == pid }.count
-                    let tonight = pid == s.lendingPoolID && nights.last?.poolID == pid && nights.last?.date == Date().nightStart
+                    let tonight = s.isLending(to: pid) && nights.contains { $0.poolID == pid && $0.date == Date().nightStart }
                     HStack(spacing: 16) {
                         HStack(spacing: 10) {
                             Circle().fill(tone).frame(width: 9, height: 9)
@@ -293,7 +294,7 @@ struct WhereLentCard: View {
                     }
                     .frame(height: 44)
                     .overlay(alignment: .top) { if i > 0 { Rule() } }
-                    .help("\(total) nights since \(nights.first { $0.poolID == pid }?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")")
+                    .help("\(total.counted("night")) since \(nights.first { $0.poolID == pid }?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")")
                 }
             }
             .padding(.top, 10)

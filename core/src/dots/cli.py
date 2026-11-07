@@ -28,7 +28,7 @@ DEFAULT_HUB_HOST = "0.0.0.0"
 # Default model the chat (the querier) requests when the user doesn't
 # pass --model. The hub is model-agnostic — it never picks a model — so
 # this default lives on the client side.
-DEFAULT_CHAT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+DEFAULT_CHAT_MODEL = "mlx-community/Qwen3.5-0.8B-4bit"
 
 # Load a project-local .env file BEFORE any module that reads from the
 # environment is imported. This is how users typically configure
@@ -404,6 +404,13 @@ def main() -> None:
         "defaults to 8080. pass --http-port 0 to disable.",
     )
 
+    p_cloud = sub.add_parser(
+        "cloud",
+        help="run the dots cloud (pools, people, credits, the gateway) next to a hub",
+    )
+    p_cloud.add_argument("--port", type=int, default=None, help="defaults to $DOTS_CLOUD_PORT or 8800")
+    p_cloud.add_argument("--hub-url", default=None, help="the hub's HTTP API; defaults to $DOTS_CLOUD_HUB or http://127.0.0.1:8080")
+
     p_chat = sub.add_parser(
         "chat",
         help="open the interactive chat. donates compute as a side effect.",
@@ -466,6 +473,11 @@ def main() -> None:
         "the hub treats it as a layer-count cap when planning. "
         "defaults to no cap.",
     )
+    p_worker.add_argument(
+        "--pool",
+        default=os.environ.get("DOTS_POOL", ""),
+        help="the pool this Mac lends to; the hub runs only that pool's model on it (default: the hub's own pool)",
+    )
 
     p_serve = sub.add_parser(
         "serve",
@@ -473,7 +485,7 @@ def main() -> None:
     )
     p_serve.add_argument(
         "model",
-        help="model id to serve, e.g. mlx-community/Qwen3-9B-4bit",
+        help="model id to serve, e.g. mlx-community/Qwen3.5-9B-MLX-4bit",
     )
     p_serve.add_argument(
         "hub",
@@ -545,6 +557,20 @@ def main() -> None:
             asyncio.run(hub.start())
         except KeyboardInterrupt:
             sys.exit(0)
+        return
+
+    if args.cmd == "cloud":
+        from dataclasses import replace
+
+        from .cloud.__main__ import main as run_cloud
+        from .cloud.config import CloudConfig
+
+        config = CloudConfig.from_env()
+        if args.port:
+            config = replace(config, port=args.port)
+        if args.hub_url:
+            config = replace(config, hub_url=args.hub_url)
+        run_cloud(config)
         return
 
     if args.cmd == "credits":
@@ -637,7 +663,7 @@ def main() -> None:
             if companion is not None:
                 _shutdown_companion_worker(companion)
     elif args.cmd == "worker":
-        worker = Worker(hub_ticket, headless=True, max_load_gb=args.max_ram)
+        worker = Worker(hub_ticket, headless=True, max_load_gb=args.max_ram, pool=args.pool)
         # Record our PID so a sibling `dots chat` knows there's already a
         # local worker and doesn't auto-spawn a duplicate.
         write_worker_pid(os.getpid())

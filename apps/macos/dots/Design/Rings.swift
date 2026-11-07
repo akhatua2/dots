@@ -121,7 +121,6 @@ struct PoolHistory {
     }
 
     /// Tonight's runs so far, ten a seed.
-    func runsTonight(now: Date) -> Int { max(0, visible(now: now) - (nights.last?.lowerBound ?? 0)) * 10 }
 }
 
 /// Rects on a pixel grid, gathered by colour and filled once each.
@@ -315,10 +314,10 @@ struct MiniRings: View {
 }
 
 /// Your contribution fingerprint: one groove from your Mac's first night at the heart to tonight at the edge, a dot for every 5 runs,
-/// each night in the tone of the pool it lent to, with a short pause between nights. The pool it lends to now is orange.
+/// each night in the tone of the pool it lent to, with a short pause between nights. The pools it lends to now are orange.
 struct RecordArt: View {
     var nights: [NightLent]
-    var currentPoolID: String?
+    var currentPoolIDs: Set<String> = []
     var size: CGFloat
     var live = false
     @Environment(\.artClock) private var artClock
@@ -326,10 +325,10 @@ struct RecordArt: View {
     /// Grey tones for the pools, in the order your Mac first lent to them
     static let tones: [UInt32] = [0x8A8A8A, 0xCFCFCF, 0xA6A6A6, 0x6E6E6E, 0xBDBDBD, 0x9A9A9A]
 
-    static func tone(for poolID: String, in nights: [NightLent], current: String?) -> UInt32 {
-        if poolID == current { return 0xFF5A1F }
+    static func tone(for poolID: String, in nights: [NightLent], current: Set<String>) -> UInt32 {
+        if current.contains(poolID) { return 0xFF5A1F }
         var order: [String] = []
-        for n in nights where n.poolID != current && !order.contains(n.poolID) { order.append(n.poolID) }
+        for n in nights where !current.contains(n.poolID) && !order.contains(n.poolID) { order.append(n.poolID) }
         return tones[(order.firstIndex(of: poolID) ?? 0) % tones.count]
     }
 
@@ -360,7 +359,7 @@ struct RecordArt: View {
             var tonePaths: [UInt32: Path] = [:]
             var th = 0.0
             for (i, night) in nights.enumerated() {
-                let rgb = Self.tone(for: night.poolID, in: nights, current: currentPoolID)
+                let rgb = Self.tone(for: night.poolID, in: nights, current: currentPoolIDs)
                 let n = dots[i]
                 let tonight = i == nights.count - 1
                 for k in 0..<(n + pause) {

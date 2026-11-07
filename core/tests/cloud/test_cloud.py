@@ -1,0 +1,511 @@
+"""The cloud against a fake hub: the sync's shape, pools, invites, endorsements, lending, and answers."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+
+import pytest
+import pytest_asyncio
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from dots.cloud.config import CloudConfig
+from dots.cloud.hub import HubClient
+from dots.cloud.server import Cloud
+from dots.cloud.store import Store
+
+ME = "acc-me"
+MODEL = "mlx-community/Qwen3.5-0.8B-4bit"
+WIRE_DATE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
+def answers(payload: dict):
+    """A route that always answers with the same JSON."""
+
+    async def handler(_request: web.Request) -> web.Response:
+        return web.json_response(payload)
+
+    return handler
+
+
+def fake_hub(*, nodes: list[dict] | None = None) -> web.Application:
+    """Answers the four hub calls the cloud makes, the way the real hub's HTTP API does."""
+    nodes = nodes if nodes is not None else [
+        {"id": "w-me", "account_id": ME, "alias": None, "ready": True, "device": "MacBook Pro · Apple M1 Pro",
+         "layer_range": [0, 24], "ram_gb": 6.0},
+        {"id": "w-sam", "account_id": "acc-sam", "alias": "Sam", "ready": True, "device": "Mac Studio · M2 Ultra",
+         "layer_range": None, "ram_gb": 48.0},
+    ]
+    ledger = {"accounts": {ME: {"balance_cu": 0.5, "earned_cu": 0.6, "turns_as_worker": 3}},
+              "turns": [{"started_iso": "2026-11-05T22:10:00.123+00:00", "credited": {ME: 6025}, "flops_done": 6_025_000_000,
+                         "prefill_tokens": 40, "decode_tokens": 120}]}
+    app = web.Application()
+    app.router.add_get("/v1/pool/nodes", answers({"nodes": nodes}))
+    app.router.add_get("/v1/credits", answers(ledger))
+    app.router.add_get("/v1/models", answers({"data": [{"id": MODEL, "tok_per_sec": 41.6}]}))
+
+    async def complete(request: web.Request) -> web.StreamResponse:
+        body = await request.json()
+        assert body["model"] == MODEL, "the cloud must ask the hub for the model it serves"
+        if body.get("privacy") == "mine":  # the real hub refuses when a friend's Mac holds part of the model
+            return web.json_response({"error": {"message": "only my Macs: this pool's model is on Macs that aren't yours"}},
+                                     status=409)
+        if not body.get("stream"):
+            return web.json_response({"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi there"}}],
+                                      "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+        out = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await out.prepare(request)
+        await out.write(b'data: {"choices":[{"delta":{"content":"Hi"},"index":0}]}\n\n')
+        await out.write(b"data: [DONE]\n\n")
+        return out
+
+    app.router.add_post("/v1/chat/completions", complete)
+    return app
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """No Hugging Face from tests: a link can't be read unless a test says what it is."""
+    def describe(link):
+        raise ValueError(f"no network in tests: {link}")
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
+
+
+@pytest_asyncio.fixture
+async def env(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_name="Home lab", pool_model=MODEL, hub_ticket="node-ticket")
+    cloud = Cloud(Store(tmp_path / "cloud.db"), HubClient(config.hub_url), config, me=ME, my_name="Arpan")
+    client = TestClient(TestServer(cloud.app()))
+    await client.start_server()
+    yield client, cloud
+    await client.close()
+    await hub_server.close()
+
+
+def dates_in(value) -> list[str]:
+    if isinstance(value, dict):
+        return [d for k, v in value.items() for d in ([v] if k in {"date", "joinedAt", "createdAt", "expires", "issued", "since", "starts"} else dates_in(v))]
+    if isinstance(value, list):
+        return [d for v in value for d in dates_in(v)]
+    return []
+
+
+async def state(client) -> dict:
+    r = await client.get("/v1/state")
+    assert r.status == 200
+    return await r.json()
+
+
+async def test_sync_has_every_field_the_app_decodes(env):
+    client, _ = env
+    sync = await state(client)
+    assert set(sync) >= {"state", "terms", "invites", "mock"} and sync["mock"] is False
+    s = sync["state"]
+    for key in ("meID", "thisMacID", "people", "devices", "pools", "credits", "earnedAllTime", "questionsHelped",
+                "creditLog", "badges", "networkLendingNow", "endorsedBefore"):
+        assert key in s, key
+    pool = s["pools"][0]
+    for key in ("id", "name", "isPublic", "blurb", "tags", "memberIDs", "macs", "crowdMacs", "crowdLending", "crowdGB",
+                "endorsements", "endorsedByMe", "offersIdleToNetwork", "unlocks", "phase", "createdAt", "speedFactor", "demand"):
+        assert key in pool, key
+    assert all(WIRE_DATE.match(d) for d in dates_in(sync)), "dates must be whole seconds in UTC"
+
+
+async def test_the_hub_pool_shows_the_hubs_real_macs(env):
+    client, cloud = env
+    s = (await state(client))["state"]
+    hub = next(p for p in s["pools"] if p["id"] == "hub")
+    assert hub["name"] == "Home lab"
+    assert {m["macID"] for m in hub["macs"]} == {cloud.this_mac, "w-sam"}, "your own worker is shown as this Mac"
+    assert {m["lendGB"] for m in hub["macs"]} == {6, 48}
+    assert any(p["name"] == "Sam" for p in s["people"])
+
+
+async def test_credits_and_the_worker_come_from_the_hub(env):
+    client, _ = env
+    sync = await state(client)
+    s = sync["state"]
+    assert s["credits"] == 500 and s["earnedAllTime"] == 600 and s["questionsHelped"] == 3
+    assert s["creditLog"][0]["kind"] == "lend" and s["creditLog"][0]["amount"] == 6
+    assert sync["worker"]["firstLayer"] == 0 and sync["worker"]["lastLayer"] == 23
+    assert sync["ladder"]["tiers"][0]["id"] == MODEL, "the model the hub serves is on the ladder"
+    assert sync["hub"] == {"online": True, "model": MODEL, "ticket": "node-ticket", "joinToken": None}, \
+        "a Mac's worker needs the ticket"
+
+
+async def test_start_join_and_leave_a_pool(env):
+    client, _ = env
+    r = await client.post("/v1/pools", json={"id": "late-night-lab", "name": "Late Night Lab", "isPublic": False})
+    body = await r.json()
+    assert r.status == 200 and body["pool"]["name"] == "Late Night Lab"
+    assert any(b["id"] == "starter" for b in body["sync"]["state"]["badges"])
+    r = await client.post("/v1/pools/late-night-lab/join", json={"gb": 6})
+    body = await r.json()
+    shares = body["sync"]["state"]["lendingShares"]
+    assert body["macNumber"] == 1 and [(x["poolID"], x["gb"]) for x in shares] == [("late-night-lab", 6)]
+    r = await client.post("/v1/pools/late-night-lab/leave")
+    assert (await r.json())["sync"]["state"]["lendingShares"] == []
+
+
+async def test_a_mac_lends_an_amount_to_each_of_several_pools(env):
+    client, _ = env
+    await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True})
+    await client.post("/v1/pools/hub/join", json={"gb": 4})
+    await client.post("/v1/pools/prism/join", json={"gb": 2})
+    state = (await (await client.post("/hub/v1/heartbeat", json={"active": True, "seconds": 60})).json())["sync"]["state"]
+    shares = {x["poolID"]: x for x in state["lendingShares"]}
+    assert {p: x["gb"] for p, x in shares.items()} == {"hub": 4, "prism": 2}
+    assert shares["hub"]["hubPool"] == "" and shares["prism"]["hubPool"] == "prism", "the hub's own pool is its default"
+    prism = next(p for p in state["pools"] if p["id"] == "prism")
+    assert [(m["lendGB"], m["state"]) for m in prism["macs"]] == [(2, "lending")], "each pool sees only its share"
+    assert {n["poolID"] for n in state["nights"]} >= {"hub", "prism"}, "lending time counts in every pool lent to"
+
+    state = (await (await client.post("/v1/pools/prism/share", json={"gb": 5})).json())["sync"]["state"]
+    assert {x["poolID"]: x["gb"] for x in state["lendingShares"]} == {"hub": 4, "prism": 5}
+    state = (await (await client.post("/v1/pools/prism/share", json={"gb": 0})).json())["sync"]["state"]
+    assert [x["poolID"] for x in state["lendingShares"]] == ["hub"]
+    assert any(p["id"] == "prism" and state["meID"] in p["memberIDs"] for p in state["pools"]), "lending nothing still leaves you in it"
+    assert (await client.post("/v1/pools/nowhere/share", json={"gb": 1})).status == 404
+
+
+async def test_join_without_a_share_asks_but_does_not_lend(env):
+    client, _ = env
+    body = await (await client.post("/v1/pools/hub/join")).json()
+    assert body["sync"]["state"]["lendingShares"] == [] and body["unlock"] is None
+
+
+async def test_endorsing_twice_counts_once_and_earns_early_backer(env):
+    client, _ = env
+    first = await (await client.post("/v1/pools/hub/endorse")).json()
+    second = await (await client.post("/v1/pools/hub/endorse")).json()
+    assert first["badge"]["title"] == "Early backer" and second["badge"] is None
+    assert next(p for p in second["sync"]["state"]["pools"] if p["id"] == "hub")["endorsements"] == 1
+
+
+async def test_an_invite_says_what_your_mac_would_add_then_joins(env):
+    client, _ = env
+    await client.post("/v1/pools/hub/invite", json={"code": "late7q"})
+    details = await (await client.get("/v1/invites/LATE7Q", params={"memory_gb": "24"})).json()
+    assert details["poolID"] == "hub" and details["addGB"] == 16 and details["macs"] == 2
+    joined = await (await client.post("/v1/invites/LATE7Q/accept")).json()
+    assert joined["poolID"] == "hub"
+    assert (await client.get("/v1/invites/NOPE")).status == 404
+
+
+async def test_heartbeats_record_lending_and_an_unlock(env):
+    client, _ = env
+    await client.post("/v1/pools", json={"id": "studio", "name": "Studio", "isPublic": False})
+    await client.post("/v1/pools/studio/join", json={"gb": 10})
+    body = await (await client.post("/hub/v1/heartbeat",
+                                     json={"active": True, "seconds": 120, "macKind": "MacBook Air", "memoryGB": 24})).json()
+    s = body["sync"]["state"]
+    assert body["unlock"] is None, "a pool with no model to serve unlocks nothing, whatever its memory"
+    assert s["nights"][0]["minutes"] == 2 and s["hoursLent"] > 0
+    assert any(d["kind"] == "MacBook Air" and d["memoryGB"] == 24 for d in s["devices"])
+
+
+
+async def test_a_pool_answer_comes_from_the_hub_with_its_macs(env):
+    client, _ = env
+    reply = await (await client.post("/hub/v1/pools/hub/chat/completions",
+                                     json={"model": "Qwen3.5 0.8B", "messages": [{"role": "user", "content": "hi"}]})).json()
+    assert reply["choices"][0]["message"]["content"] == "Hi there"
+    assert reply["dots"]["simulated"] is False and len(reply["dots"]["macs"]) == 2
+    r = await client.post("/hub/v1/pools/hub/chat/completions", json={"model": "x", "stream": True, "messages": []})
+    lines = [line for line in (await r.text()).split("\n\n") if line]
+    assert json.loads(lines[0][6:])["dots"]["event"] == "macs"
+    assert '"content": "Hi"' in lines[1] or '"content":"Hi"' in lines[1]
+    assert json.loads(lines[-2][6:])["dots"]["credits"] == 0 and lines[-1] == "data: [DONE]"
+    assert (await client.post("/hub/v1/pools/nowhere/chat/completions", json={})).status == 404
+
+
+async def test_the_gateway_needs_a_key_and_charges_credits(env, monkeypatch):
+    client, _ = env
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert (await client.post("/gateway/v1/messages", json={"model": "claude-opus-5-5"})).status == 503
+
+    provider = web.Application()
+    provider.router.add_post("/v1/messages", answers(
+        {"content": [{"type": "text", "text": "Fine."}], "usage": {"input_tokens": 1500, "output_tokens": 600}}))
+    server = TestServer(provider)
+    await server.start_server()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("DOTS_GATEWAY_URL", str(server.make_url("")))
+    reply = await (await client.post("/gateway/v1/messages", json={"model": "claude-opus-5-5", "messages": []})).json()
+    assert reply["dots"]["credits"] == 13 and reply["dots"]["list_credits"] == 18, "API.md's worked example"
+    s = (await state(client))["state"]
+    assert s["credits"] == 500 - 13 and s["creditLog"][0]["kind"] == "spend"
+    await server.close()
+
+
+async def test_a_token_is_required_when_one_is_set(tmp_path):
+    config = CloudConfig(hub_url="http://127.0.0.1:9", token="secret")
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        assert (await client.get("/v1/state")).status == 401
+        r = await client.get("/v1/state", headers={"Authorization": "Bearer secret"})
+        assert r.status == 200, "and a cloud whose hub is down still answers"
+        assert (await r.json())["hub"]["online"] is False
+
+
+@pytest.mark.parametrize("model_id,name", [(MODEL, "Qwen3.5 0.8B"), ("mlx-community/Qwen3.5-2B-MLX-4bit", "Qwen3.5 2B"),
+                                              ("mlx-community/gpt-oss-20b-MXFP4-Q4", "gpt-oss 20b")])
+def test_short_model_names(model_id, name):
+    from dots.cloud.catalog import short_name
+
+    assert short_name(model_id) == name
+
+
+async def test_the_hub_pool_unlocks_its_model_once_this_macs_worker_is_in(tmp_path):
+    nodes: list[dict] = []
+    hub_server = TestServer(fake_hub(nodes=nodes))
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    my_worker = {"id": "w-me", "account_id": ME, "ready": True, "layer_range": [0, 24], "ram_gb": 4.0}
+    async with TestClient(TestServer(cloud.app())) as client:
+        await client.post("/v1/pools/hub/join", json={"gb": 8})
+        beat = {"active": True, "seconds": 5, "macKind": "Mac", "memoryGB": 16}
+
+        async def heartbeat() -> dict:
+            return await (await client.post("/hub/v1/heartbeat", json=beat)).json()
+
+        starting = await heartbeat()
+        assert starting["unlock"] is None, "a worker still starting lends nothing"
+        hub_pool = next(p for p in starting["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert [m["state"] for m in hub_pool["macs"]] == ["online"]
+
+        nodes.append(my_worker)
+        first = await heartbeat()
+        assert first["unlock"]["modelID"] == MODEL, "the served model is an unlock; Llama's rung is not"
+        hub_pool = next(p for p in first["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert hub_pool["servesModelID"] == MODEL
+        assert hub_pool["macs"][0]["lendGB"] == 4, "the pool counts what the worker lends, not the share"
+
+        nodes.clear()  # the worker restarts
+        await heartbeat()
+        nodes.append(my_worker)
+        again = await heartbeat()
+        assert again["unlock"] is None, "a worker coming back doesn't unlock the model again"
+        hub_pool = next(p for p in again["sync"]["state"]["pools"] if p["id"] == "hub")
+        assert len(hub_pool["unlocks"]) == 1
+    await hub_server.close()
+
+
+async def test_speed_and_tokens_come_from_the_hub(env):
+    client, _ = env
+    body = await state(client)
+    served = next(t for t in body["ladder"]["tiers"] if t["id"] == MODEL)
+    assert served["tokPerSec"] == 42, "the served model's speed is what the hub measured"
+    night = next(n for n in body["state"]["nights"] if n["poolID"] == "hub") if body["state"].get("nights") else None
+    if night is not None:
+        assert night["tokens"] == 160
+
+
+async def test_what_this_mac_earned_in_the_last_hour_comes_from_the_ledger(env, monkeypatch):
+    from datetime import datetime, timezone
+
+    from dots.cloud import timefmt
+
+    client, _ = env
+    monkeypatch.setattr(timefmt, "now", lambda: datetime(2026, 11, 5, 22, 40, tzinfo=timezone.utc))
+    assert (await state(client))["earning"]["lastHour"] == 6, "6,025 micro-CU at 1,000 credits a CU, half an hour ago"
+    monkeypatch.setattr(timefmt, "now", lambda: datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc))
+    assert (await state(client))["earning"]["lastHour"] == 0
+
+
+async def test_a_pool_runs_the_model_its_link_names(env, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    described = {
+        "owner/draw-q4": ModelDescription("owner/draw-q4", "draw", "pictures", "DrawPipeline", 4.6, runs=None),
+        "owner/speech": ModelDescription("owner/speech", "speech", "unknown", None, 9.0, runs=False,
+                                         why="dots can't tell what this model is from its files"),
+    }
+    monkeypatch.setattr("dots.cloud.links.describe", lambda link: described[link])
+    client, _ = env
+    r = await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True, "model": "owner/draw-q4"})
+    pool = (await r.json())["pool"]
+    assert r.status == 200 and pool["servesModelID"] == "owner/draw-q4" and pool["kind"] == "pictures"
+    assert pool["modelName"] and pool["isPublic"] is True and pool["modelGB"] == 4.6, "it says how big its model is"
+    r = await client.post("/v1/pools", json={"id": "talk", "name": "Talk", "model": "owner/speech"})
+    assert r.status == 400 and "can't run" in (await r.json())["error"]["message"]
+
+
+def test_an_older_database_moves_to_its_owner(tmp_path):
+    """One pool lent to, its time, a night, a badge and a spend, as an older cloud kept them for its one person"""
+    path = tmp_path / "old.db"
+    old = Store(path)
+    old.run("update lending set pool_id = 'hub', lend_gb = 6, since = '2026-10-01T00:00:00Z', seconds = 7200 where id = 1")
+    old.run("insert into nights (date, pool_id, minutes, runs) values ('2026-10-01T12:00:00Z', 'hub', 90, 3)")
+    old.run("insert into badges (id, symbol, title, detail, date) values ('starter', 's', 'Pool starter', 'd', '2026-10-01')")
+    old.run("insert into spends (id, date, amount, note) values ('S1', '2026-10-02', -5, 'Claude')")
+    store = Store(path)
+    store.adopt_owner("me", "mac-me")
+    assert [(r["pool_id"], r["gb"]) for r in store.shares("mac-me")] == [("hub", 6)]
+    assert store.lending("mac-me")["seconds"] == 7200 and len(store.nights("mac-me")) == 1
+    assert [b["id"] for b in store.badges("me")] == ["starter"] and len(store.spends("me")) == 1
+    assert not store.shares("mac-friend") and not store.badges("friend"), "nothing of it is anyone else's"
+
+
+async def test_the_hub_pool_reads_what_it_runs_from_its_repo(tmp_path, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    read = asyncio.Event()
+
+    def describe(link):
+        read.set()
+        return ModelDescription(link, "Qwen3.5 0.8B", "text", "qwen3_5", 1.7, runs=True)
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        await asyncio.wait_for(read.wait(), 5)
+        await asyncio.sleep(0.05)
+        home = next(p for p in (await state(client))["state"]["pools"] if p["id"] == "hub")
+        assert home["servesModelID"] == MODEL and home["kind"] == "text" and home["modelGB"] == 1.7
+    await hub_server.close()
+
+
+async def test_only_my_macs_reaches_the_hub_and_its_refusal_comes_back(env):
+    client, _ = env
+    ask = {"model": "Qwen3.5 0.8B", "messages": [{"role": "user", "content": "hi"}]}
+    r = await client.post("/hub/v1/pools/hub/chat/completions", json=ask, headers={"X-Dots-Privacy": "mine"})
+    assert r.status == 409 and "aren't yours" in (await r.json())["error"]["message"]
+    r = await client.post("/hub/v1/pools/hub/chat/completions", json=ask)
+    assert r.status == 200, "without it, the pool's Macs answer"
+
+
+async def test_a_pool_made_before_the_cloud_kept_originals_learns_its_own(tmp_path, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    store = Store(tmp_path / "c.db")
+    store.ensure_pool("prism", "Prism", ME, is_public=True)
+    store.set_pool_model("prism", "owner/draw-q4", "pictures")  # as an older cloud kept it: no size, no original
+    read = asyncio.Event()
+
+    def describe(link):
+        if link == "owner/draw-q4":
+            read.set()
+        return ModelDescription(link, "draw", "pictures", "DrawPipeline", 4.6, runs=None, original="owner/draw")
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model="")
+    cloud = Cloud(store, HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())):
+        await asyncio.wait_for(read.wait(), 5)
+        await asyncio.sleep(0.05)
+        row = store.one("select * from pools where id = 'prism'")
+        assert row["model_original"] == "owner/draw" and row["model_gb"] == 4.6
+    await hub_server.close()
+
+
+async def test_a_friend_joins_through_an_invite_and_sees_their_own_cloud(env):
+    client, _ = env
+    await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True})
+    await client.post("/v1/pools/prism/invite", json={"code": "PRISM1"})
+    look = await client.get("/v1/invites/PRISM1", headers={"Authorization": "Bearer not-a-token"})
+    assert look.status == 200, "anyone with the link may look before joining"
+
+    joined = await client.post("/v1/invites/PRISM1/join", json={"name": "Mangala", "account": "acc-mangala", "gb": 4},
+                               headers={"Authorization": "Bearer not-a-token"})
+    body = await joined.json()
+    token, state = body["token"], body["sync"]["state"]
+    assert joined.status == 200 and token.startswith("dots_")
+    assert state["meID"] == "acc-mangala" and state["thisMacID"] == "mac-acc-mangala"
+    assert [(x["poolID"], x["gb"]) for x in state["lendingShares"]] == [("prism", 4)]
+    assert not any(b["id"] == "starter" for b in state["badges"]), "the owner's badges stay the owner's"
+
+    friend = {"Authorization": f"Bearer {token}"}
+    mine = (await (await client.get("/v1/state", headers=friend)).json())["state"]
+    assert mine["meID"] == "acc-mangala"
+    owner = (await (await client.get("/v1/state")).json())["state"]
+    assert owner["meID"] == ME and owner["lendingShares"] == [], "the owner's lending is the owner's own"
+    assert "acc-mangala" in next(p for p in owner["pools"] if p["id"] == "prism")["memberIDs"]
+
+    again = await client.post("/v1/invites/PRISM1/join", json={"name": "Someone", "account": "acc-mangala"})
+    assert again.status == 409, "an account already here can't be taken"
+    assert (await client.get("/v1/state", headers={"Authorization": "Bearer dots_wrong"})).status == 401
+
+
+async def test_a_cloud_with_a_token_serves_only_its_token_and_its_friends(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL, token="owner-secret")
+    store = Store(tmp_path / "c.db")
+    cloud = Cloud(store, HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        assert (await client.get("/v1/state")).status == 401, "no token, no cloud"
+        owner = await client.get("/v1/state", headers={"Authorization": "Bearer owner-secret"})
+        assert (await owner.json())["state"]["meID"] == ME
+        friend_token = store.make_token("acc-ana", "mac-acc-ana")
+        store.set_person("acc-ana", "Ana")
+        friend = await client.get("/v1/state", headers={"Authorization": f"Bearer {friend_token}"})
+        assert (await friend.json())["state"]["meID"] == "acc-ana"
+    assert "dots_" not in str(store.rows("select * from tokens")[0]["hash"]), "only a hash of a token is kept"
+    await hub_server.close()
+
+
+async def test_the_sync_says_where_friends_reach_this_cloud(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), public_url="https://dots.example.org")
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        assert (await state(client))["cloud"] == {"address": "https://dots.example.org"}
+    await hub_server.close()
+
+
+@pytest.mark.parametrize("model_id,original,name", [
+    ("mflux-community/flux2-klein-4b-mflux-q4", "black-forest-labs/FLUX.2-klein-4B", "FLUX.2 klein 4B"),
+    ("mflux-community/flux-3-image-klein-mflux-q4", "black-forest-labs/flux-3-image-klein", "FLUX 3 Image Klein"),
+    ("mflux-community/Z-Image-Turbo-mflux-q4", "Tongyi-MAI/Z-Image-Turbo", "Z-Image Turbo"),
+    ("owner/draw-q4", "owner/unknown", "draw"),
+])
+def test_a_picture_model_goes_by_its_familys_name(model_id, original, name):
+    from dots.cloud.catalog import picture_model_name
+
+    assert picture_model_name(model_id, original) == name
+
+
+async def test_a_public_cloud_lets_someone_new_in_from_the_app(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    for open_signup in (False, True):
+        config = CloudConfig(hub_url=str(hub_server.make_url("")), token="owner-secret", open_signup=open_signup)
+        cloud = Cloud(Store(tmp_path / f"c{open_signup}.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+        async with TestClient(TestServer(cloud.app())) as client:
+            r = await client.post("/v1/people", json={"name": "Sam", "account": "acc-sam-new"})
+            if not open_signup:
+                assert r.status == 403, "a cloud that isn't open takes new people by invite"
+                continue
+            body = await r.json()
+            assert r.status == 200 and body["token"].startswith("dots_") and body["sync"]["state"]["meID"] == "acc-sam-new"
+            mine = await client.get("/v1/state", headers={"Authorization": f"Bearer {body['token']}"})
+            assert (await mine.json())["state"]["meID"] == "acc-sam-new"
+            joined = await client.post("/v1/pools/hub/join", json={"gb": 4}, headers={"Authorization": f"Bearer {body['token']}"})
+            assert [x["gb"] for x in (await joined.json())["sync"]["state"]["lendingShares"]] == [4]
+            again = await client.post("/v1/people", json={"name": "Sam", "account": "acc-sam-new"})
+            assert again.status == 409
+    await hub_server.close()
+
+
+async def test_a_public_clouds_own_pool_is_in_explore(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_public=True)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        home = next(p for p in (await state(client))["state"]["pools"] if p["id"] == "hub")
+        assert home["isPublic"] is True
+    await hub_server.close()

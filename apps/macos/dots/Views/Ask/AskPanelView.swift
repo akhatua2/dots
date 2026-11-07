@@ -51,7 +51,7 @@ struct AskPanelView: View {
             if !isSnapshot { AskPanelController.shared.fit(height: height) }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .modifier(FileDrop(enabled: !isSnapshot, targeted: $dropTargeted) { url in model.ask.attach(url) })
+        .modifier(FileDrop(enabled: !isSnapshot, targeted: $dropTargeted) { url in model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) })
         .onAppear { focused = true }
         .onChange(of: ask.focusToken) { _, _ in focused = true }
         .preferredColorScheme(.dark)
@@ -70,17 +70,7 @@ struct AskPanelView: View {
             .frame(width: 18)
 
             if let a = ask.attachment {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc").font(.system(size: 11, weight: .medium))
-                    Text(a.name).font(D.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 170, alignment: .leading).fixedSize()
-                    Button { ask.attachment = nil } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                        .buttonStyle(.plain).foregroundStyle(D.t4)
-                }
-                .foregroundStyle(D.t2)
-                .padding(.horizontal, 10).frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
-                .fixedSize()
+                AttachmentChip(attachment: a, height: 28) { ask.attachment = nil }
             } else {
                 Button(action: pickFile) { Image(systemName: "paperclip").font(.system(size: 13, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(D.t4).help("Ask about a file")
@@ -116,9 +106,9 @@ struct AskPanelView: View {
 
     private func pickFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText]
+        panel.allowedContentTypes = AskController.attachable
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url) }
+        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) }
         AskPanelController.shared.show()
     }
 }
@@ -133,13 +123,13 @@ struct RoutePicker: View {
     }
 
     private var pill: some View {
-        HStack(spacing: 5) {
-            Text(label).font(D.ui(12.5, .semibold)).lineLimit(1)
-            Image(systemName: "chevron.down").font(.system(size: 8, weight: .heavy))
+        HStack(spacing: 4) {
+            Text(label).font(D.ui(12.5, .medium)).lineLimit(1)
+            Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .bold))
         }
-        .foregroundStyle(D.accentText)
-        .padding(.horizontal, 11).frame(height: 26)
-        .background(Capsule().fill(D.accentTint))
+        .foregroundStyle(D.t3)
+        .frame(height: 26)
+        .contentShape(Rectangle())
     }
 
     private var menu: some View {
@@ -148,15 +138,22 @@ struct RoutePicker: View {
         let pub = s.publicPools.filter { $0.model != nil }.sorted { ($0.model?.minGB ?? 0) > ($1.model?.minGB ?? 0) }.prefix(3)
         return Menu {
             Button("Auto: dots picks") { model.ask.forcedID = nil }
-            Section("Your pools, free") {
-                ForEach(own) { p in Button("\(p.name) · \(p.model!.name)") { model.ask.forcedID = "pool:\(p.id)" } }
+            if !own.isEmpty {
+                Section("Your pools, free") {
+                    ForEach(own) { p in Button("\(p.name) · \(p.model!.name)") { model.ask.forcedID = "pool:\(p.id)" } }
+                }
             }
-            Section("Public pools") {
-                ForEach(Array(pub)) { p in Button("\(p.name) · \(p.model!.name) · \(p.model!.credits) credits") { model.ask.forcedID = "pool:\(p.id)" } }
+            if !pub.isEmpty {
+                Section("Public pools") {
+                    ForEach(Array(pub)) { p in Button("\(p.name) · \(p.model!.name) · \(p.model!.credits) credits") { model.ask.forcedID = "pool:\(p.id)" } }
+                }
             }
             Section("Frontier, paid in credits") {
                 ForEach(FrontierModel.all) { f in Button("\(f.name) · \(f.credits) credits") { model.ask.forcedID = "frontier:\(f.id)" } }
             }
+            Divider()
+            // A pool's draft model guesses the next words and the pool checks them at once: written answers only
+            Toggle("Draft ahead in pools", isOn: Binding(get: { model.settings.draftAhead }, set: { model.settings.draftAhead = $0 }))
         } label: {
             pill
         }
@@ -176,7 +173,7 @@ struct RoutePicker: View {
 /// Everything under the question: routing, the answer, its receipt, and the second opinion.
 struct AskBody: View {
     @Environment(AppModel.self) private var model
-    /// In the main window the receipt folds to one line and the second opinion to one row.
+    /// In the main window the receipt lives in the composer and nothing is offered under the answer.
     var compact = false
 
     var body: some View {
@@ -184,13 +181,16 @@ struct AskBody: View {
         if ask.phase == .routing, let decision = ask.decision {
             RoutingRow(decision: decision)
         }
-        if !ask.answer.isEmpty {
-            Text(ask.answer)
-                .font(D.ui(15))
-                .foregroundStyle(D.t2)
-                .lineSpacing(3.5)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        if !ask.answer.isEmpty || !ask.draft.isEmpty {
+            // While a draft model works its guesses breathe in grey after the answer, until the pool checks them
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: ask.draft.isEmpty || !ask.isBusy)) { context in
+                MarkdownText(text: ask.answer, draft: ask.isBusy ? ask.draft : "",
+                             tint: .init(draft: 0.38 + 0.12 * sin(context.date.timeIntervalSinceReferenceDate * 4)))
+            }
+            .modifier(GrowOnly(while: ask.isBusy))
+        }
+        if ask.isBusy, let last = ask.checks.last {
+            SpeculationMeter(latest: last, checks: ask.checks)
         }
         switch ask.phase {
         case .needsConsent(let why):
@@ -200,11 +200,12 @@ struct AskBody: View {
         default:
             EmptyView()
         }
-        if let receipt = ask.receipt, ask.phase != .routing {
-            ReceiptView(receipt: receipt, compact: compact)
+        if !compact, let receipt = ask.receipt, ask.phase != .routing {
+            ReceiptView(receipt: receipt)
         }
-        if let second = ask.second {
-            SecondOpinionView(second: second, compact: compact)
+        // In the main window a frontier model is picked from the route menu, never offered under an answer.
+        if !compact, let second = ask.second {
+            SecondOpinionView(second: second)
         }
     }
 }
@@ -250,20 +251,20 @@ struct ConsentCard: View {
 
 struct ReceiptView: View {
     var receipt: Receipt
-    var compact = false
-    @State private var expanded = false
 
-    var body: some View {
+    var body: some View { card }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 if receipt.macs.isEmpty {
-                    Image(systemName: icon).font(.system(size: 14, weight: .medium)).foregroundStyle(D.t2)
+                    Image(systemName: receipt.symbol).font(.system(size: 14, weight: .medium)).foregroundStyle(D.t2)
                         .frame(width: 32, height: 32).background(RoundedRectangle(cornerRadius: 9).fill(D.raised))
                 } else {
                     MacsServing(macs: receipt.macs, asleepID: receipt.asleepMacID, serving: !receipt.finished)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ran on \(receipt.place) · \(receipt.model)").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
+                    Text("Ran on \(receipt.place) · \(receipt.modelName)").font(D.ui(14, .semibold)).foregroundStyle(D.t1).lineLimit(1)
                     Text(subline).font(D.ui(12)).foregroundStyle(D.t4)
                 }
                 Spacer()
@@ -275,14 +276,11 @@ struct ReceiptView: View {
                     } else {
                         Tag(text: "\(receipt.credits) credits", symbol: "smallcircle.filled.circle")
                     }
-                    if receipt.isPrivate { Tag(text: "Private", symbol: "lock") }
+                    if receipt.isPrivate { Tag(text: receipt.level?.label ?? "Private", symbol: "lock") }
                 }
                 .fixedSize()
             }
             .padding(14)
-            .contentShape(Rectangle())
-            .onTapGesture { if compact { withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() } } }
-            if !compact || expanded {
             Hairline().padding(.horizontal, 14)
             VStack(alignment: .leading, spacing: 9) {
                 CapLabel("Why this route")
@@ -300,25 +298,15 @@ struct ReceiptView: View {
                 }
             }
             .padding(14)
-            }
         }
         .card(fill: D.deep)
-    }
-
-    private var icon: String {
-        switch receipt.destination {
-        case .thisMac: "desktopcomputer"
-        case .frontier: "sparkle"
-        case .publicPool: "globe"
-        case .yourPool: "network"
-        }
     }
 
     private var subline: String {
         var parts: [String] = []
         if !receipt.macs.isEmpty {
             let active = receipt.macs.filter { $0.id != receipt.asleepMacID }.count
-            parts.append("\(active) Macs")
+            parts.append(active.counted("Mac"))
         }
         if receipt.tokPerSec > 0 { parts.append("\(Int(receipt.tokPerSec.rounded())) tok/s") }
         if let i = receipt.inputTokens, let o = receipt.outputTokens { parts.append("\(i.grouped) in · \(o.grouped) out") }
@@ -386,23 +374,10 @@ private struct ServingMac: View {
 struct SecondOpinionView: View {
     @Environment(AppModel.self) private var model
     var second: AskController.SecondOpinion
-    var compact = false
 
     var body: some View {
         let c = second.candidate
         switch second.phase {
-        case .idle where compact, .failed where compact:
-            HStack(spacing: 10) {
-                Text("Second opinion").font(D.ui(12)).foregroundStyle(D.t4)
-                Text(c.model).font(D.ui(13, .semibold)).foregroundStyle(D.t2)
-                IconLine(symbol: "smallcircle.filled.circle", text: "\(c.credits) credits", color: D.t3, size: 12)
-                Spacer()
-                HoverAccentButton(title: "Ask \(c.model.components(separatedBy: " ").first ?? c.model)") {
-                    model.ask.askSecondOpinion(model: model)
-                }
-            }
-            .padding(.horizontal, 14).frame(height: 44)
-            .card(fill: D.bg2, stroke: D.line)
         case .idle, .failed:
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -474,5 +449,23 @@ struct FileDrop: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// While an answer streams its height only grows, easing into each new line, so a drafted line that
+/// wraps and is then replaced doesn't jolt the text above it up and down.
+private struct GrowOnly: ViewModifier {
+    var active: Bool
+    @State private var tallest: CGFloat = 0
+
+    init(while active: Bool) { self.active = active }
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                guard active else { tallest = 0; return }
+                if height > tallest { withAnimation(.easeOut(duration: 0.18)) { tallest = height } }
+            }
+            .frame(minHeight: active ? tallest : nil, alignment: .top)
     }
 }

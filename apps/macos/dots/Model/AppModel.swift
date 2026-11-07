@@ -4,7 +4,7 @@ import SwiftUI
 import UserNotifications
 
 enum Route: Hashable {
-    case explore, api, profile, ask, settings
+    case explore, api, profile, ask, draw, settings
     case pool(String)
 }
 
@@ -75,6 +75,8 @@ struct OpenInvite: Equatable {
     var code: String
     var preview: InviteDetails?
     var error: String?
+    /// A friend's cloud the invite is for, when it isn't the one this Mac uses
+    var cloud: URL?
 }
 
 @MainActor
@@ -84,6 +86,8 @@ final class AppModel {
 
     let backend: CloudBackend
     let signals = SignalMonitor()
+    /// This Mac's real worker, run while it lends to a real cloud.
+    @ObservationIgnored let workerProcess = WorkerProcess()
     let ask = AskController()
     /// The mock cloud, when it runs on this Mac
     private(set) var mock: MockCloud?
@@ -120,7 +124,16 @@ final class AppModel {
         let settings = settings ?? .load()
         self.settings = settings
         self.backend = backend ?? CloudBackend(client: Self.client(for: settings))
+        // The self-test and snapshots pass a backend of their own; they must not touch your saved chats.
+        self.chats = ChatStore(persists: backend == nil)
+        self.draw = DrawController(persists: backend == nil)
+        self.draw.maxPixels = settings.imageMaxPixels
     }
+
+    /// Your Ask conversations, kept on this Mac.
+    let chats: ChatStore
+    /// Draw: pictures, and changes to them, kept on this Mac
+    let draw: DrawController
 
     var state: NetworkState { backend.state }
     /// Your Mac is working on someone's question right now, as the hub says
@@ -130,16 +143,28 @@ final class AppModel {
 
     static let mockToken = "dots_mock_local"
 
-    static func client(for settings: AppSettings) -> CloudClient {
+    static func client(for settings: AppSettings, token: String? = Keychain.get(cloudTokenAccount)) -> CloudClient {
         if settings.cloud.useMock || URL(string: settings.cloud.address)?.host == nil {
             return CloudClient(baseURL: URL(string: "http://127.0.0.1:\(settings.cloud.mockPort)")!, token: mockToken)
         }
-        return CloudClient(baseURL: URL(string: settings.cloud.address)!, token: Keychain.get("dots-cloud") ?? "")
+        return CloudClient(baseURL: URL(string: settings.cloud.address)!, token: token ?? "")
+    }
+
+    /// Where the token for this Mac's cloud is kept
+    static let cloudTokenAccount = "dots-cloud"
+    /// The self-test's token, kept in memory so it never touches the Keychain
+    @ObservationIgnored private var testCloudToken: String?
+    /// The token this Mac uses with its cloud: in the Keychain, or in memory for the self-test and snapshots
+    var cloudToken: String? {
+        get { persistsSettings ? Keychain.get(Self.cloudTokenAccount) : testCloudToken }
+        set {
+            if persistsSettings { Keychain.set(newValue ?? "", for: Self.cloudTokenAccount) } else { testCloudToken = newValue }
+        }
     }
 
     /// Starts the mock cloud on this Mac when it's the one in use, and points the app at the right cloud.
     func connectCloud() {
-        backend.client = Self.client(for: settings)
+        backend.client = Self.client(for: settings, token: cloudToken)
         if settings.cloud.useMock {
             if mock?.port != UInt16(settings.cloud.mockPort) {
                 mock?.stop()
@@ -170,23 +195,32 @@ final class AppModel {
         let s = state
         guard s.thisMac.maxLendGB > 0 else { return .cantLend }
         guard s.lending.isOn else { return .off }
-        guard let pool = s.lendingPool else { return .noPool }
+        guard !s.lendingPools.isEmpty else { return .noPool }
         if let until = s.lending.pausedUntil, until > .now { return .paused(until: until) }
         if s.lending.onlyWhenPluggedIn && !signals.onPower { return .waitingForPower }
         if s.lending.pauseWhileInUse && signals.inUse { return .inUse }
-        return .lending(pool: pool.name, working: backend.worker?.working ?? false)
+        return .lending(pool: s.lendingPools.map(\.name).formatted(.list(type: .and)), working: backend.worker?.working ?? false)
     }
 
-    var creditsPerHour: Int {
-        guard let pool = state.lendingPool else { return 0 }
-        return pool.creditsPerHour(lendGB: state.lending.limitGB)
+    /// The sidebar's earning line: what the ledger says this Mac earned in the last hour, or, from the mock,
+    /// its estimate for an hour of lending.
+    var earningLine: String {
+        if let earning = backend.earning { return "+\(earning.lastHour.grouped) this hour" }
+        let s = state
+        guard !s.lendingShares.isEmpty else { return "" }
+        let perHour = s.lendingShares.reduce(0) { sum, share in sum + (s.pool(share.poolID)?.creditsPerHour(lendGB: share.gb) ?? 0) }
+        return "+\(perHour) an hour"
     }
 
     func setLendingOn(_ on: Bool) {
         backend.updateLending { $0.isOn = on; if on { $0.pausedUntil = nil } }
         refreshLending()
     }
-    func setLimit(_ gb: Int) { backend.updateLending { $0.limitGB = gb }; refreshLending() }
+    /// How much this Mac lends a pool it is in, at most what its other pools leave; 0 stops lending there.
+    func setShare(_ pool: Pool, gb: Int) {
+        backend.setShare(poolID: pool.id, gb: min(max(0, gb), state.mostGB(for: pool.id)))
+        refreshLending()
+    }
     func setOnlyWhenPluggedIn(_ on: Bool) { backend.updateLending { $0.onlyWhenPluggedIn = on }; refreshLending() }
     func setPauseWhileInUse(_ on: Bool) { backend.updateLending { $0.pauseWhileInUse = on }; refreshLending() }
     func pauseForAnHour() { backend.updateLending { $0.pausedUntil = Date().addingTimeInterval(3_600) }; refreshLending() }
@@ -216,8 +250,14 @@ final class AppModel {
     /// Moves this Mac in or out of its pool, and shows the unlock if that tipped the pool over a line.
     @discardableResult
     func refreshLending() -> UnlockEvent? {
-        let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
-        if let unlock, let pid = state.lendingPoolID { show(unlock, in: pid) }
+        let active = lendingStatus.isActive
+        // With a real cloud, lending runs the real worker; the mock simulates the work instead.
+        if !backend.isMock {
+            workerProcess.reconcile(lend: active, shares: state.lendingShares, ticket: backend.hub?.ticket,
+                                    joinToken: backend.hub?.joinToken)
+        }
+        let unlock = backend.applyLendingStatus(active: active)
+        if let unlock, let pid = unlock.poolID ?? state.lendingShares.first?.poolID { show(unlock, in: pid) }
         return unlock
     }
 
@@ -259,12 +299,12 @@ final class AppModel {
 
     /// The pool this Mac is boosting right now
     private(set) var boosting: String?
-    /// How lending was set before the boost took over, to put back after it
-    @ObservationIgnored private var beforeBoost: (poolID: String?, limit: Int, isOn: Bool)?
+    /// How lending to the boosted pool was before the boost, to put back after it
+    @ObservationIgnored private var beforeBoost: (poolID: String, gb: Int, wasMember: Bool, isOn: Bool)?
     @ObservationIgnored private var boostActivity: NSObjectProtocol?
 
     /// Boosts you counted yourself in for. An hour before one, a heads-up. During it, this Mac stays awake and lends
-    /// what you pledged to that pool, whatever it was doing. After it, lending goes back to how it was.
+    /// that pool what you pledged, as far as its other pools leave room. After it, lending goes back to how it was.
     func runBoosts(now: Date = .now) {
         let s = state
         let mine = s.pools.compactMap { p -> (pool: Pool, boost: PoolBoost, gb: Int)? in
@@ -280,10 +320,12 @@ final class AppModel {
                 notifyOnce("dots.boost.soon.\(key)", "Boost in an hour. Your \(s.thisMac.kind) is ready with \(gb) GB.")
             }
             guard boosting == nil, boost.starts <= now, now < boost.ends else { continue }
-            beforeBoost = (s.lendingPoolID, s.lending.limitGB, s.lending.isOn)
+            let wasMember = pool.isMember(s.meID)
+            beforeBoost = (pool.id, s.share(in: pool.id)?.gb ?? 0, wasMember, s.lending.isOn)
             boosting = pool.id
-            if s.lendingPoolID != pool.id { _ = backend.join(poolID: pool.id) }
-            backend.updateLending { $0.limitGB = gb; $0.isOn = true; $0.pausedUntil = nil }
+            let lend = min(gb, s.mostGB(for: pool.id))
+            if wasMember { backend.setShare(poolID: pool.id, gb: lend) } else { _ = backend.join(poolID: pool.id, gb: lend) }
+            backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
             refreshLending()
             if persistsSettings {
                 boostActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
@@ -301,8 +343,8 @@ final class AppModel {
         boosting = nil
         guard let before = beforeBoost else { return }
         beforeBoost = nil
-        if let pid = before.poolID, pid != state.lendingPoolID, state.pool(pid) != nil { _ = backend.join(poolID: pid) }
-        backend.updateLending { $0.limitGB = before.limit; $0.isOn = before.isOn }
+        if before.wasMember { backend.setShare(poolID: before.poolID, gb: before.gb) } else { backend.leave(poolID: before.poolID) }
+        backend.updateLending { $0.isOn = before.isOn }
         refreshLending()
     }
 
@@ -356,9 +398,11 @@ final class AppModel {
         if case .profile = route { backend.markBadgesSeen() }
     }
 
-    func join(_ pool: Pool) {
+    /// Joins a pool, lending it `gb`, or by default all this Mac has left to lend (which may be nothing: then it
+    /// joins to ask, and lends nothing until another pool makes room).
+    func join(_ pool: Pool, gb: Int? = nil) {
         let wasMember = pool.isMember(state.meID)
-        let outcome = backend.join(poolID: pool.id)
+        let outcome = backend.join(poolID: pool.id, gb: min(gb ?? .max, state.offerGB(for: pool)))
         let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
         let waiting: String? = lendingStatus.isActive ? nil : lendingStatus.headline
         route = .pool(pool.id)
@@ -380,35 +424,115 @@ final class AppModel {
         _ = backend.endorse(poolID: pool.id)
     }
 
-    func startPool(name: String, isPublic: Bool) {
-        let pool = backend.createPool(name: name, isPublic: isPublic)
+    func startPool(name: String, isPublic: Bool, model: String?) {
+        let pool = backend.createPool(name: name, isPublic: isPublic, model: model)
         route = .pool(pool.id)
+    }
+
+    // MARK: The first launch
+
+    /// What the welcome says went wrong, when finishing it didn't work
+    var onboardingError: String?
+
+    /// The pool a new Mac lends to first: the public pool that answers questions with the most Macs in it
+    var firstPool: Pool? {
+        state.publicPools.filter { !$0.draws && $0.modelLabel != nil }.max { $0.lendingMacs < $1.lendingMacs }
+    }
+
+    /// The end of the welcome: who you are, and what this Mac lends. A cloud that doesn't know this Mac yet is
+    /// signed up to (a public cloud lets someone new in), then it lends to the first pool and says so.
+    func finishOnboarding(name: String, lendGB: Int) {
+        onboardingError = nil
+        Task {
+            do {
+                if !backend.isMock && (cloudToken ?? "").isEmpty {
+                    let reply: SignUpReply = try await backend.client.send(
+                        "POST", "v1/people", body: SignUp(name: name, account: workerProcess.account))
+                    cloudToken = reply.token
+                    connectCloud()
+                    await backend.syncNow()
+                } else {
+                    backend.rename(name)
+                }
+                settings.onboarded = true
+                if lendGB > 0, let pool = firstPool {
+                    backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
+                    join(pool, gb: lendGB)
+                } else {
+                    route = .explore
+                }
+            } catch {
+                onboardingError = error.localizedDescription
+            }
+        }
     }
 
     // MARK: Invites
 
-    /// The code in an invite link, whatever form it was pasted in: dots://invite/CODE, https://dots.link/CODE, or CODE.
-    static func inviteCode(in text: String) -> String? {
+    /// Joins a friend's cloud through their invite: you become a person there, with your name and the account your
+    /// Mac's workers carry, and the token it gives you is kept for it. The app uses that cloud from then on.
+    private func joinCloud(_ cloud: URL, through preview: InviteDetails, lendGB: Int?) {
+        let me = Newcomer(name: state.me.name, account: workerProcess.account,
+                          gb: min(lendGB ?? .max, state.thisMac.maxLendGB))
+        Task {
+            do {
+                let reply: NewcomerReply = try await CloudClient(baseURL: cloud, token: "")
+                    .send("POST", "v1/invites/\(preview.code)/join", body: me)
+                cloudToken = reply.token
+                settings.cloud.address = cloud.absoluteString
+                settings.cloud.useMock = false
+                connectCloud()
+                await backend.syncNow()
+                backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
+                refreshLending()
+                route = .pool(reply.poolID)
+                moment = .joined(poolID: reply.poolID, macNumber: reply.macNumber, unlock: reply.unlock,
+                                 waiting: lendingStatus.isActive ? nil : lendingStatus.headline)
+            } catch {
+                openInvite = OpenInvite(code: preview.code, preview: preview, error: error.localizedDescription, cloud: cloud)
+                sheet = .openInvite
+            }
+        }
+    }
+
+    /// The code in an invite link, whatever form it was pasted in: dots://invite/CODE, a web link ending in the code,
+    /// or CODE.
+    static func inviteCode(in text: String) -> String? { invite(in: text)?.code }
+
+    /// An invite link's code, and the cloud it names, if any: dots://invite/CODE?cloud=https://…
+    static func invite(in text: String) -> (code: String, cloud: URL?)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let last = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
+        let path = trimmed.split(separator: "?", maxSplits: 1).first.map(String.init) ?? trimmed
+        let last = path.split(separator: "/").last.map(String.init) ?? path
         let code = last.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-        return code.count >= 4 ? code : nil
+        guard code.count >= 4 else { return nil }
+        let named = URLComponents(string: trimmed)?.queryItems?.first { $0.name == "cloud" }?.value.flatMap(URL.init(string:))
+        let cloud = named.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") && $0.host != nil ? $0 : nil }
+        return (code, cloud)
     }
 
     func openInviteLink(_ text: String) {
-        guard let code = Self.inviteCode(in: text) else {
+        guard let link = Self.invite(in: text) else {
             openInvite = OpenInvite(code: text, preview: nil, error: "That doesn't look like an invite link.")
             sheet = .openInvite
             return
         }
-        openInvite = OpenInvite(code: code)
+        let code = link.code
+        // An invite for a friend's cloud is read there; one for this Mac's own cloud, here
+        let elsewhere = link.cloud.flatMap { $0.host == backend.client.baseURL.host && $0.port == backend.client.baseURL.port ? nil : $0 }
+        openInvite = OpenInvite(code: code, cloud: elsewhere)
         sheet = .openInvite
         Task {
             // A link can open dots before its cloud answers, so a connection error gets two more tries
             for attempt in 1...3 {
                 do {
-                    openInvite?.preview = try await backend.preview(code: code)
+                    if let elsewhere {
+                        openInvite?.preview = try await CloudClient(baseURL: elsewhere, token: "")
+                            .get("v1/invites/\(code)", query: [URLQueryItem(name: "memory_gb", value: "\(ThisMac.memoryGB)")])
+                    } else {
+                        openInvite?.preview = try await backend.preview(code: code)
+                    }
                     return
                 } catch let error as TransportError {
                     if case .http(_, _) = error { break }
@@ -421,11 +545,15 @@ final class AppModel {
 
     func acceptInvite(_ preview: InviteDetails, lendGB: Int? = nil) {
         sheet = nil
-        if let lendGB { setLimit(lendGB) }
+        if let cloud = openInvite?.cloud {
+            joinCloud(cloud, through: preview, lendGB: lendGB)
+            return
+        }
+        let gb = min(lendGB ?? .max, state.mostGB(for: preview.poolID))
         Task {
             do {
                 await backend.beatNow(active: lendingStatus.isActive)
-                let reply = try await backend.accept(code: preview.code)
+                let reply = try await backend.accept(code: preview.code, gb: gb)
                 route = .pool(reply.poolID)
                 backend.updateLending { $0.isOn = true; $0.pausedUntil = nil }
                 let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
@@ -459,7 +587,7 @@ final class AppModel {
         guard e.isReady, e.isLocal, (localDownUntil ?? .distantPast) < .now else { return nil }
         return RouteCandidate(id: "mac", destination: .thisMac, place: "This Mac", model: e.model, modelID: e.model,
                               credits: 0, listCredits: 0, tokPerSec: localTokPerSec ?? 30, isPrivate: true, poolID: nil,
-                              minGB: 18, contextTokens: 32_000, canUseTools: false)
+                              minGB: 18, contextTokens: 32_000, canUseTools: false, onlyMine: true)
     }
 
     func noteLocalSpeed(_ tokPerSec: Double) {
@@ -509,6 +637,24 @@ final class AppModel {
         openMainWindow()
         open(.ask)
         ask.focusToken += 1
+    }
+
+    /// Opens Ask and asks `question`, as if typed in the box and sent. An empty one just opens Ask.
+    func send(question: String) {
+        showAsk()
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !ask.isBusy else { return }
+        ask.input = question
+        ask.submit(model: self)
+        ask.input = ""
+    }
+
+    /// Opens Draw and draws `picture`, as if typed and sent. Empty, it just opens Draw.
+    func draw(picture: String) {
+        openMainWindow()
+        open(.draw)
+        guard !picture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !draw.isDrawing else { return }
+        draw.prompt = picture
+        draw.draw(model: self)
     }
 
     // MARK: Gateway

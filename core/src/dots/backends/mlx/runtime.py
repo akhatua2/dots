@@ -10,10 +10,13 @@ drops the cache; the next prefill rebuilds it.
 
 from __future__ import annotations
 
+import importlib.util
+
 import asyncio
+import os
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from ..base import (
     BackendCapabilities,
@@ -47,6 +50,12 @@ def create_attention_mask(*args, **kwargs):
 
 def make_prompt_cache(*args, **kwargs):
     from mlx_lm.models.cache import make_prompt_cache as _real
+
+    return _real(*args, **kwargs)
+
+
+def trim_prompt_cache(*args, **kwargs):
+    from mlx_lm.models.cache import trim_prompt_cache as _real
 
     return _real(*args, **kwargs)
 
@@ -92,6 +101,17 @@ def _apply_repetition_penalty(logits_row, recent_tokens, penalty: float):
     return logits_row
 
 
+def penalized(logits, seen, penalty: float):
+    """`_apply_repetition_penalty` on the GPU, for guesses chained without reading each back: `seen` is
+    an array of token ids, `logits` one row or a batch of them."""
+    if penalty == 1.0 or seen.size == 0:
+        return logits
+    import mlx.core as mx
+
+    hit = mx.zeros((logits.shape[-1],), dtype=mx.int32).at[seen].add(1) > 0
+    return mx.where(hit, mx.where(logits > 0, logits / penalty, logits * penalty), logits)
+
+
 def _sample(
     logits_row,
     temperature: float,
@@ -135,6 +155,74 @@ def _active_params(model) -> int:
         return 0
 
 
+def _layer_mask(hidden, cache, as_array: bool):
+    """A layer's mask, from the kind of state it keeps: a per-token cache gets the attention mask (its
+    `make_mask` handles a sliding window), a running state (linear attention, convolution) the SSM one.
+    A layer that keeps several caches (attention beside an indexer, in DeepSeek-style sparse attention)
+    is masked by its first. `as_array` is for models whose attention wants the mask as an array."""
+    try:
+        from mlx_lm.models.base import create_attention_mask, create_ssm_mask
+        from mlx_lm.models.cache import ArraysCache, CacheList
+    except ImportError:  # no MLX here (the hub's tests on Linux): only stand-in layers, which take no mask
+        return None
+
+    if isinstance(cache, CacheList):
+        cache = cache[0]
+    if isinstance(cache, ArraysCache):
+        return create_ssm_mask(hidden, cache)
+    return create_attention_mask(hidden, cache, return_array=as_array)
+
+
+# The most tokens a running state can be rolled back: a check of up to eight guesses and the token before
+MAX_REWIND = 9
+
+
+def _running_state(cache) -> bool:
+    """A layer state that summarizes every token so far (linear attention, convolution), not one entry each."""
+    try:
+        from mlx_lm.models.cache import ArraysCache
+    except ImportError:  # no MLX here (the hub's tests on Linux), so no MLX caches either
+        return False
+    return isinstance(cache, ArraysCache)
+
+
+def _sliding_window(cache) -> bool:
+    try:
+        from mlx_lm.models.cache import RotatingKVCache
+    except ImportError:
+        return False
+    return isinstance(cache, RotatingKVCache)
+
+
+def _snapshot(cache):
+    """A running state as it is now. The arrays are kept by reference (a step replaces them, never edits
+    them); the list holding them is copied, since a step does change the list."""
+    arrays, left_padding, lengths = cache.state
+    return list(arrays), left_padding, lengths
+
+
+def _restore(cache, snapshot) -> None:
+    arrays, left_padding, lengths = snapshot
+    cache.state = (list(arrays), left_padding, lengths)
+
+
+def _concat(parts):
+    import mlx.core as mx
+
+    return mx.concatenate(parts, axis=1)
+
+
+def _wants_array_mask(text) -> bool:
+    """Whether the model's own forward pass asks for an array mask, as DeepSeek-style attention does.
+    Read from its code once, so a model family needs no entry in a list here."""
+    import inspect
+
+    try:
+        return "return_array=True" in inspect.getsource(type(text).__call__)
+    except (OSError, TypeError):
+        return False
+
+
 class FullModelHost:
     """Owns a loaded model + tokenizer and serves chat turns.
 
@@ -145,9 +233,28 @@ class FullModelHost:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        self.n_layers = len(model.model.layers)
+        from .layout import final_norm_name, output_owner, text_model
+
+        self.text = text_model(model)
+        self.layers = self.text.layers
+        self.embed = self.text.embed_tokens
+        self.norm = getattr(self.text, final_norm_name(self.text))
+        self._array_masks = _wants_array_mask(self.text)
+        # The output layer: its own, or the embedding read backwards when the two are tied
+        self._output = getattr(output_owner(model), "lm_head", None)
+        self.n_layers = len(self.layers)
         self.active_params = _active_params(model)
+        # Checking a draft rolls the cache back. A per-token cache drops its last entries. A running state
+        # (linear attention, convolution) can't be un-mixed, so for short passes it is kept token by token
+        # (see `_run_keeping_states`) and rolled back to the state from before the rejected tokens.
+        # A sliding window overwrites its buffer in place once full, so it can't be rolled back after that:
+        # those models decode one token at a time.
+        self.can_rewind = all(_running_state(c) or (callable(getattr(c, "is_trimmable", None)) and c.is_trimmable()
+                                                    and not _sliding_window(c))
+                              for c in make_prompt_cache(model))
         self._caches: dict[str, list] = {}
+        # conv id -> layer index -> the running states after each of the last few tokens, oldest first
+        self._states: dict[str, dict[int, list]] = {}
         # Tokens already advanced through the cache for each conversation.
         # Next turn's prefill skips the prefix this number long, so a
         # multi-turn chat doesn't re-prefill the whole history every turn.
@@ -156,6 +263,30 @@ class FullModelHost:
     def reset_conversation(self, conv_id: str) -> None:
         self._caches.pop(conv_id, None)
         self._token_counts.pop(conv_id, None)
+        self._states.pop(conv_id, None)
+
+    def trim(self, conv_id: str, n: int) -> None:
+        """Rolls the conversation's cache back by `n` tokens (a draft's rejected tail): per-token caches
+        drop their last entries, running states go back to the one kept from before those tokens."""
+        if n <= 0:
+            return
+        cache = self._caches.get(conv_id)
+        if cache is not None:
+            kept = self._states.get(conv_id, {})
+            for i, c in enumerate(cache):
+                if _running_state(c):
+                    history = kept.get(i)
+                    if history is None:
+                        continue  # a layer another Mac runs: its state was never filled here
+                    if len(history) <= n:
+                        raise RuntimeError(f"can't roll a running state back {n} tokens; it keeps {len(history) - 1}")
+                    _restore(c, history[-n - 1])
+                    del history[-n:]
+                else:
+                    if not c.is_trimmable():  # a sliding window that has already wrapped
+                        raise RuntimeError("this cache can't be rolled back any more")
+                    c.trim(n)
+        self._token_counts[conv_id] = max(0, self._token_counts.get(conv_id, 0) - n)
 
     def _get_cache(self, conv_id: str):
         cache = self._caches.get(conv_id)
@@ -165,17 +296,16 @@ class FullModelHost:
         return cache
 
     def _project_logits(self, hidden_last):
-        if self.model.args.tie_word_embeddings:
-            return self.model.model.embed_tokens.as_linear(hidden_last)
-        return self.model.lm_head(hidden_last)
+        if self._output is None or getattr(getattr(self.model, "args", None), "tie_word_embeddings", False):
+            return self.embed.as_linear(hidden_last)
+        return self._output(hidden_last)
 
     def _forward(self, ids_arr, cache):
-        hidden = self.model.model.embed_tokens(ids_arr)
+        hidden = self.embed(ids_arr)
         hidden = self._forward_layers(hidden, cache, 0, self.n_layers)
-        hidden = self.model.model.norm(hidden)
-        return hidden
+        return self.norm(hidden)
 
-    def _forward_layers(self, hidden, cache, start: int, end: int):
+    def _forward_layers(self, hidden, cache, start: int, end: int, conv_id: str | None = None):
         """Run a contiguous slice of decoder layers `[start, end)` on
         `hidden`. The cache slice tracks the per-layer KV state for the
         same range.
@@ -184,11 +314,38 @@ class FullModelHost:
         assigned to this worker, with the caller handling embedding /
         final norm / sampling.
         """
-        cache_slice = cache[start:end]
-        mask = create_attention_mask(hidden, cache_slice)
-        for offset, layer in enumerate(self.model.model.layers[start:end]):
-            hidden = layer(hidden, mask=mask, cache=cache_slice[offset])
+        # Each layer gets the mask for the kind of state it keeps; layers of a kind share one
+        masks: dict[type, object] = {}
+        for index in range(start, end):
+            layer, layer_cache = self.layers[index], cache[index]
+            if conv_id is not None and _running_state(layer_cache):
+                hidden = self._run_keeping_states(layer, layer_cache, hidden, self._states.setdefault(conv_id, {}), index)
+                continue
+            kind = type(layer_cache)
+            if kind not in masks:
+                masks[kind] = _layer_mask(hidden, layer_cache, self._array_masks)
+            hidden = layer(hidden, masks[kind], cache=layer_cache)
         return hidden
+
+    def _run_keeping_states(self, layer, layer_cache, hidden, kept: dict[int, list], index: int):
+        """A running-state layer over `hidden`, keeping its state after each token so a check can be rolled
+        back. A pass short enough to be a check goes a token at a time (the state after each is a reference,
+        not a copy: MLX arrays don't change in place); a prompt goes whole and keeps only where it ended."""
+        history = kept.setdefault(index, [])
+        tokens = hidden.shape[1]
+        if tokens > MAX_REWIND:
+            hidden = layer(hidden, _layer_mask(hidden, layer_cache, self._array_masks), cache=layer_cache)
+            history[:] = [_snapshot(layer_cache)]
+            return hidden
+        if not history:
+            history.append(_snapshot(layer_cache))
+        outputs = []
+        for t in range(tokens):
+            step = hidden[:, t:t + 1]
+            outputs.append(layer(step, _layer_mask(step, layer_cache, self._array_masks), cache=layer_cache))
+            history.append(_snapshot(layer_cache))
+        del history[:-MAX_REWIND - 1]
+        return outputs[0] if tokens == 1 else _concat(outputs)
 
     def forward_segment(self, conv_id: str, hidden, start: int, end: int):
         """Run `hidden` through layer range `[start, end)` for `conv_id`.
@@ -198,7 +355,7 @@ class FullModelHost:
         just forward through their layer slice.
         """
         cache = self._get_cache(conv_id)
-        return self._forward_layers(hidden, cache, start, end)
+        return self._forward_layers(hidden, cache, start, end, conv_id=conv_id)
 
     async def run_turn(
         self,
@@ -241,11 +398,24 @@ class MlxBackendRuntime(BackendRuntime):
         self.assignment = ModelAssignment()
         self.host: FullModelHost | None = None
         self._geometry: ModelGeometry | None = None
+        # Each conversation's last pass, as final hidden states: a model's own draft head reads them
+        self._rows: dict[str, Any] = {}
+        # Where the model's files are, for parts loaded later (the vision encoder)
+        self.source: str | None = None
+        self._vision = None
+        self._vision_loaded = False
+        # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't. Where
+        # MLX isn't installed (the hub's tests on Linux), there's nothing to speed up
+        if importlib.util.find_spec("mlx") is not None:
+            from .small_batch import install
+
+            install()
 
     @classmethod
-    def from_host(cls, host: FullModelHost) -> "MlxBackendRuntime":
+    def from_host(cls, host: FullModelHost, source: str | None = None) -> "MlxBackendRuntime":
         runtime = cls()
         runtime.host = host
+        runtime.source = source
         runtime._geometry = geometry_from_mlx_model(host.model)
         return runtime
 
@@ -278,6 +448,7 @@ class MlxBackendRuntime(BackendRuntime):
                     pass
 
         self.model_id = prepared.source_id
+        self.source = prepared.runtime_id
         self.assignment = assignment
         self.host = FullModelHost(model, tokenizer)
         self._geometry = geometry_from_mlx_model(model)
@@ -390,16 +561,36 @@ class MlxBackendRuntime(BackendRuntime):
 
     def reset_conversation(self, conv_id: str) -> None:
         self._require_host().reset_conversation(conv_id)
+        self._rows.pop(conv_id, None)
+
+    async def _reads_images(self):
+        """The model's vision encoder, loaded the first time someone sends an image."""
+        from .vision import load_vision
+
+        if not self._vision_loaded:
+            if self.source is None:
+                raise ValueError("this model was loaded without its files, so it can't read images")
+            max_pixels = int(os.environ.get("DOTS_IMAGE_MAX_PIXELS", str(1024 * 1024)))
+            self._vision = await asyncio.to_thread(load_vision, self.source, max_pixels)
+            self._vision_loaded = True
+        if self._vision is None:
+            raise ValueError(f"{self.model_id or 'this model'} doesn't read images")
+        return self._vision
+
+    def last_rows(self, conv_id: str):
+        """The final hidden states (after the last norm) of the conversation's latest pass, one per position."""
+        return self._rows[conv_id]
 
     async def _forward_hidden(
         self,
         conv_id: str,
         hidden,
         forward_hidden: ForwardHidden | None,
+        keep_last: int | None = None,
     ):
         host = self._require_host()
         if forward_hidden is not None:
-            return await forward_hidden(hidden)
+            return await forward_hidden(hidden, keep_last=keep_last)
         return host.forward_segment(conv_id, hidden, 0, host.n_layers)
 
     async def prefill(
@@ -408,14 +599,24 @@ class MlxBackendRuntime(BackendRuntime):
         history: list[dict],
         *,
         forward_hidden: ForwardHidden | None = None,
+        template_kwargs: dict | None = None,
+        keep_rows: int = 1,
     ) -> PrefillOutput:
+        from ..image_parts import take_images
+
         host = self._require_host()
+        messages, images = take_images(history)
         full_ids = host.tokenizer.apply_chat_template(
-            history,
+            messages,
             add_generation_prompt=True,
+            **(template_kwargs or {}),
         )
+        spans: list[tuple[int, int]] = []
+        if images:
+            vision = await self._reads_images()
+            full_ids, spans = vision.expand(full_ids, images)
         already_seen = host._token_counts.get(conv_id, 0)
-        if already_seen > len(full_ids):
+        if already_seen > len(full_ids) or any(start < already_seen < end for start, end in spans):
             host.reset_conversation(conv_id)
             already_seen = 0
         new_ids = full_ids[already_seen:]
@@ -423,13 +624,19 @@ class MlxBackendRuntime(BackendRuntime):
             return PrefillOutput(None, 0, 0.0)
 
         t0 = time.perf_counter()
-        hidden = host.model.model.embed_tokens(array([new_ids]))
-        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
-        hidden = host.model.model.norm(hidden)
+        hidden = host.embed(array([new_ids]))
+        # Images in the new part of the conversation take their placeholders' places
+        new_images = [(start - already_seen, data) for (start, _), data in zip(spans, images) if start >= already_seen]
+        if new_images:
+            hidden = vision.place(hidden, new_images)
+        # The last row picks a token; the pool sends back only the rows wanted
+        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden, keep_last=max(1, keep_rows))
+        hidden = host.norm(hidden[:, -max(1, keep_rows):, :])
+        self._rows[conv_id] = hidden
         logits = host._project_logits(hidden[:, -1:, :])
         prefill_ms = (time.perf_counter() - t0) * 1000
         host._token_counts[conv_id] = already_seen + len(new_ids)
-        return PrefillOutput(logits[0, -1], len(new_ids), prefill_ms)
+        return PrefillOutput(logits[0, -1], len(new_ids), prefill_ms, context_ids=list(full_ids))
 
     async def decode_one(
         self,
@@ -439,12 +646,63 @@ class MlxBackendRuntime(BackendRuntime):
         forward_hidden: ForwardHidden | None = None,
     ):
         host = self._require_host()
-        hidden = host.model.model.embed_tokens(array([[token]]))
+        hidden = host.embed(array([[token]]))
         hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
-        hidden = host.model.model.norm(hidden)
+        hidden = host.norm(hidden)
+        self._rows[conv_id] = hidden
         logits = host._project_logits(hidden[:, -1:, :])
         host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + 1
         return logits[0, -1]
+
+    @property
+    def supports_speculation(self) -> bool:
+        return self.host is None or self.host.can_rewind
+
+    async def propose(self, conv_id: str, token: int, k: int, recent: list[int] = (),
+                      penalty: float = 1.0) -> list[int]:
+        """k greedy guesses as one lazy graph: each guess feeds the next on the GPU, and they are read
+        back together, instead of stopping after each to bring it into Python."""
+        import mlx.core as mx
+
+        host = self._require_host()
+        fed = array([[token]])
+        seen = array(list(recent), dtype=mx.int32)
+        guesses = []
+        for _ in range(k):
+            hidden = host.embed(fed)
+            hidden = await self._forward_hidden(conv_id, hidden, None)
+            logits = host._project_logits(host.norm(hidden)[:, -1:, :])
+            fed = mx.argmax(penalized(logits[:, -1, :], seen, penalty), axis=-1, keepdims=True)
+            seen = mx.concatenate([seen, fed[0]])
+            guesses.append(fed)
+        host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + k
+        picked = mx.concatenate(guesses, axis=1)
+        mx.eval(picked)
+        return [int(t) for t in picked[0].tolist()]
+
+    async def decode_many(
+        self,
+        conv_id: str,
+        tokens: list[int],
+        *,
+        forward_hidden: ForwardHidden | None = None,
+    ):
+        """One pass over `tokens`: through every layer here and down the chain, once for all of them.
+
+        Over a pool this costs one round trip per hop whatever the number of tokens, which is what makes
+        verifying a draft cheaper than decoding its tokens one by one.
+        """
+        host = self._require_host()
+        hidden = host.embed(array([tokens]))
+        hidden = await self._forward_hidden(conv_id, hidden, forward_hidden)
+        hidden = host.norm(hidden)
+        self._rows[conv_id] = hidden
+        logits = host._project_logits(hidden)
+        host._token_counts[conv_id] = host._token_counts.get(conv_id, 0) + len(tokens)
+        return logits[0]
+
+    def trim(self, conv_id: str, n: int) -> None:
+        self._require_host().trim(conv_id, n)
 
     def forward_segment(self, conv_id: str, hidden, start: int, end: int):
         return self._require_host().forward_segment(conv_id, hidden, start, end)
@@ -508,6 +766,8 @@ class MlxBackendRuntime(BackendRuntime):
         host = self.host
         self.host = None
         self._geometry = None
+        self._rows.clear()
+        self._vision, self._vision_loaded = None, False
         if host is not None:
             host._caches.clear()
             host._token_counts.clear()
@@ -545,4 +805,5 @@ __all__ = [
     "_stop_ids",
     "create_attention_mask",
     "make_prompt_cache",
+    "trim_prompt_cache",
 ]

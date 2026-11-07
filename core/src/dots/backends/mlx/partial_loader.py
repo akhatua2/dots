@@ -32,6 +32,8 @@ from mlx_lm.utils import (
     load_tokenizer,
 )
 
+from .layout import FINAL_NORM_NAMES, HEAD_TENSOR, LAYER_TENSOR, VISION_TENSOR, output_owner, text_model
+
 log = logging.getLogger("dots.partial_loader")
 
 
@@ -44,35 +46,30 @@ class _DroppedModule(nn.Module):
     assignment) surfaces immediately instead of producing silent garbage.
     """
 
+    def __init__(self, replaces: nn.Module | None = None):
+        super().__init__()
+        # Keep the plain facts about the module it replaces (a layer's `is_linear`, say): a model asks
+        # its layers what kind of cache each needs, including the ones another Mac runs.
+        if replaces is not None:
+            for name, value in vars(replaces).items():
+                if not name.startswith("_") and isinstance(value, (bool, int, float, str)):
+                    object.__setattr__(self, name, value)
+
     def __call__(self, *_args, **_kwargs):
         raise RuntimeError(
             "tried to invoke a Module not owned by this partial-load worker"
         )
 
 
-# Top-level tensors that belong to the "head" of the model (embed +
-# final norm + lm_head, with their quantization sidecars). Any tensor
-# starting with "model.layers." is per-layer and handled separately.
-_HEAD_TENSOR_PREFIXES: tuple[str, ...] = (
-    "model.embed_tokens.",
-    "model.norm.",
-    "lm_head.",
-)
-
-
 def _is_owned(name: str, layer_start: int, layer_end: int, needs_head: bool) -> bool:
-    """Decide whether tensor `name` belongs on this worker."""
-    if name.startswith("model.layers."):
-        # "model.layers.{i}.<rest>"
-        parts = name.split(".", 3)
-        if len(parts) < 3:
-            return False
-        try:
-            i = int(parts[2])
-        except ValueError:
-            return False
-        return layer_start <= i < layer_end
-    if any(name.startswith(p) for p in _HEAD_TENSOR_PREFIXES):
+    """Decide whether tensor `name` belongs on this worker: a decoder layer in its range, or the head's
+    embedding, final norm and output layer when it is the head (see `layout` for the names)."""
+    layer = LAYER_TENSOR.match(name)
+    if layer:
+        return layer_start <= int(layer.group(1)) < layer_end
+    if VISION_TENSOR.match(name):
+        return False  # serving text: no Mac needs the vision encoder
+    if HEAD_TENSOR.match(name):
         return needs_head
     # Anything else (rare top-level tensors like rope buffers) — be
     # liberal and keep it. Models occasionally stash small things at the
@@ -90,22 +87,21 @@ def _drop_unowned_modules(
     stub. Must run *before* `nn.quantize` so the quantizer skips them
     (its class_predicate checks `f"{path}.scales" in weights`, and we've
     filtered weights to exclude unowned tensors)."""
-    inner = getattr(model, "model", None)
-    if inner is not None and hasattr(inner, "layers"):
-        for i in range(len(inner.layers)):
-            if not (layer_start <= i < layer_end):
-                inner.layers[i] = _DroppedModule()
+    inner = text_model(model)
+    for i in range(len(inner.layers)):
+        if not (layer_start <= i < layer_end):
+            inner.layers[i] = _DroppedModule(replaces=inner.layers[i])
     if not needs_head:
-        if inner is not None:
-            for attr in ("embed_tokens", "norm"):
-                if hasattr(inner, attr):
-                    try:
-                        setattr(inner, attr, _DroppedModule())
-                    except (AttributeError, TypeError):
-                        pass
-        if hasattr(model, "lm_head") and getattr(model, "lm_head") is not None:
+        for attr in ("embed_tokens", *FINAL_NORM_NAMES):
+            if hasattr(inner, attr):
+                try:
+                    setattr(inner, attr, _DroppedModule())
+                except (AttributeError, TypeError):
+                    pass
+        owner = output_owner(model)
+        if getattr(owner, "lm_head", None) is not None:
             try:
-                model.lm_head = _DroppedModule()
+                owner.lm_head = _DroppedModule()
             except (AttributeError, TypeError):
                 pass
 
@@ -156,7 +152,7 @@ def load_partial(
     model_class, model_args_class = _get_classes(config=config)
     model_args = model_args_class.from_dict(config)
     model = model_class(model_args)
-    n_layers = len(model.model.layers)
+    n_layers = len(text_model(model).layers)
     end = layer_end if layer_end is not None else n_layers
     if not (0 <= layer_start <= end <= n_layers):
         raise ValueError(

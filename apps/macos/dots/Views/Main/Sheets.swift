@@ -39,6 +39,11 @@ struct StartPoolSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var isPublic = false
+    /// What it runs: a Hugging Face link, and what the cloud read from it
+    @State private var link = ""
+    @State private var described: ModelDescription?
+    @State private var linkProblem: String?
+    @State private var reading = false
 
     var body: some View {
         let hash = name.unicodeScalars.reduce(UInt64(5)) { $0 &* 31 &+ UInt64($1.value) }
@@ -65,16 +70,56 @@ struct StartPoolSheet: View {
                      ? "Public pools run on strangers' Macs, so private prompts never go there."
                      : "Everyone you invite can lend their Mac and ask the pool for free.")
                     .font(D.ui(12.5)).foregroundStyle(D.t4)
+                VStack(alignment: .leading, spacing: 8) {
+                    CapLabel("What it runs")
+                    Field(placeholder: "A Hugging Face link, like huggingface.co/mlx-community/…", text: $link)
+                    if reading {
+                        Text("Reading the model…").font(D.ui(12.5)).foregroundStyle(D.t4)
+                    } else if let linkProblem {
+                        Text(linkProblem).font(D.ui(12.5)).foregroundStyle(D.t3)
+                    } else if let described {
+                        ModelCard(model: described)
+                    }
+                }
             }
+            .task(id: link) { await read(link) }
         } footer: {
             Button("Cancel") { dismiss() }.buttonStyle(DButtonStyle(kind: .quiet))
             Button("Start pool") {
-                model.startPool(name: name, isPublic: isPublic)
+                model.startPool(name: name, isPublic: isPublic, model: described?.id)
                 dismiss()
             }
             .buttonStyle(DButtonStyle(kind: .primary, large: true))
-            .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(!canStart)
             .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    /// A name, and if a link was given, one dots can run that has been read
+    private var canStart: Bool {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if link.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        return !reading && linkProblem == nil && described != nil && described?.runs != false
+    }
+
+    /// Reads the link once typing pauses
+    private func read(_ text: String) async {
+        let link = text.trimmingCharacters(in: .whitespaces)
+        described = nil
+        linkProblem = nil
+        guard !link.isEmpty else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        guard !Task.isCancelled else { return }
+        reading = true
+        defer { reading = false }
+        do {
+            let model = try await model.backend.describeModel(link)
+            guard !Task.isCancelled else { return }
+            described = model
+            if model.runs == false { linkProblem = model.why.map { "dots can't run \(model.name): \($0)." } }
+        } catch {
+            guard !Task.isCancelled else { return }
+            linkProblem = "Couldn't read that link. Check it's a Hugging Face model you can open."
         }
     }
 
@@ -95,6 +140,32 @@ struct StartPoolSheet: View {
     }
 }
 
+/// What a link runs and what it needs, under the link in Start a Pool
+private struct ModelCard: View {
+    var model: ModelDescription
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(model.name).font(D.ui(13.5, .semibold)).foregroundStyle(D.t1)
+            Text(what).font(D.ui(12.5)).foregroundStyle(D.t3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(D.bg0))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(D.line, lineWidth: 1))
+    }
+
+    private var size: String { String(format: "%.1f GB", model.gb) }
+
+    private var what: String {
+        switch model.kind {
+        case "pictures": "Draws and changes pictures. Each one is drawn on a single Mac with room for its \(size)."
+        case "text": "Answers questions. Its \(size) runs on one Mac with room for it, or is split across the pool's Macs."
+        default: "\(size) of weights."
+        }
+    }
+}
+
 // MARK: - Invite
 
 struct InviteSheet: View {
@@ -111,9 +182,11 @@ struct InviteSheet: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let pool, let invite = pool.invite {
                     HStack(spacing: 10) {
-                        Text(invite.url).font(D.mono(14, .medium)).foregroundStyle(D.t1).textSelection(.enabled)
+                        let link = invite.link(cloud: model.backend.cloudAddress)
+                        Text(link).font(D.mono(14, .medium)).foregroundStyle(D.t1).textSelection(.enabled)
+                            .lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        CopyButton(text: invite.url, copied: $copied, tag: "invite")
+                        CopyButton(text: link, copied: $copied, tag: "invite")
                     }
                     .padding(.leading, 14).padding(.trailing, 7).frame(height: 46)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(D.bg0))
@@ -151,7 +224,7 @@ struct InvitePreview: View {
                 EmblemView(macs: pool.totalMacs, phase: pool.phase, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(inviter) invited you to \(pool.name)").font(D.ui(14, .semibold)).foregroundStyle(D.t1)
-                    Text("\(pool.lendingMacs) lending · runs \(pool.model?.name ?? "nothing yet")").font(D.ui(12.5)).foregroundStyle(D.t3)
+                    Text("\(pool.lendingMacs) lending · runs \(pool.modelLabel ?? "nothing yet")").font(D.ui(12.5)).foregroundStyle(D.t3)
                 }
             }
             if let next = pool.nextModel {
@@ -300,7 +373,7 @@ struct OpenInviteSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(open?.preview.map { "Join \($0.poolName)" } ?? "Open an invite link").font(D.ui(19, .bold)).foregroundStyle(D.t1)
                 Text(open?.preview.map { p in p.fromName.map { "An invite from \($0)" } ?? "You're invited" }
-                     ?? "Paste a link a friend sent you, like https://dots.link/LATE7Q.")
+                     ?? "Paste a link a friend sent you, like dots://invite/LATE7Q.")
                     .font(D.ui(13)).foregroundStyle(Color(hex: 0x8A8A8A))
             }
             .padding(.horizontal, 28).padding(.top, 26)
@@ -309,14 +382,14 @@ struct OpenInviteSheet: View {
                 if let p = open?.preview {
                     let pool = s.pool(p.poolID)
                     poolCard(p, pool)
-                    if !p.isMember, let pool { lendChoice(pool) }
+                    if !p.isMember, let pool, !options.isEmpty { lendChoice(pool) }
                 } else if let error = open?.error {
                     Text(error).font(D.ui(13)).foregroundStyle(D.t3)
                 } else if open != nil, !(open?.code.isEmpty ?? true) {
                     Text("Opening the invite…").font(D.ui(13)).foregroundStyle(D.t3)
                 }
                 if open?.preview == nil {
-                    Field(placeholder: "https://dots.link/…", text: $link, mono: true)
+                    Field(placeholder: "dots://invite/…", text: $link, mono: true)
                         .onSubmit { model.openInviteLink(link) }
                 }
             }
@@ -332,9 +405,8 @@ struct OpenInviteSheet: View {
                             .buttonStyle(DButtonStyle(kind: .primary, large: true)).keyboardShortcut(.defaultAction)
                     } else {
                         let gb = chosen
-                        Button("Join and Lend \(gb) GB") { model.acceptInvite(p, lendGB: gb) }
+                        Button(gb > 0 ? "Join and Lend \(gb) GB" : "Join \(p.poolName)") { model.acceptInvite(p, lendGB: gb) }
                             .buttonStyle(DButtonStyle(kind: .primary, large: true)).keyboardShortcut(.defaultAction)
-                            .disabled(s.thisMac.maxLendGB == 0)
                     }
                 } else {
                     Button("Open") { model.openInviteLink(link) }
@@ -389,12 +461,13 @@ struct OpenInviteSheet: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(D.panelEdge, lineWidth: 0.5))
     }
 
+    /// Half of what this Mac has left to lend, or all of it
     private var options: [Int] {
-        let s = model.state
-        return Array(Set([max(1, s.lending.limitGB), s.thisMac.maxLendGB])).filter { $0 > 0 }.sorted()
+        let left = model.openInvite?.preview.map { model.state.mostGB(for: $0.poolID) } ?? model.state.thisMac.maxLendGB
+        return Array(Set([left / 2, left])).filter { $0 > 0 }.sorted()
     }
 
-    private var chosen: Int { choice ?? options.last ?? model.state.thisMac.maxLendGB }
+    private var chosen: Int { choice ?? options.last ?? 0 }
 
     /// How much to lend, and what it does: the next level reached, or how far short.
     private func lendChoice(_ pool: Pool) -> some View {

@@ -14,7 +14,15 @@ struct MainWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(D.bg2)
         }
+        // Any text in the app can be selected and copied: answers, chats, settings, labels
+        .textSelection(.enabled)
         .background(D.bg1)
+        .overlay {
+            // The first launch's welcome covers the window until it's through
+            if !model.settings.onboarded && model.moment == nil {
+                OnboardingView().transition(.opacity)
+            }
+        }
         .overlay {
             if let moment = model.moment {
                 MomentView(moment: moment)
@@ -22,6 +30,7 @@ struct MainWindow: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) { TitleDrag() }
         .animation(.easeOut(duration: 0.25), value: model.moment?.id)
         .sheet(item: $model.sheet) { sheet in
             Group {
@@ -58,6 +67,7 @@ struct MainWindow: View {
         case .api: APIView()
         case .profile: ProfileView()
         case .ask: AskScreen()
+        case .draw: DrawScreen()
         case .settings: SettingsView(inline: true)
         case .pool(let id):
             if let pool = model.state.pool(id) { PoolView(pool: pool) } else { ExploreView() }
@@ -69,6 +79,36 @@ struct MainWindow: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("sidebar.poolsFolded") private var poolsFolded = false
+    @AppStorage("sidebar.chatsFolded") private var chatsFolded = false
+
+    /// A chat or a drawing, for the one list of both
+    private enum Recent: Identifiable {
+        case chat(Chat), drawing(DrawingThread)
+        var id: UUID { switch self { case .chat(let c): c.id; case .drawing(let d): d.id } }
+        var updated: Date { switch self { case .chat(let c): c.updated; case .drawing(let d): d.updated } }
+    }
+
+    private var recents: [Recent] {
+        (model.chats.chats.map(Recent.chat) + model.draw.threads.map(Recent.drawing)).sorted { $0.updated > $1.updated }
+    }
+
+    private func newDrawing() {
+        model.draw.startNew()
+        model.open(.draw)
+    }
+
+    private func newChat() {
+        model.ask.clear()
+        model.chats.startNew()
+        model.showAsk()
+    }
+
+    private func open(_ chat: Chat) {
+        model.ask.clear()
+        model.chats.open(chat.id)
+        model.showAsk()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -79,40 +119,76 @@ struct Sidebar: View {
 
             VStack(spacing: 2) {
                 NavRow(symbol: "safari", title: "Explore", selected: model.route == .explore) { model.open(.explore) }
-                NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: model.route == .ask) { model.showAsk() }
+                // Ask and Draw each start something new; what you had is under Chats
+                NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: model.route == .ask && model.chats.currentID == nil) {
+                    newChat()
+                }
+                NavRow(symbol: "paintbrush.pointed", title: "Draw", selected: model.route == .draw && model.draw.threadID == nil) {
+                    newDrawing()
+                }
                 NavRow(symbol: "curlybraces", title: "API", selected: model.route == .api) { model.open(.api) }
                 NavRow(symbol: "person", title: "Profile", selected: model.route == .profile,
                        badge: model.state.badges.contains(where: \.isNew)) { model.open(.profile) }
             }
             .padding(.horizontal, 8)
 
-            Text("Your pools")
-                .font(D.ui(11, .semibold)).foregroundStyle(Color(hex: 0x6E6E6E))
-                .padding(.leading, 18)
-                .padding(.top, 24)
-                .padding(.bottom, 6)
-
-            VStack(spacing: 2) {
-                ForEach(model.state.myPools) { pool in
-                    PoolRow(pool: pool, selected: model.route == .pool(pool.id),
-                            lending: model.state.lendingPoolID == pool.id) { model.open(.pool(pool.id)) }
-                }
-                Button { model.sheet = .startPool } label: {
-                    HStack(spacing: 11) {
-                        Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 28)
-                        Text("Start a Pool").font(D.ui(13.5, .medium))
-                        Spacer()
+            // Your pools, then your chats, each folding away under its heading.
+            LiveScroll {
+                VStack(alignment: .leading, spacing: 0) {
+                    SidebarSection(title: "Your pools", folded: $poolsFolded) {
+                        ForEach(model.state.myPools) { pool in
+                            PoolRow(pool: pool, selected: model.route == .pool(pool.id),
+                                    lending: model.state.isLending(to: pool.id)) { model.open(.pool(pool.id)) }
+                        }
+                        Button { model.sheet = .startPool } label: {
+                            HStack(spacing: 11) {
+                                Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 28)
+                                Text("Start a Pool").font(D.ui(13.5, .medium))
+                                Spacer()
+                            }
+                            .foregroundStyle(D.t4)
+                            .frame(height: 38)
+                            .padding(.horizontal, 10)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .foregroundStyle(D.t4)
-                    .frame(height: 38)
-                    .padding(.horizontal, 10)
-                    .contentShape(Rectangle())
+                    // Conversations and drawings, together, most recently changed first
+                    SidebarSection(title: "Chats", folded: $chatsFolded, action: ("square.and.pencil", "New chat", newChat)) {
+                        ForEach(recents) { item in
+                            switch item {
+                            case .chat(let chat):
+                                ChatRow(title: chat.title, updated: chat.updated,
+                                        selected: model.route == .ask && chat.id == model.chats.currentID,
+                                        deleteHelp: "Delete chat",
+                                        action: { open(chat) },
+                                        delete: {
+                                            if chat.id == model.chats.currentID { model.ask.clear() }
+                                            model.chats.delete(chat.id)
+                                        })
+                            case .drawing(let thread):
+                                ChatRow(title: thread.title, updated: thread.updated,
+                                        selected: model.route == .draw && thread.id == model.draw.threadID,
+                                        deleteHelp: "Delete drawing",
+                                        action: {
+                                            model.draw.open(thread.id)
+                                            model.open(.draw)
+                                        },
+                                        delete: { model.draw.delete(thread: thread.id) })
+                            }
+                        }
+                        if recents.isEmpty {
+                            Text("Your conversations and drawings show up here.")
+                                .font(D.ui(12)).foregroundStyle(D.t5)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
             }
-            .padding(.horizontal, 8)
+            .scrollIndicators(.never)
 
-            Spacer(minLength: 16)
+            Spacer(minLength: 8)
 
             NavRow(symbol: "gearshape", title: "Settings", trailing: "⌘,", selected: model.route == .settings) { model.showSettings() }
                 .padding(.horizontal, 8)
@@ -190,7 +266,7 @@ struct PoolRow: View {
             .frame(height: 38)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
             .contentShape(Rectangle())
-            .help("\(pool.totalMacs.grouped) Macs · \(pool.model?.name ?? "No model yet")")
+            .help("\(pool.totalMacs.counted("Mac")) · \(pool.modelLabel ?? "No model yet")")
         }
         .buttonStyle(.plain)
     }
@@ -211,10 +287,10 @@ struct ThisMacCard: View {
                 } else {
                     LiveDot(live: false, size: 7)
                 }
-                Text(status.isActive ? "Live in \(s.lendingPool?.name ?? "your pool")" : status.headline)
+                Text(status.isActive ? "Live in \(s.lendingPools.map(\.name).formatted(.list(type: .and)))" : status.headline)
                     .font(D.ui(13, .semibold)).foregroundStyle(D.t1).lineLimit(1)
             }
-            Text(status.isActive ? "\(Int(s.credits).grouped) credits · +\(model.creditsPerHour) an hour" : "\(Int(s.credits).grouped) credits")
+            Text(status.isActive ? "\(Int(s.credits).grouped) credits · \(model.earningLine)" : "\(Int(s.credits).grouped) credits")
                 .font(D.ui(12.5).monospacedDigit()).foregroundStyle(D.t3).lineLimit(1)
                 .contentTransition(.numericText())
                 .padding(.leading, 15)
@@ -228,6 +304,18 @@ struct ThisMacCard: View {
 }
 
 // MARK: - Window chrome
+
+/// The window has no title bar, so the strip where one would be moves it, and a double click zooms it.
+private struct TitleDrag: View {
+    var body: some View {
+        Color.clear
+            .frame(height: 28)
+            .contentShape(Rectangle())
+            .gesture(WindowDragGesture())
+            .allowsWindowActivationEvents(true)
+            .onTapGesture(count: 2) { NSApp.keyWindow?.performZoom(nil) }
+    }
+}
 
 /// Hides the title bar's own background and separator, so the content runs to the top edge
 /// and the traffic lights sit on it. Without this, macOS draws a bar and a line above the content.
@@ -253,7 +341,8 @@ private struct WindowChrome: NSViewRepresentable {
         window.titlebarSeparatorStyle = .none
         window.titleVisibility = .hidden
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
+        // Only the strip along the top moves the window (see TitleDrag), so dragging in a list or a chat selects.
+        window.isMovableByWindowBackground = false
         if let root = window.contentView?.superview { hideScrollPockets(in: root) }
     }
 
@@ -267,5 +356,76 @@ private struct WindowChrome: NSViewRepresentable {
             if name == "NSScrollPocket" || name == "_NSTitlebarDecorationView" { sub.isHidden = true }
             hideScrollPockets(in: sub)
         }
+    }
+}
+
+
+/// A heading in the sidebar that folds its rows away, with an optional button on the right.
+struct SidebarSection<Content: View>: View {
+    var title: String
+    @Binding var folded: Bool
+    var action: (symbol: String, label: String, run: () -> Void)? = nil
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Button { withAnimation(.easeOut(duration: 0.18)) { folded.toggle() } } label: {
+                    HStack(spacing: 5) {
+                        Text(title).font(D.ui(11, .semibold))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(folded ? 0 : 90))
+                    }
+                    .foregroundStyle(Color(hex: 0x6E6E6E))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(folded ? "Show \(title)" : "Hide \(title)")
+                Spacer()
+                if let action {
+                    Button(action: action.run) { Image(systemName: action.symbol).font(.system(size: 11.5, weight: .medium)) }
+                        .buttonStyle(.plain).foregroundStyle(D.t4)
+                        .help(action.label)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 20)
+            .padding(.bottom, 6)
+            if !folded { content }
+        }
+    }
+}
+
+/// A chat or a drawing in the sidebar: its title and when it last changed, and a button to delete it that shows
+/// on the open one and the one under the pointer.
+struct ChatRow: View {
+    var title: String
+    var updated: Date
+    var selected: Bool
+    var deleteHelp: String
+    var action: () -> Void
+    var delete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: action) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                        .lineLimit(1)
+                    Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if hovering || selected {
+                IconButton(symbol: "trash", help: deleteHelp, action: delete)
+            }
+        }
+        .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
+        .onHover { hovering = $0 }
     }
 }

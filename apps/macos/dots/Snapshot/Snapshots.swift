@@ -40,12 +40,12 @@ enum Snapshots {
         model.signals.onPower = true
         model.signals.idleSeconds = 999
         await model.backend.syncNow()
-        let window = CGSize(width: 1_180, height: 860)
+        let window = CGSize(width: 1_440, height: 900)
 
         // 1. Explore, before your Mac lends anywhere, with Sam's invite at the top
         save(Shell(route: .explore), model, window, dir, "01-explore")
 
-        // 2. Join Student Union: your Mac tips it over DeepSeek V3.1's line
+        // 2. Join Student Union: your Mac tips it over GLM 5.3's line
         let union = model.state.pools.first { $0.id == "student-union" }!
         save(Shell(route: .pool(union.id)), model, window, dir, "02-pool-before")
         model.join(union)
@@ -90,6 +90,32 @@ enum Snapshots {
             ask.second = .init(candidate: decision.candidates.first { $0.destination == .frontier }!)
         }
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask", fitHeight: true)
+        // The same answer mid-stream, with the draft model's next words waiting on the pool, greyed out
+        let full = ask.answer
+        let confirmed = full.index(full.startIndex, offsetBy: min(150, full.count))
+        let proposed = full.index(confirmed, offsetBy: min(28, full.distance(from: confirmed, to: full.endIndex)))
+        ask.answer = String(full[..<confirmed])
+        ask.draft = String(full[confirmed..<proposed])
+        ask.phase = .streaming
+        ask.checks = [(3, 4), (1, 4), (4, 4), (0, 4), (2, 4), (4, 4), (3, 4), (1, 4), (4, 4), (2, 4)]
+            .map { DraftCheck(kept: $0.0, proposed: $0.1) }
+        save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-drafting", fitHeight: true)
+        ask.answer = full
+        ask.draft = ""
+        ask.checks = []
+        ask.phase = .done
+        // A photo waiting to be asked about
+        ask.clear()
+        ask.input = "Which way does the road go?"
+        ask.attachment = .init(name: "big-sur-road.jpg", text: "", url: URL(fileURLWithPath: "/tmp/big-sur-road.jpg"),
+                               picture: SampleData.photo)
+        save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-photo", fitHeight: true)
+        ask.clear()
+        // A picture as an answer, three steps into its drawing
+        let forming = Drawing.Progress(image: SampleData.photo, step: 3, of: 8,
+                                                    firstStep: (1, Date(timeIntervalSinceNow: -40)), latestAt: Date(timeIntervalSinceNow: -5))
+        save(PictureAnswer(image: SampleData.photo, progress: forming).padding(28).background(D.bg2),
+             model, CGSize(width: 540, height: 600), dir, "07-ask-drawing", fitHeight: true)
 
         // 5. A week of work, and your profile with this week's note
         await model.backend.beatNow(active: true, adding: 31 * 3_600)
@@ -101,8 +127,8 @@ enum Snapshots {
         let baseline = model.settings.savingsBaseline
         for (dest, place, mdl, credits, usd, i, o) in [
             (Destination.thisMac, "This Mac", "qwen3-8b", 0, 0.0, 820, 240),
-            (.yourPool, "Studio 9", "Qwen3 235B", 0, 0.0, 2_400, 610),
-            (.publicPool, "Open Science", "Kimi K2", 4, 0.0, 6_100, 900),
+            (.yourPool, "Studio 9", "MiniMax M2.7", 0, 0.0, 2_400, 610),
+            (.publicPool, "Open Science", "Kimi K2.5", 4, 0.0, 6_100, 900),
             (.frontier, "Anthropic", "Claude Opus 5.5", 13, 0.0, 1_500, 600),
             (.frontier, "Anthropic", "Claude Opus 5.5", 0, Pricing.usd(baseline, input: 3_200, output: 800), 3_200, 800),
         ] {
@@ -119,7 +145,8 @@ enum Snapshots {
         _ = model.backend.createInvite(poolID: "studio-9")
         save(InviteSheet(poolID: "studio-9"), model, CGSize(width: 480, height: 520), dir, "12-invite-sheet", fitHeight: true)
         save(Shell(route: .pool("studio-9")), model, window, dir, "13-studio-9")
-        model.setLimit(10)
+        // Room for Sam's invite: Student Union gives back what it has
+        model.setShare(union, gb: 0)
         await model.backend.beatNow(active: model.lendingStatus.isActive)
         if let invite = model.backend.invites.first {
             model.openInvite = OpenInvite(code: invite.code, preview: invite)
@@ -131,8 +158,9 @@ enum Snapshots {
                                                         model: "claude-opus-5-5", keychainAccount: "dots-snapshot-none",
                                                         workspaceID: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")
         save(SettingsView(), model, CGSize(width: 560, height: 640), dir, "14-settings", fitHeight: true)
+        save(Shell(route: .settings), model, window, dir, "14-settings-page")
 
-        // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with DeepSeek Boost coming
+        // 9. Sam's invite, taken with 10 GB: Late Night Lab at 2 AM, 6 GB short of Level 2, with GLM Boost coming
         let lateNight = Date().nightStart.addingTimeInterval(14.1 * 3_600)
         if let invite = model.backend.invites.first(where: { $0.code == "LATE7Q" }) {
             model.acceptInvite(invite, lendGB: 10)
@@ -147,7 +175,7 @@ enum Snapshots {
             save(MenuBarPanel(), model, CGSize(width: 320, height: 600), dir, "21-menubar-lab", fitHeight: true, clock: lateNight)
             save(Shell(route: .profile), model, window, dir, "18-profile-lab", clock: lateNight)
             // Lending 6 GB more takes it to Level 2
-            model.setLimit(16)
+            model.setShare(model.state.pool("late-night-lab")!, gb: 16)
             await model.backend.beatNow(active: true)
             if let moment = model.moment {
                 save(Shell(route: .pool("late-night-lab")).overlay(MomentView(moment: moment, frozenAt: 3.2)), model, window, dir, "19-level-up", clock: lateNight)
@@ -158,6 +186,35 @@ enum Snapshots {
             save(RecapSheet(), model, CGSize(width: 720, height: 800), dir, "22-recap", fitHeight: true,
                  clock: Date().nightStart.addingTimeInterval(19.03 * 3_600))
         }
+
+        // The first launch: the welcome, your name, and what this Mac lends
+        save(OnboardingView(step: .welcome), model, window, dir, "26-welcome")
+        save(OnboardingView(step: .name), model, window, dir, "27-welcome-name")
+        save(OnboardingView(step: .lend), model, window, dir, "28-welcome-lend")
+
+        // 10. Pools that name their one model: Home writes text with a small model, Prism draws pictures
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == "home" }) {
+                s.pools[i].servesModelID = "Qwen/Qwen3.5-0.8B"
+                s.pools[i].modelName = "Qwen3.5 0.8B"
+                s.pools[i].kind = "text"
+                s.pools[i].modelGB = 1.7
+            }
+        }
+        _ = cloud.world.createPool(name: "Prism", isPublic: true, id: "prism")
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == "prism" }) {
+                s.pools[i].servesModelID = "mflux-community/flux2-klein-4b-mflux-q4"
+                s.pools[i].modelName = "FLUX.2 klein 4B"
+                s.pools[i].kind = "pictures"
+                s.pools[i].modelGB = 4.6
+                s.pools[i].blurb = "Pictures, drawn whole on one Mac."
+            }
+        }
+        await model.backend.syncNow()
+        save(Shell(route: .pool("home")), model, window, dir, "23-home-runs")
+        save(Shell(route: .pool("prism")), model, window, dir, "24-prism-runs")
+        save(Shell(route: .explore), model, window, dir, "25-explore-runs")
         cloud.stop()
         print("snapshots written to \(dir.path)")
     }
@@ -199,6 +256,7 @@ enum Snapshots {
                     case .api: APIView()
                     case .profile: ProfileView()
                     case .ask: AskScreen()
+                    case .draw: DrawScreen()
                     case .settings: SettingsView(inline: true)
                     case .pool(let id): PoolView(pool: model.state.pool(id)!)
                     }

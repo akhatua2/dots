@@ -69,7 +69,7 @@ final class MockCloud {
 
     // MARK: The mock's own additions to the sample world
 
-    /// A friends' pool you've been invited to, one Mac short of Qwen3 235B, with a boost coming;
+    /// A friends' pool you've been invited to, one Mac short of MiniMax M2.7, with a boost coming;
     /// the totals behind your badges; and the nights your Mac lent before.
     private func seed() {
         world.update { s in
@@ -95,7 +95,7 @@ final class MockCloud {
         }
     }
 
-    /// Late Night Lab's DeepSeek Boost, on a Saturday afternoon (a boost can be any time), and what happened there lately.
+    /// Late Night Lab's GLM Boost, on a Saturday afternoon (a boost can be any time), and what happened there lately.
     private static func seedLateNightLab(_ s: inout NetworkState) {
         guard let i = s.pools.firstIndex(where: { $0.id == "late-night-lab" }) else { return }
         let now = Date()
@@ -104,7 +104,7 @@ final class MockCloud {
             c.weekday = 7
             c.hour = 14
             let saturday = Calendar.current.nextDate(after: now, matching: c, matchingPolicy: .nextTime) ?? now.addingTimeInterval(5 * 86_400)
-            s.pools[i].boost = PoolBoost(title: "DeepSeek Boost", modelID: "deepseek-v3.1", starts: saturday, hours: 4, plannedBy: "sam",
+            s.pools[i].boost = PoolBoost(title: "GLM Boost", modelID: "glm-5.3", starts: saturday, hours: 4, plannedBy: "sam",
                                          pledges: [.init(personID: "sam", gb: 96, guest: false), .init(personID: "ana", gb: 24, guest: false),
                                                    .init(personID: "nia", gb: 18, guest: true), .init(personID: "theo", gb: 96, guest: true),
                                                    .init(personID: "maya", gb: 48, guest: true), .init(personID: "priya", gb: 14, guest: true)])
@@ -147,10 +147,11 @@ final class MockCloud {
                   invites: (world.state.invitesForMe ?? []).compactMap { preview(code: $0, memoryGB: nil) }, mock: true)
     }
 
-    /// The layers this Mac holds in its pool: a share in proportion to the memory it lends, in the order Macs joined.
+    /// The layers this Mac holds in the first pool it lends to: a share in proportion to the memory it lends, in the
+    /// order Macs joined.
     private func workerStatus() -> WorkerStatus? {
         let s = world.state
-        guard let pool = s.lendingPool, let model = pool.model,
+        guard let pool = s.lendingPools.first, let model = pool.model,
               let me = pool.macs.first(where: { $0.macID == s.thisMacID && $0.state == .lending }) else { return nil }
         var start = 0.0
         for m in pool.macs.filter({ $0.state == .lending }).sorted(by: { $0.joinedAt < $1.joinedAt }) {
@@ -211,7 +212,20 @@ final class MockCloud {
 
     func handle(_ r: HTTPRequest, _ res: HTTPResponder) async {
         if r.method == "OPTIONS" { res.empty(204); return }
-        // Every call carries the app's token, as it will for the real cloud
+        // Every call carries the app's token, as it will for the real cloud. Someone new may look at an invite and join
+        // through it, which is how they get a token of their own.
+        if let c = match(r, "GET", "/v1/invites/:code"), (r.bearer ?? "").isEmpty {
+            guard let p = preview(code: c[0], memoryGB: r.query["memory_gb"].flatMap { Int($0) }) else {
+                res.error(404, "That invite isn't valid any more.", type: "not_found_error"); return
+            }
+            res.encoded(200, p); return
+        }
+        if let c = match(r, "POST", "/v1/invites/:code/join") {
+            guard let p = preview(code: c[0], memoryGB: nil) else { res.error(404, "That invite isn't valid any more.", type: "not_found_error"); return }
+            let joined = join(p.poolID, gb: r.object["gb"] as? Int ?? 0)
+            res.encoded(200, NewcomerReply(token: AppModel.mockToken, macNumber: joined.macNumber, poolID: joined.poolID,
+                                           unlock: joined.unlock, sync: joined.sync)); return
+        }
         guard (r.bearer ?? r.headers["x-api-key"]) == AppModel.mockToken else {
             res.error(401, "Pass the cloud's token as a Bearer token.", type: "authentication_error"); return
         }
@@ -224,9 +238,17 @@ final class MockCloud {
         }
         if let c = match(r, "POST", "/v1/pools/:id/join") {
             guard world.state.pool(c[0]) != nil else { res.error(404, "No pool \(c[0]).", type: "not_found_error"); return }
-            res.encoded(200, join(c[0])); return
+            res.encoded(200, join(c[0], gb: r.object["gb"] as? Int ?? 0)); return
         }
         if let c = match(r, "POST", "/v1/pools/:id/leave") { world.leave(poolID: c[0]); res.encoded(200, sync()); return }
+        if let c = match(r, "POST", "/v1/pools/:id/share") {
+            guard world.state.pool(c[0])?.isMember(world.state.meID) == true else {
+                res.error(404, "Join the pool before lending to it.", type: "not_found_error"); return
+            }
+            world.setShare(poolID: c[0], gb: r.object["gb"] as? Int ?? 0)
+            _ = world.applyLendingStatus(active: lastActive)
+            res.encoded(200, sync()); return
+        }
         if let c = match(r, "POST", "/v1/pools/:id/endorse") {
             let badge = world.endorse(poolID: c[0])
             res.encoded(200, BadgeReply(badge: badge, sync: sync())); return
@@ -255,7 +277,7 @@ final class MockCloud {
         if let c = match(r, "POST", "/v1/invites/:code/accept") {
             guard let p = preview(code: c[0], memoryGB: nil) else { res.error(404, "That invite isn't valid any more.", type: "not_found_error"); return }
             world.update { s in s.invitesForMe?.removeAll { $0.caseInsensitiveCompare(p.code) == .orderedSame } }
-            res.encoded(200, join(p.poolID)); return
+            res.encoded(200, join(p.poolID, gb: r.object["gb"] as? Int ?? 0)); return
         }
         if match(r, "PATCH", "/v1/me") != nil {
             if let name = r.object["name"] as? String { world.rename(name) }
@@ -293,13 +315,13 @@ final class MockCloud {
         return values
     }
 
-    private func join(_ poolID: String) -> JoinReply {
-        let outcome = world.join(poolID: poolID)
+    private func join(_ poolID: String, gb: Int) -> JoinReply {
+        let outcome = world.join(poolID: poolID, gb: gb)
         let unlock = world.applyLendingStatus(active: lastActive)
         return JoinReply(macNumber: outcome.macNumber, poolID: poolID, unlock: unlock, sync: sync())
     }
 
-    /// The worker's report: lend or not, and how much. The hub hands out work in bursts, and a friends' pool that
+    /// The worker's report: lending or not (each pool's share is the cloud's already). The hub hands out work in bursts, and a friends' pool that
     /// offers its idle hours gets the network's work in between. Time runs as fast as the app's demo speed.
     private func heartbeat(_ r: HTTPRequest, _ res: HTTPResponder) {
         guard let beat = try? JSONDecoder.dots.decode(Heartbeat.self, from: r.body) else { res.error(400, "Send a heartbeat."); return }
@@ -309,10 +331,9 @@ final class MockCloud {
                 s.devices[i].memoryGB = beat.memoryGB
             }
         }
-        world.updateLending { $0.limitGB = beat.lendGB }
         lastActive = beat.active
         let unlock = world.applyLendingStatus(active: beat.active)
-        if beat.active, let pool = world.state.lendingPool {
+        if beat.active, let pool = world.state.lendingPools.first {
             if let forced = forcedWorking { working = forced } else if Double.random(in: 0...1) < 0.2 { working.toggle() }
             if working || pool.isPublic || !pool.offersIdleToNetwork {
                 network = false
@@ -341,6 +362,11 @@ final class MockCloud {
             res.error(404, "No pool \(poolID) is running a model right now.", type: "not_found_error"); return
         }
         guard pool.isPublic || pool.isMember(s.meID) else { res.error(403, "You're not in \(pool.name).", type: "permission_error"); return }
+        // Only my Macs: every Mac lending here must be yours, or it doesn't run at all
+        let friendsLend = pool.macs.contains { $0.state == .lending && $0.macID != s.thisMacID && s.device($0.macID)?.ownerID != s.meID }
+        if r.headers["x-dots-privacy"] == PrivacyLevel.mine.wire, friendsLend || pool.crowdLending > 0 {
+            res.error(409, "only my Macs: this pool's model is on Macs that aren't yours, so it didn't run", type: "conflict_error"); return
+        }
         guard let body = ParsedRequest.parse(r.body, format: .openai) else { res.error(400, "Send a JSON body with a messages array."); return }
         let credits = pool.isPublic ? model.credits : 0
         guard Double(credits) <= s.credits else {

@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The dots menu: your pool and the master switch, how much this Mac lends and the level it reaches,
-/// tonight so far, when it lends, overnight, and your credits.
+/// The dots menu: your pools and the master switch, how much this Mac lends each pool, tonight so far, when it
+/// lends, overnight, and your credits.
 struct MenuBarPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -12,8 +12,8 @@ struct MenuBarPanel: View {
         let status = model.lendingStatus
         VStack(alignment: .leading, spacing: 8) {
             header(s, status)
-            if s.thisMac.maxLendGB > 0 { lendModule(s) }
-            if let pool = s.lendingPool { tonightModule(s, pool) }
+            if s.thisMac.maxLendGB > 0, !s.myPools.isEmpty { lendModule(s) }
+            if !s.lendingPools.isEmpty { servedModule(s) }
             VStack(spacing: 0) {
                 toggleRow("Only when plugged in", on: s.lending.onlyWhenPluggedIn,
                           note: model.signals.onPower ? nil : "On battery now") { model.setOnlyWhenPluggedIn($0) }
@@ -38,7 +38,7 @@ struct MenuBarPanel: View {
 
     private func header(_ s: NetworkState, _ status: LendingStatus) -> some View {
         HStack(spacing: 11) {
-            if let pool = s.lendingPool {
+            if let pool = s.lendingPools.first {
                 MiniRings(pool: pool, size: 36, live: status.isActive)
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
             } else {
@@ -47,7 +47,8 @@ struct MenuBarPanel: View {
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(D.bg0))
             }
             VStack(alignment: .leading, spacing: 2) {
-                poolName(s)
+                Text(s.lendingPools.isEmpty ? "\(s.thisMac.kind) · \(s.thisMac.memoryGB) GB" : s.lendingPools.map(\.name).formatted(.list(type: .and)))
+                    .font(D.ui(13.5, .semibold)).foregroundStyle(D.t1).lineLimit(1)
                 HStack(spacing: 6) {
                     if status.isActive { Circle().fill(D.accent).frame(width: 6, height: 6).modifier(Blink(on: !isSnapshot)) }
                     Text(statusLine(status)).lineLimit(1)
@@ -61,27 +62,6 @@ struct MenuBarPanel: View {
         .padding(.horizontal, 4).padding(.top, 4).padding(.bottom, 6)
     }
 
-    /// The pool this Mac lends to, and a menu to move it to another of your pools.
-    @ViewBuilder private func poolName(_ s: NetworkState) -> some View {
-        let name = Text(s.lendingPool?.name ?? "\(s.thisMac.kind) · \(s.thisMac.memoryGB) GB").font(D.ui(13.5, .semibold)).foregroundStyle(D.t1)
-        if isSnapshot || s.myPools.count < 2 {
-            name
-        } else {
-            Menu {
-                ForEach(s.myPools) { pool in
-                    Button { model.join(pool) } label: { Text("\(pool.name) · \(pool.model?.name ?? "")") }
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    name
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(D.t4)
-                }
-            }
-            .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain)
-            .fixedSize()
-        }
-    }
-
     private func statusLine(_ status: LendingStatus) -> String {
         guard status.isActive, let w = model.backend.worker else { return "\(status.headline) · \(status.detail)" }
         if w.network { return "Network work, through \(w.poolName)" }
@@ -89,40 +69,50 @@ struct MenuBarPanel: View {
         return w.lastLayer == w.layers - 1 ? "Running the final \(n) layers" : "Running layers \(w.firstLayer + 1) to \(w.lastLayer + 1)"
     }
 
-    /// How much this Mac lends, with a mark where the pool reaches its next level.
+    /// How much this Mac lends each of your pools, every slider on the same scale (the whole of what it can lend),
+    /// so a pool can only take what the others leave. A mark shows where a pool reaches its next level.
     private func lendModule(_ s: NetworkState) -> some View {
         let mac = s.thisMac
-        let limit = s.lending.limitGB
-        let line = nextLine(for: s)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                if let line {
-                    Text(limit >= line.gb ? "Level \(line.level) unlocked" : "\(line.gb - limit) GB to Level \(line.level)")
-                        .font(D.ui(15, .semibold)).tracking(-0.2).foregroundStyle(limit >= line.gb ? D.accentText : D.t1)
-                    Spacer()
-                    Text(line.label).font(D.ui(11.5)).foregroundStyle(Color(hex: 0xEBEBF5, opacity: 0.6))
-                } else {
-                    Text("Lend up to").font(D.ui(15, .semibold)).tracking(-0.2).foregroundStyle(D.t1)
-                    Spacer()
-                    Text("\(limit) GB").font(D.ui(13, .semibold).monospacedDigit()).foregroundStyle(D.t2)
+                Text("Lending \(s.lentGB) of \(mac.maxLendGB) GB").font(D.ui(15, .semibold).monospacedDigit()).tracking(-0.2)
+                    .foregroundStyle(D.t1)
+                Spacer()
+                Text("\(max(0, mac.maxLendGB - s.lentGB)) GB free").font(D.ui(11.5).monospacedDigit())
+                    .foregroundStyle(Color(hex: 0xEBEBF5, opacity: 0.6))
+            }
+            ForEach(s.myPools) { pool in
+                let gb = s.share(in: pool.id)?.gb ?? 0
+                let line = nextLine(for: s, in: pool)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(pool.name).font(D.ui(12.5, .medium)).foregroundStyle(D.t2)
+                        Spacer()
+                        Text("\(gb) GB").font(D.ui(12.5, .semibold).monospacedDigit()).foregroundStyle(gb > 0 ? D.t1 : D.t4)
+                    }
+                    ThinSlider(value: Binding(get: { gb }, set: { model.setShare(pool, gb: $0) }), range: 0...max(1, mac.maxLendGB),
+                               mark: line?.gb, label: "Lend to \(pool.name)")
+                        .help(line.map { "The mark is where \(pool.name) reaches Level \($0.level), \($0.label)." }
+                              ?? "\(mac.keptGB) GB always stays with your Mac.")
                 }
             }
-            ThinSlider(value: Binding(get: { limit }, set: { model.setLimit($0) }), range: 0...max(1, mac.maxLendGB),
-                       mark: line?.gb, label: "Lend up to")
-                .help("\(mac.keptGB) GB always stays with your Mac" + (line.map { ". The mark is where the pool reaches Level \($0.level)." } ?? "."))
-            Text("Lending \(limit) of \(mac.maxLendGB) GB")
-                .font(D.ui(11.5).monospacedDigit()).foregroundStyle(Color(hex: 0xEBEBF5, opacity: 0.6))
         }
         .module()
     }
 
-    /// Tonight so far, in the pool this Mac lends to.
-    private func tonightModule(_ s: NetworkState, _ pool: Pool) -> some View {
+    /// What this Mac has done in the pools it lends to, and what it earned lately: the ledger's last hour from a
+    /// real cloud, tonight's lending from the mock.
+    private func servedModule(_ s: NetworkState) -> some View {
+        let ids = Set(s.lendingShares.map(\.poolID))
+        let served = ids.map { s.served(in: $0) }
         let night = Date().nightStart
-        let runs = (s.nights ?? []).filter { $0.date == night && $0.poolID == pool.id }.reduce(0) { $0 + $1.runs }
-        let earned = s.creditLog.filter { $0.date >= night && $0.amount > 0 && $0.poolID == pool.id && ($0.kind == "lend" || $0.kind == "network") }.reduce(0) { $0 + $1.amount }
-        return StatRow(stats: [.init(value: runs.grouped, label: "runs tonight"), .init(value: Runs.tokens(runs), label: "tokens"),
-                               .init(value: "+\(earned.grouped)", label: "credits", accent: true)], size: 18)
+        let tonight = s.creditLog.filter { $0.date >= night && $0.amount > 0 && ids.contains($0.poolID ?? "") && ($0.kind == "lend" || $0.kind == "network") }
+            .reduce(0) { $0 + $1.amount }
+        let earning = model.backend.earning
+        return StatRow(stats: [.init(value: served.reduce(0) { $0 + $1.runs }.grouped, label: "answered"),
+                               .init(value: Runs.short(served.reduce(0) { $0 + $1.tokens }), label: "tokens"),
+                               .init(value: "+\((earning?.lastHour ?? tonight).grouped)", label: earning == nil ? "tonight" : "this hour",
+                                     accent: true)], size: 18)
             .module()
     }
 
@@ -189,9 +179,8 @@ struct MenuBarPanel: View {
         .padding(.horizontal, 6).frame(height: 30)
     }
 
-    /// The next level this Mac's lending could reach in its pool, or the one it holds: the GB to lend, the level, the model.
-    private func nextLine(for s: NetworkState) -> (gb: Int, level: Int, label: String)? {
-        guard let pool = s.lendingPool else { return nil }
+    /// The next level this Mac's lending could reach in a pool, or the one it holds: the GB to lend, the level, the model.
+    private func nextLine(for s: NetworkState, in pool: Pool) -> (gb: Int, level: Int, label: String)? {
         let mine = pool.macs.first { $0.macID == s.thisMacID && $0.state == .lending }?.lendGB ?? 0
         let others = pool.pooledGB - mine
         func level(_ t: ModelTier) -> Int { (Ladder.tiers.firstIndex { $0.id == t.id } ?? 0) + 1 }

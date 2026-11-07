@@ -23,6 +23,7 @@ The second half of this page covers the API dots serves to your own apps on `loc
 ## Conventions
 
 - One base URL and one token for all three parts, sent as `Authorization: Bearer <token>`. The mock's token is `dots_mock_local`. Without it, every call is a 401.
+- A cloud serves its owner (the cloud's own token) and every friend who joined through an invite (each with a token of their own). Each sees the sync as themselves: their lending, shares, badges and spends. Looking at an invite and joining through one need no token.
 - Bodies are JSON with ISO 8601 dates and camelCase fields. The hub's and the gateway's answers use OpenAI's and Anthropic's own formats.
 - Errors are `{"error": {"message": "…", "type": "…"}}`. The types are `authentication_error` (401), `invalid_request_error` (400), `insufficient_credits` (402), `permission_error` (403) and `not_found_error` (404). The gateway's `/messages` uses Anthropic's error shape instead.
 - Every change answers with the whole sync (below), so the app sees the result without a second call.
@@ -60,7 +61,7 @@ The second half of this page covers the API dots serves to your own apps on `loc
 | `badges` | `{id, symbol, title, detail, date, isNew}`. The ids are `hours-100`, `unlock-<pool>-<model>`, `backer-<pool>` and `starter`. |
 | `questionsHelped`, `hoursLent`, `computePF` | Your Mac's totals: the runs it took part in, the hours it lent, and `computePF`, the compute the hub measured, in petaFLOPs. |
 | `nights` | The nights this Mac lent, oldest first: `{date, poolID, minutes, runs, from, to}`. Nights run from noon to noon; `date` is the noon one began. Tonight's grows as the Mac lends. |
-| `lendingPoolID`, `lendingSince` | The one pool this Mac lends to |
+| `lendingShares` | The pools this Mac lends to, an amount to each: `{poolID, gb, since, hubPool}`. `hubPool` is the pool's name at the hub, which that pool's worker gives (`--pool`); the hub's own pool is `""`. The app runs one worker per share, held to its `gb`. |
 | `networkLendingNow`, `endorsedBefore` | Macs lending across the network, and endorsements from before this history |
 
 ### A pool
@@ -84,6 +85,9 @@ The second half of this page covers the API dots serves to your own apps on `loc
 - A Mac's `state` is `lending`, `online` or `asleep`.
 - A public pool counts its Macs in `crowdMacs`, `crowdLending` and `crowdGB` rather than listing them.
 - What a pool runs follows from the memory its lending Macs pool together. The ladder is in `dots/Model/Models.swift`: Qwen3 235B at 136 GB, DeepSeek V3.1 at 396 and Kimi K2 at 620. `servesModelID` lets a pool prefer a model, such as a coding model.
+- A pool started from a link runs that one model, whatever its memory: `servesModelID`, `modelName`, `kind` (`text` or `pictures`) and `modelGB`, the size of its weights, read from the repo. A pool that writes text needs that much across its Macs; a pool that draws needs it on one Mac, so a Mac with less can join it and ask it but not lend to it.
+- Each line of the ladder says whether its model reads images (`readsImages`): a question with an image only goes
+  to a pool whose model does.
 - `unlocks` records each model the pool reached: `{id, modelID, byMacID, fromGB, toGB, date}`. `byMacID` is the Mac that tipped it over.
 - `phase` shapes the pool's emblem. `speedFactor` scales the speed you get, and `demand` scales what a lending Mac earns.
 - `boost` is a window, at any time of day, when the pool's members commit their Macs at once, to reach a bigger model for a few hours. Its target is that model's line on the ladder. A pledge from someone outside the pool is a `guest`, boosting just that once. Through the window, the app keeps a pledged Mac awake and lending its pledge to that pool, then puts its lending back as it was.
@@ -109,15 +113,15 @@ Lending adds one entry per session. The entry grows as the session goes on.
 
 ### POST /hub/v1/heartbeat
 
-The app's worker reports every couple of seconds. `active` is the result of this Mac's own rules: switched on, plugged in, idle, not paused.
+The app's worker reports every couple of seconds. `active` is the result of this Mac's own rules: switched on, plugged in, idle, not paused. They apply to all its shares at once; the time counts in each pool it lends to.
 
 ```json
-{ "active": true, "lendGB": 16, "seconds": 2.0, "macKind": "MacBook Air", "memoryGB": 24 }
+{ "active": true, "seconds": 2.0, "macKind": "MacBook Air", "memoryGB": 24 }
 ```
 
 `seconds` is the time since the last report. The demo speed in Settings scales it.
 
-The answer is `{sync, unlock}`. `unlock` is set when this report took the pool over a line.
+The answer is `{sync, unlock}`. `unlock` is set when this report took a pool over a line; its `poolID` says which.
 
 While a Mac lends, the hub does three things:
 
@@ -127,7 +131,13 @@ While a Mac lends, the hub does three things:
 
 ### POST /hub/v1/pools/:id/chat/completions
 
-A pool's answer, in OpenAI's chat completions format. Public pools charge the model's credits. Your own pools are free. A streamed answer carries `dots` events beside the usual chunks:
+A pool's answer, in OpenAI's chat completions format. Public pools charge the model's credits. Your own pools are free.
+
+The sync's `cloud.address` is where friends reach this cloud, when it says (`DOTS_CLOUD_PUBLIC_URL`); invite links carry it as `dots://invite/CODE?cloud=…`.
+
+`X-Dots-Privacy: mine` asks for Only my Macs: the hub runs it only when every Mac holding the model is yours, and otherwise answers 409 without running it anywhere. The same header on a pool's pictures draws only on a Mac of yours. The app sends it for your documents and photos. `X-Dots-Privacy: pools` (My pools, for questions that look personal) runs the question's head, the part that reads the question and writes the answer, on your own Mac when you lend to the pool: a model split across Macs is laid out again with your Mac at the front. The rest may go anywhere and send no header.
+
+A streamed answer carries `dots` events beside the usual chunks:
 
 ```
 data: {"choices":[{"delta":{},"index":0}],"dots":{"event":"macs","macs":[{"id":"mac-maya","initial":"M","name":"Maya"}],"model":"Qwen3 235B","pool":"Studio 9","simulated":true},…}
@@ -138,6 +148,11 @@ data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"promp
 data: [DONE]
 ```
 
+- A pool draws pictures at `POST /hub/v1/pools/:id/images/generations` and changes them at `.../images/edits`, in
+  OpenAI's image API, streamed as they form (`image_generation.partial_image` after each step, then `...completed`).
+  Ask sends a question there when it asks for a picture, and shows each step as it comes.
+- A question can carry images as OpenAI-style parts, `{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}`,
+  sent inline. The app shrinks them to `imageMaxPixels` first.
 - `macs` comes first and lists the Macs answering.
 - `asleep` and `resumed` mark a Mac that went to sleep mid-answer while the others carried on.
 - The last chunk has the usage and what the answer cost.
@@ -153,7 +168,8 @@ The mock simulates the words, unless pools are given a model to come from. The a
 | Call | Body | Answer |
 | --- | --- | --- |
 | `POST /v1/pools` | `{id, name, isPublic}` | `{pool, sync}`. The app picks the id, so its pool and the cloud's are the same one. |
-| `POST /v1/pools/:id/join` | | `{macNumber, poolID, unlock, sync}`. A Mac lends to one pool at a time. |
+| `POST /v1/pools/:id/join` | `{gb}` | `{macNumber, poolID, unlock, sync}`. Joining lets you ask the pool; `gb` above 0 also lends it that much. A Mac can lend to several pools, an amount to each. |
+| `POST /v1/pools/:id/share` | `{gb}` | sync. How much this Mac lends a pool it is in; 0 stops lending there and stays in it. |
 | `POST /v1/pools/:id/leave` | | sync |
 | `POST /v1/pools/:id/endorse` | | `{badge, sync}`. Once per person. Under 20 Macs, it earns Early backer. |
 | `POST /v1/pools/:id/invite` | `{code}` | `{invite, sync}`. Good for a week. |
@@ -162,7 +178,8 @@ The mock simulates the words, unless pools are given a model to come from. The a
 | `POST /v1/pools/:id/boost/pledge` | `{gb}` | sync. Counts you in for the pool's boost, as a guest if you're not in the pool. |
 | `DELETE /v1/pools/:id/boost/pledge` | | sync. Counts you out. |
 | `GET /v1/invites/:code?memory_gb=24` | | The invite, and what a Mac with that memory would add and unlock (below) |
-| `POST /v1/invites/:code/accept` | | As join |
+| `POST /v1/invites/:code/accept` | `{gb}` | As join |
+| `POST /v1/invites/:code/join` | `{name, account, gb}` | For someone new, with no token: as join, plus `{token, personID, macID}`. `account` is the account their Mac's workers carry; one already here is refused (409). The token is shown this once. |
 | `PATCH /v1/me` | `{name}` | sync |
 | `POST /v1/badges/seen` | | sync |
 | `GET /v1/pricing` | | `terms` |
@@ -221,7 +238,8 @@ The app serves one API on `localhost:8787`, in OpenAI's format and Anthropic's. 
 `model: "auto"` lets dots pick where each request runs. It considers places in this order:
 
 1. **Privacy.** A personal question, or any request from a private key, stays on this Mac or in your own pools.
-2. **Tools and images.** These only go to a frontier model.
+2. **Tools and images.** Tools only go to a frontier model. Images go to a model that reads them: Claude, or a pool
+   whose model has `readsImages` on its line of the ladder.
 3. **This Mac.** It takes everyday questions that fit its 32,000-token context.
 4. **Your own pools.** They're free, when their model is big enough for the request.
 5. **Paid places.** Public pools, then Claude. When the request is hard or you prefer quality, Claude comes first.

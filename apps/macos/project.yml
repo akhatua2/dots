@@ -18,15 +18,40 @@ targets:
     platform: macOS
     sources:
       - path: dots
+    # The worker ships inside the app, with uv for the drawing tool, so lending works the first time it's switched on:
+    # the single-file engine
+    # (core/packaging/worker.spec, `uv run --extra dev --extra mac pyinstaller packaging/worker.spec` in core/) is
+    # copied into Resources when it has been built
+    postCompileScripts:
+      - name: Bundle the worker
+        basedOnDependencyAnalysis: false
+        script: |
+          worker="$SRCROOT/../../core/dist/dots-worker"
+          if [ -f "$worker" ]; then
+            cp "$worker" "$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/dots-worker"
+          else
+            echo "warning: no packaged worker at $worker; the app will lend only with DOTS_WORKER set"
+          fi
+          # uv, beside the worker: it sets up the tool that draws pictures on first use, on any Mac
+          uv="$(command -v uv || echo "$HOME/.local/bin/uv")"
+          if [ -x "$uv" ]; then
+            cp "$uv" "$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/uv"
+          else
+            echo "warning: no uv found; Macs without it won't draw pictures"
+          fi
     info:
       path: dots/Info.plist
       properties:
         CFBundleURLTypes:
           - CFBundleURLName: com.sourabhdaroji.dots.invite
             CFBundleURLSchemes: [dots]
+        # The cloud a fresh install connects to (DOTS_CLOUD_ADDRESS): the public one on the hub VM (infra/README.md);
+        # empty, the built-in mock
+        DotsCloudAddress: $(DOTS_CLOUD_ADDRESS)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sourabhdaroji.dots
+        DOTS_CLOUD_ADDRESS: "https://8-231-51-68.sslip.io"
         PRODUCT_NAME: dots
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: dots

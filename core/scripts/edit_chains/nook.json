@@ -1,0 +1,7 @@
+[
+ {"edit": "Make the pillow on the sofa blue. Change nothing else.", "box": [40, 335, 240, 490], "check": "Is the pillow on the sofa blue?", "expect": "yes"},
+ {"edit": "Remove the framed picture from the wall. Change nothing else.", "box": [0, 50, 80, 170], "check": "Is there a framed picture hanging on the wall?", "expect": "no"},
+ {"edit": "Make the lampshade green. Change nothing else.", "box": [25, 200, 130, 285], "check": "Is the lampshade green?", "expect": "yes"},
+ {"edit": "Put a red apple in the bowl on the windowsill. Change nothing else.", "box": [330, 285, 425, 345], "check": "Is there a red apple on the windowsill?", "expect": "yes"},
+ {"edit": "Add a sleeping black cat on the sofa. Change nothing else.", "box": [0, 290, 345, 512], "check": "Is there a black cat on the sofa?", "expect": "yes"}
+]

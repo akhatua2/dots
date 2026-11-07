@@ -73,3 +73,26 @@ export function saveConn(conn: Conn): void {
 export function clearConn(): void {
   localStorage.removeItem(LS_KEY)
 }
+
+// The connection as a store React reads with useSyncExternalStore. It changes only when an invite link
+// is opened in a tab that is already running (the fragment changes, no reload), so the snapshot stays
+// the same object between those moments.
+let current: Conn | null = loadConn()
+const listeners = new Set<() => void>()
+
+window.addEventListener('hashchange', () => {
+  const next = loadConn()
+  if (next) {
+    current = next
+    listeners.forEach((notify) => notify())
+  }
+})
+
+export function subscribeConn(notify: () => void): () => void {
+  listeners.add(notify)
+  return () => listeners.delete(notify)
+}
+
+export function currentConn(): Conn | null {
+  return current
+}

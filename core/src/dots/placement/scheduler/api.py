@@ -22,12 +22,16 @@ def schedule(
     querier_account: str | None = None,
     mode: Mode = "cheap",
     max_segments: int | None = None,
+    head_on: str | None = None,
 ) -> Placement | None:
     """Find a non-dominated placement of `units` over `workers`.
 
     Returns None if no feasible placement exists. Otherwise the returned
     placement is guaranteed to be non-dominated — no other feasible
     placement does better on both CU AND TPS.
+
+    `head_on`: only placements whose first segment (the head, which reads
+    the question and writes the answer) is on a worker of that account.
     """
     candidates = list(
         enumerate_placements(
@@ -38,6 +42,9 @@ def schedule(
             max_segments=max_segments,
         )
     )
+    if head_on is not None:
+        accounts = {w.worker_id: w.account_id for w in workers}
+        candidates = [c for c in candidates if c.segments and accounts.get(c.segments[0][0]) == head_on]
     if not candidates:
         return None
     survivors = non_dominated_placements(candidates)

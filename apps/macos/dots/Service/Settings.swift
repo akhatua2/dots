@@ -13,6 +13,11 @@ struct EndpointConfig: Codable, Equatable {
     var workspaceID: String? = nil
     /// A token handed over in code (the dots cloud's), used instead of a key from the Keychain. Never saved.
     var token: String? = nil
+    /// For a dots pool: whether a draft model may guess ahead on this request. Set per request, never saved.
+    var draftAhead: Bool? = nil
+    /// How far a request may go, which the hub holds to: Only my Macs is refused rather than run on anyone else's
+    /// Mac, and My pools runs its head on the asker's own Mac when they lend to the pool
+    var privacy: PrivacyLevel? = nil
 
     enum CodingKeys: String, CodingKey { case enabled, label, baseURL, model, keychainAccount, workspaceID }
 
@@ -71,16 +76,22 @@ struct RouterRules: Codable, Equatable {
 
 /// Where the dots cloud is: the mock on this Mac, or a cloud at an address.
 struct CloudSettings: Codable, Equatable {
-    var useMock = true
+    /// The cloud a fresh install uses: the one the app was built for (`DotsCloudAddress`, set in project.yml), or the
+    /// mock when it names none
+    static let builtIn = ((Bundle.main.object(forInfoDictionaryKey: "DotsCloudAddress") as? String) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    var useMock = CloudSettings.builtIn.isEmpty
     var mockPort = 8790
-    var address = ""
+    var address = CloudSettings.builtIn
 
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        useMock = try c.decodeIfPresent(Bool.self, forKey: .useMock) ?? true
-        mockPort = try c.decodeIfPresent(Int.self, forKey: .mockPort) ?? 8790
-        address = try c.decodeIfPresent(String.self, forKey: .address) ?? ""
+        let d = CloudSettings()
+        useMock = try c.decodeIfPresent(Bool.self, forKey: .useMock) ?? d.useMock
+        mockPort = try c.decodeIfPresent(Int.self, forKey: .mockPort) ?? d.mockPort
+        address = try c.decodeIfPresent(String.self, forKey: .address) ?? d.address
     }
 }
 
@@ -107,6 +118,14 @@ struct AppSettings: Codable, Equatable {
     var payFrontierWith: PayWith = .credits
     /// What your savings are measured against: the frontier model you'd otherwise send everything to
     var savingsBaseline = FrontierModel.opus.id
+    /// Let a pool's draft model guess ahead, so the pool checks several words at once
+    var draftAhead = true
+    /// Pictures are shrunk to this many pixels before they're sent: what a pool reads at most (DOTS_IMAGE_MAX_PIXELS)
+    var imageMaxPixels = 1_048_576
+    /// How big pictures are drawn, the longer side in pixels: sharper, or quicker (`Drawing.sides`)
+    var pictureSide = 1024
+    /// Whether the first launch's welcome has been through: who you are, and what this Mac lends
+    var onboarded = false
 
     init() {}
     /// Settings saved by an older dots load with defaults for anything new.
@@ -122,6 +141,11 @@ struct AppSettings: Codable, Equatable {
         cloud = try c.decodeIfPresent(CloudSettings.self, forKey: .cloud) ?? d.cloud
         payFrontierWith = try c.decodeIfPresent(PayWith.self, forKey: .payFrontierWith) ?? d.payFrontierWith
         savingsBaseline = try c.decodeIfPresent(String.self, forKey: .savingsBaseline) ?? d.savingsBaseline
+        draftAhead = try c.decodeIfPresent(Bool.self, forKey: .draftAhead) ?? d.draftAhead
+        imageMaxPixels = try c.decodeIfPresent(Int.self, forKey: .imageMaxPixels) ?? d.imageMaxPixels
+        pictureSide = try c.decodeIfPresent(Int.self, forKey: .pictureSide) ?? d.pictureSide
+        // Settings saved before the welcome existed belong to someone already set up
+        onboarded = try c.decodeIfPresent(Bool.self, forKey: .onboarded) ?? true
     }
 
     private static let defaultsKey = "dots.settings.v1"

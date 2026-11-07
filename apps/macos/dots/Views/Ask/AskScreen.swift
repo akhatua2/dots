@@ -2,36 +2,35 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Ask, as a screen of the main window. Laid out like a chat: your question and the answer in a centred
-/// column, the question box fixed at the bottom. With nothing asked yet the box sits in the middle.
+/// Ask, as a screen of the main window, laid out like a chat app: the open conversation in a centred
+/// column and the question box fixed below it. Your chats are listed in the sidebar. Each question is sent with the
+/// conversation before it, so a follow-up has its context.
 struct AskScreen: View {
     @Environment(AppModel.self) private var model
     @State private var dropTargeted = false
 
-    private var hasAsked: Bool { model.ask.phase != .idle || !model.ask.answer.isEmpty }
+    private var hasConversation: Bool { model.chats.current != nil || model.ask.phase != .idle }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if hasAsked {
-                conversation
-                AskComposer(placeholder: "Ask another question")
-                    .padding(.horizontal, 32).padding(.bottom, 24)
-                    .frame(maxWidth: Layout.column + 64)
-            } else {
-                welcome
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                if hasConversation {
+                    Conversation()
+                    AskComposer(placeholder: "Reply")
+                        .padding(.horizontal, 32).padding(.bottom, 24)
+                        .frame(maxWidth: Layout.column + 64)
+                } else {
+                    welcome
+                }
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(D.accent, lineWidth: 1.5).padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(D.accent, lineWidth: 1.5).padding(12)
+                }
             }
+            .modifier(FileDrop(enabled: true, targeted: $dropTargeted) { url in model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) })
         }
-        .modifier(FileDrop(enabled: true, targeted: $dropTargeted) { url in model.ask.attach(url) })
-    }
-
-    private enum Layout {
-        static let column: CGFloat = 680
     }
 
     /// Before the first question: a line to start from, and the box.
@@ -49,38 +48,77 @@ struct AskScreen: View {
         }
         .padding(.horizontal, 32)
     }
+}
 
-    /// The question, then the answer with its receipt folded to a line.
-    private var conversation: some View {
-        ZStack(alignment: .topTrailing) {
-            LiveScroll {
-                VStack(alignment: .leading, spacing: 22) {
-                    HStack {
-                        Spacer(minLength: 60)
-                        Text(model.ask.asked)
-                            .font(D.ui(15)).foregroundStyle(D.t1)
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 16).padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(D.raised))
+private enum Layout {
+    static let column: CGFloat = 680
+}
+
+/// The open conversation: every finished turn, then the one being answered now.
+private struct Conversation: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let ask = model.ask
+        let live = ask.phase != .idle
+        LiveScroll {
+            VStack(alignment: .leading, spacing: 26) {
+                ForEach(model.chats.current?.turns ?? []) { turn in
+                    // The turn being shown live below is drawn there, with its second opinion.
+                    if !(live && turn.id == ask.recordedTurnID) {
+                        QuestionBubble(text: turn.question, attachment: turn.attachment)
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let name = turn.picture {
+                                PictureAnswer(image: model.chats.picture(name))
+                            } else {
+                                MarkdownText(text: turn.answer)
+                            }
+                            AnswerActions(turn: turn)
+                        }
                     }
-                    AskBody(compact: true)
                 }
-                .padding(.horizontal, 32).padding(.top, 56).padding(.bottom, 20)
-                .frame(maxWidth: Layout.column + 64, alignment: .leading)
-                .frame(maxWidth: .infinity)
+                if live {
+                    QuestionBubble(text: ask.asked, attachment: ask.attachment?.name)
+                    VStack(alignment: .leading, spacing: 8) {
+                        AskBody(compact: true)
+                        if ask.phase == .done, let turn = model.chats.current?.turns.first(where: { $0.id == ask.recordedTurnID }) {
+                            AnswerActions(turn: turn)
+                        }
+                    }
+                }
+                Color.clear.frame(height: 1).id("end")
             }
-            .scrollIndicators(.never)
+            .padding(.horizontal, 32).padding(.top, 56).padding(.bottom, 20)
+            .frame(maxWidth: Layout.column + 64, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .defaultScrollAnchor(.bottom)
+        .scrollIndicators(.never)
+    }
+}
 
-            Button { model.ask.clear() } label: {
-                Label("New question", systemImage: "plus").font(D.ui(12.5, .medium))
+/// What you asked, on the right, with the file or photo it came with.
+struct QuestionBubble: View {
+    var text: String
+    var attachment: String?
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 60)
+            VStack(alignment: .trailing, spacing: 4) {
+                if let attachment {
+                    Label(attachment, systemImage: Pictures.isPicture(URL(fileURLWithPath: attachment)) ? "photo" : "doc")
+                        .font(D.ui(11.5)).foregroundStyle(D.t4)
+                }
+                Text(text).font(D.ui(15)).foregroundStyle(D.t1).textSelection(.enabled)
             }
-            .buttonStyle(.plain).foregroundStyle(D.t3)
-            .padding(.horizontal, 32).padding(.top, 16)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(D.raised))
         }
     }
 }
 
-/// The question box: a paperclip or the attached file, the text, the route, and send.
+/// The question box: a paperclip or the attached file or picture, the text, the route, and send.
 struct AskComposer: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focused: Bool
@@ -90,19 +128,11 @@ struct AskComposer: View {
         @Bindable var ask = model.ask
         VStack(alignment: .leading, spacing: 10) {
             if let attachment = ask.attachment {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc").font(.system(size: 11, weight: .medium))
-                    Text(attachment.name).font(D.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
-                    Button { ask.attachment = nil } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                        .buttonStyle(.plain).foregroundStyle(D.t4)
-                }
-                .foregroundStyle(D.t2)
-                .padding(.horizontal, 10).frame(height: 26)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
+                AttachmentChip(attachment: attachment, height: 30) { ask.attachment = nil }
             }
             TextField(placeholder, text: $ask.input, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(D.ui(16)).foregroundStyle(D.t1)
+                .font(D.ui(14)).foregroundStyle(D.t1)
                 .lineLimit(1...8)
                 .focused($focused)
                 .onSubmit(send)
@@ -134,14 +164,14 @@ struct AskComposer: View {
 
     private func pickFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .plainText, .text, .sourceCode, .json, .commaSeparatedText]
+        panel.allowedContentTypes = AskController.attachable
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url) }
+        if panel.runModal() == .OK, let url = panel.url { model.ask.attach(url, maxPixels: model.settings.imageMaxPixels) }
     }
 }
 
-/// The round orange send button. It dims when there is nothing to send and shows progress while an answer is on its way.
-private struct SendButton: View {
+/// The round orange send button (Ask's and Draw's). It dims when there is nothing to send and shows progress while an answer is on its way.
+struct SendButton: View {
     var enabled: Bool
     var busy: Bool
     var action: () -> Void

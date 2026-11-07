@@ -9,7 +9,10 @@ protocol DotsBackend: AnyObject {
     var state: NetworkState { get }
 
     // Pools
-    func join(poolID: String) -> JoinOutcome
+    /// Joins a pool to ask it, lending it `gb` when that is more than 0
+    func join(poolID: String, gb: Int) -> JoinOutcome
+    /// How much this Mac lends a pool it is in; 0 stops lending there
+    func setShare(poolID: String, gb: Int)
     func leave(poolID: String)
     func endorse(poolID: String) -> Badge?
     func createPool(name: String, isPublic: Bool) -> Pool
@@ -20,7 +23,7 @@ protocol DotsBackend: AnyObject {
 
     // Lending
     func updateLending(_ change: (inout LendingSettings) -> Void)
-    /// Moves this Mac in or out of its pool's lending set, and reports an unlock it caused.
+    /// Moves this Mac in or out of its pools' lending sets, and reports an unlock it caused.
     func applyLendingStatus(active: Bool) -> UnlockEvent?
 
     // Credits and usage

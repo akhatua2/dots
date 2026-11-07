@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("mlx")
 
 import mlx.core as mx
-from dots.backends.mlx.runtime import _apply_repetition_penalty
+from dots.backends.mlx.runtime import _apply_repetition_penalty, penalized
 
 
 def test_penalty_is_noop_when_disabled_or_no_history():
@@ -45,3 +45,14 @@ def test_penalty_shrinks_logits_toward_zero_by_sign():
     assert vals[0] == 2.0  # positive divided
     assert vals[1] == -8.0  # negative multiplied (pushed further down)
     assert vals[2] == 2.0  # untouched
+
+
+def test_penalty_on_the_gpu_matches():
+    """Chained guesses penalize on the GPU, from an array of ids that may repeat; same result."""
+    mx.random.seed(1)
+    row = mx.random.normal((50,)) * 4
+    seen = [3, 7, 7, 12, 3, 49]
+    expected = _apply_repetition_penalty(mx.array(row), seen, 1.3)
+    got = penalized(row[None], mx.array(seen), 1.3)[0]
+    assert mx.allclose(got, expected).item()
+    assert penalized(row, mx.array([], dtype=mx.int32), 1.3) is row

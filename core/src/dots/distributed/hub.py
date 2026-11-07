@@ -39,6 +39,7 @@ from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import Pool, resource_decl_from_hello
 from ..placement.scheduler import Placement, WorkUnit, schedule
+from .chain_timing import describe as describe_chain
 from ..system.util import dots_home
 from ..system.geo import sanitize_geo
 from ..placement.work_units import ModelGeometry, units_for_geometry
@@ -56,6 +57,47 @@ _PLACEMENT_RAM_MARGIN_ENV = "DOTS_PLACEMENT_RAM_MARGIN_GB"
 _HEAD_WORKSPACE_RAM_ENV = "DOTS_HEAD_WORKSPACE_RAM_GB"
 
 
+def _head_flops(geometry: ModelGeometry) -> float:
+    """The head's own work per token: the output layer, a vocabulary-by-hidden matrix multiply.
+
+    For Qwen2.5 (152K words, hidden size 1536) it is about six decoder layers' worth, so where the head
+    sits changes how fast a token comes back.
+    """
+    return float(2 * geometry.vocab_size * geometry.hidden_size)
+
+
+def _note_speed(deployment: "ModelDeployment", resp: dict, hops: int) -> float | None:
+    """Folds a finished turn's decode speed into the model's recent speed.
+
+    A turn without a draft model also updates the plain speed for a chain of `hops` peers. A turn with one
+    returns how much faster it was than that plain speed, once there is one to compare with.
+    """
+    decoded = int(resp.get("decode_tokens") or 0)
+    seconds = float(resp.get("elapsed_ms") or 0) / 1000
+    if decoded < 2 or seconds <= 0:
+        return None
+    rate = decoded / seconds
+
+    def blend(old: float | None) -> float:
+        return rate if not old else 0.7 * old + 0.3 * rate
+
+    deployment.tok_per_sec = blend(deployment.tok_per_sec)
+    if resp.get("draft_proposed"):
+        plain = deployment.plain_tok_per_sec.get(hops)
+        return round(rate / plain, 2) if plain else None
+    deployment.plain_tok_per_sec[hops] = blend(deployment.plain_tok_per_sec.get(hops))
+    return None
+
+
+def _speculation_note(resp: object) -> str:
+    """How much a draft model helped a turn, from the head worker's stats; empty when none ran."""
+    if not isinstance(resp, dict) or not resp.get("draft_proposed"):
+        return ""
+    passes = resp.get("verify_passes") or 1
+    return (f" · draft kept {resp.get('draft_accepted', 0)}/{resp['draft_proposed']}"
+            f" · {resp.get('decode_tokens', 0) / passes:.1f} tokens a pass")
+
+
 def _float_policy(name: str, default: float) -> float:
     raw = os.environ.get(name)
     return default if raw is None else float(raw)
@@ -66,6 +108,8 @@ class Conversation:
     id: str
     history: list[dict] = field(default_factory=list)
     token_count: int = 0
+    # For the model's chat template, as vLLM takes them: {"enable_thinking": False}
+    template_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -84,6 +128,11 @@ class ModelDeployment:
     model_id: str
     n_layers: int = 0
     active_params: int = 0
+    # Recent decode speed in tokens a second, a moving average over finished turns; 0 until one finishes
+    tok_per_sec: float = 0.0
+    # The same without a draft model, by how many Macs a turn's chain hopped to: what a drafted turn's
+    # speed is compared against
+    plain_tok_per_sec: dict[int, float] = field(default_factory=dict)
     geometry: ModelGeometry | None = None
     selected_backend: str | None = None
     current_placement: list[tuple[str, int, int, bool]] = field(default_factory=list)
@@ -101,6 +150,10 @@ def _sanitize_device(d: object) -> str | None:
     if isinstance(d, str) and d.strip():
         return d.strip()[:80]
     return None
+
+
+class NoImageMac(RuntimeError):
+    """Nothing in the pool can draw: no worker offers an image model."""
 
 
 @dataclass
@@ -136,6 +189,10 @@ class Participant:
     # Worker-advertised device name for the pool map, e.g. "MacBook Pro · Apple
     # M1 Pro". Best-effort; None if the worker didn't send one.
     device: str | None = None
+    # The originals this worker can draw models of, with the runners it has (image_tools/runners.toml)
+    images: list[str] | None = None
+    # The pool it lends to: it runs only that pool's model. "" is the hub's default pool.
+    pool: str = ""
     conv: Conversation = field(
         default_factory=lambda: Conversation(id=str(uuid.uuid4()))
     )
@@ -191,6 +248,11 @@ class Hub:
         # FLOP-CU attribution.
 
         self.participants: dict[str, Participant] = {}
+        # Which pool each model runs for: a pool runs one model, on its own Macs only
+        self._model_pool: dict[str, str] = {}
+        # A model split across Macs runs its head on this account's Mac: the last person who asked it something kept
+        # in their pools (see want_head_on)
+        self._head_account: dict[str, str] = {}
         self._pool_lock = asyncio.Lock()
         # Set after the model is loaded AND the server is listening — useful
         # for callers (tests, embeddings) that want a deterministic ready signal.
@@ -221,10 +283,16 @@ class Hub:
         # client during a delegate_turn. Populated in `run_turn` and
         # consulted in `_on_delegate_token`.
         self._token_routers: dict[str, "asyncio.Future | object"] = {}
+        # Where a turn's unconfirmed draft text goes, when the asker wants to see it
+        self._draft_routers: dict[str, object] = {}
+        # job id -> where an image job's step previews go, while it is drawn
+        self._image_watchers: dict[str, object] = {}
         # Per-conv counter for tokens emitted so far. Used by the
         # run_turn watchdog to log progress on long turns + by
         # _on_delegate_token to detect the first-token arrival.
         self._turn_token_counts: dict[str, int] = {}
+        # The workers each in-flight turn runs on, so the pool can show who is serving right now.
+        self._serving: dict[str, set[str]] = {}
         self._model_turn_lock = asyncio.Lock()
 
     def _deployment_for(self, model_id: str | None = None) -> ModelDeployment:
@@ -296,6 +364,62 @@ class Hub:
     @_selected_backend.setter
     def _selected_backend(self, value: str | None) -> None:
         self._deployment_for().selected_backend = value
+
+    def image_models(self) -> list[str]:
+        """The originals the Macs here can draw models of"""
+        return sorted({o for p in self.participants.values() if p.compute and p.images for o in p.images})
+
+    def drawing_mac(self, pool: str = "", only_account: str | None = None, original: str | None = None) -> "Participant":
+        """Which Mac draws the next picture. Of those that offer an image model: one not answering a question
+        right now, then one that isn't the head of a text model (the head runs the first layers, the output
+        layer and the draft that guesses ahead on every answer), then the one with the most memory free,
+        since a picture needs several GB beyond the Mac's share of the text model.
+
+        `only_account`: only that person's own Macs ("Only my Macs"), and none at all rather than anyone else's.
+        `original`: only Macs that can draw models made from it."""
+        offering = [p for p in self.participants.values() if p.compute and p.images and p.pool == pool
+                    and (original is None or original in p.images)
+                    and (only_account is None or p.account_id == only_account)]
+        if not offering:
+            raise NoImageMac("none of your Macs in the pool draws right now" if only_account
+                             else "no Mac in the pool offers images right now")
+
+        def free_gb(p) -> float:
+            decl = self.pool_view.resources.get(p.id)
+            return decl.ram_gb_free if decl is not None else 0.0
+
+        def is_head(p) -> bool:
+            return p.layer_range is not None and p.layer_range[0] == 0
+
+        return min(offering, key=lambda p: (self.is_serving(p.id), is_head(p), -free_gb(p)))
+
+    def only_on(self, deployment, account: str) -> bool:
+        """Whether every Mac holding a model's layers is `account`'s own: what "Only my Macs" asks for."""
+        holders = [self.participants.get(worker_id) for worker_id, *_ in deployment.current_placement]
+        return bool(holders) and all(p is not None and p.account_id == account for p in holders)
+
+    async def make_image(self, on_step=None, pool: str = "", only_account: str | None = None, **job) -> dict:
+        """Draws a picture, whole, on the Mac `drawing_mac` picks. Returns the worker's answer: base64 `png`,
+        `model`, `ms`, and which Mac drew it. `on_step(step, of, preview)` gets the picture as it forms, a
+        base64 JPEG after each step."""
+        worker = self.drawing_mac(pool, only_account, job.get("original"))
+        ui.notice(f"image on worker·{worker.short_id} ({job.get('model')})")
+        job_id = uuid.uuid4().hex
+        if on_step is not None:
+            self._image_watchers[job_id] = on_step
+        try:
+            resp = await worker.conn.call("make_image", job_id=job_id, **job)
+        except ConnectionError as e:
+            raise RuntimeError(f"the Mac drawing it dropped: {e}") from e
+        finally:
+            self._image_watchers.pop(job_id, None)
+        if resp.get("kind") != "image_ok":
+            raise RuntimeError(resp.get("error", "the image failed"))
+        return {**resp, "worker_id": worker.id}
+
+    def is_serving(self, worker_id: str) -> bool:
+        """Whether a worker is part of a turn being answered right now."""
+        return any(worker_id in workers for workers in self._serving.values())
 
     @property
     def _current_placement(self) -> list[tuple[str, int, int, bool]]:
@@ -453,7 +577,7 @@ class Hub:
             (
                 p
                 for p in self.participants.values()
-                if p.compute and self._worker_supports_selected_backend(p)
+                if p.compute and self._worker_supports_selected_backend(p) and self.in_pool(p, self.model_id)
             ),
             key=lambda p: p.id,
         )
@@ -507,7 +631,8 @@ class Hub:
         # scheduler will only place it on a worker that can hold
         # embed + lm_head + working memory in addition to its layer share.
         # That's how we constrain "head must fit at segment 0" without
-        # the scheduler needing to know about head modules.
+        # the scheduler needing to know about head modules. Its compute
+        # rides on layer 0 the same way, so the head goes where it is fast.
         per_layer_flops = float(
             2 * TRANSFORMER_LAYER_FLOP_PARAM_FACTOR * (self._geometry.hidden_size**2)
         )
@@ -519,7 +644,7 @@ class Hub:
                 WorkUnit(
                     unit_id=f"block_{i}",
                     ram_required_gb=unit_ram + (margin_gb if i == 0 else 0),
-                    flops_per_token=per_layer_flops,
+                    flops_per_token=per_layer_flops + (_head_flops(self._geometry) if i == 0 else 0.0),
                 )
             )
 
@@ -540,21 +665,28 @@ class Hub:
             deployment.current_placement = []
             return []
 
-        placement = schedule(
-            units,
-            workers_snapshot,
-            latency,
-            querier_account=None,
-            mode="cheap",
-            max_segments=len(workers_snapshot),
-        )
+        def place(head_on: str | None):
+            return schedule(units, workers_snapshot, latency, querier_account=None, mode="cheap",
+                            max_segments=len(workers_snapshot), head_on=head_on)
+
+        # The head on the Mac of whoever asked for it (want_head_on), when that Mac can hold it there
+        wanted = self._head_account.get(self.model_id)
+        placement = place(wanted) if wanted else None
+        if placement is None:
+            placement = place(None)
         if placement is None or not placement.segments:
             pool_ram = sum(free_ram(p) for p in compute_workers)
             short_by = max(0.0, model_ram_gb - pool_ram)
-            ui.notice(
-                f"need ~{short_by:.0f} GB more pool RAM to load this model "
-                f"(have {pool_ram:.1f} GB, model needs ~{model_ram_gb:.1f} GB)"
-            )
+            if short_by > 0:
+                ui.notice(
+                    f"need ~{short_by:.1f} GB more pool RAM to load this model "
+                    f"(have {pool_ram:.1f} GB, model needs ~{model_ram_gb:.1f} GB)"
+                )
+            else:
+                ui.notice(
+                    f"the pool has {pool_ram:.1f} GB, enough for this model's ~{model_ram_gb:.1f} GB in total, "
+                    "but no split fits each Mac's share; a Mac with more room to lend would fix it"
+                )
             deployment.current_placement = []
             return []
 
@@ -758,6 +890,11 @@ class Hub:
                 return self._on_worker_ready(wid, msg)
             if kind == "delegate_token" and wid is not None:
                 return await self._on_delegate_token(wid, msg)
+            if kind == "image_step":
+                watcher = self._image_watchers.get(msg.get("job_id"))
+                if watcher is not None:
+                    await watcher(int(msg.get("step", 0)), int(msg.get("of", 0)), msg.get("preview", ""))
+                return None
             if kind == "load_progress" and wid is not None:
                 model_id = msg.get("model_id")
                 if not isinstance(model_id, str) or not model_id:
@@ -857,6 +994,8 @@ class Hub:
                 peer_ticket=peer_ticket,
                 geo=sanitize_geo(hello_msg.get("geo")),
                 device=_sanitize_device(hello_msg.get("device")),
+                images=_strings(hello_msg.get("images")),
+                pool=str(hello_msg.get("pool") or ""),
             )
             self.participants[worker_id] = participant
             if resource_decl is not None:
@@ -921,10 +1060,38 @@ class Hub:
             for deployment in list(self.deployments.values()):
                 await self._ensure_model_started_locked(deployment.model_id)
 
-    async def ensure_model_started(self, model_id: str) -> ModelDeployment:
-        """Create or start loading a model deployment if needed."""
+    async def ensure_model_started(self, model_id: str, pool: str | None = None) -> ModelDeployment:
+        """Create or start loading a model deployment if needed, on the Macs of `pool` (the pool that runs it).
+        Unnamed, the pool it was last started for (the hub's default pool at first)."""
+        if pool is not None:
+            self._model_pool[model_id] = pool
         async with self._model_turn_lock:
             return await self._ensure_model_started_locked(model_id)
+
+    def want_head_on(self, model_id: str, account: str) -> None:
+        """A question kept in your pools runs its head on your own Mac when you lend to the pool. The head runs the
+        first layers and the output that turns hidden states back into words, so it is the part that reads the
+        question and the answer; the other Macs see only hidden states. A model split across Macs is laid out again
+        with your Mac at the front, if it isn't already and your Mac can hold it there. A model that fits on one
+        Mac needs nothing: every Mac that can hold it keeps a copy, and your turn runs on your own."""
+        self._head_account[model_id] = account
+
+    def _head_misplaced(self, deployment: ModelDeployment) -> bool:
+        """Whether a split model's head should move to the account that asked for it, and can"""
+        wanted = self._head_account.get(deployment.model_id)
+        placement = deployment.current_placement
+        split = len(placement) >= 2 and placement[0][2] < deployment.n_layers
+        if not wanted or not split:
+            return False
+        head = self.participants.get(placement[0][0])
+        if head is not None and head.account_id == wanted:
+            return False
+        return any(p.compute and p.account_id == wanted and self.in_pool(p, deployment.model_id)
+                   for p in self.participants.values())
+
+    def in_pool(self, participant: "Participant", model_id: str | None) -> bool:
+        """Whether this Mac lends to the pool that runs `model_id`."""
+        return participant.pool == self._model_pool.get(model_id or "", "")
 
     async def _ensure_model_started_locked(self, model_id: str) -> ModelDeployment:
         self._activate_model(model_id)
@@ -1024,6 +1191,8 @@ class Hub:
             if decl is None or deployment.selected_backend not in decl.backends:
                 return False
         if self._can_add_full_replica_without_repartition(deployment):
+            return False
+        if self._head_misplaced(deployment):
             return False
         return True
 
@@ -1196,7 +1365,8 @@ class Hub:
         try:
             self._attribute_turn(
                 conv=conv,
-                participant=participant,
+                querier_account=participant.account_id,
+                querier_alias=participant.account_alias,
                 stats=stats,
                 model_id=model_id,
             )
@@ -1207,7 +1377,8 @@ class Hub:
     def _attribute_turn(
         self,
         conv: "Conversation",
-        participant: "Participant",
+        querier_account: str | None,
+        querier_alias: str | None,
         stats: dict,
         model_id: str | None = None,
     ) -> None:
@@ -1221,8 +1392,8 @@ class Hub:
         deployment = self._deployment_for(model_id)
         if deployment.active_params <= 0:
             return  # no real model loaded (tests with fakes) → no FLOP unit
-        if not participant.account_id:
-            log.debug("skipping ledger entry — chat client has no account_id")
+        if not querier_account:
+            log.debug("skipping ledger entry — the querier has no account")
             return
 
         plan: list[tuple[str, str | None, int]] = []
@@ -1260,8 +1431,8 @@ class Hub:
         self.ledger.record_turn(
             conv_id=conv.id,
             turn_idx=self._turn_counter[conv.id],
-            querier_account=participant.account_id,
-            querier_alias=participant.account_alias,
+            querier_account=querier_account,
+            querier_alias=querier_alias,
             plan=plan,
             prefill_tokens=prefill_tokens,
             decode_tokens=decode_tokens,
@@ -1383,6 +1554,17 @@ class Hub:
             return_exceptions=True,
         )
 
+    def record_api_turn(self, conv: "Conversation", account: str, stats: dict, model_id: str) -> None:
+        """Credits the workers for a turn answered through the HTTP API, and debits `account`.
+
+        Chat clients are attributed when their turn finishes; HTTP turns have no participant, so the API
+        calls this after a successful turn. Ledger trouble is logged, never raised: the answer was given.
+        """
+        try:
+            self._attribute_turn(conv=conv, querier_account=account, querier_alias=None, stats=stats, model_id=model_id)
+        except Exception:
+            log.exception("ledger attribution failed for API turn %s", conv.id)
+
     async def run_turn(
         self,
         conv: Conversation,
@@ -1392,6 +1574,8 @@ class Hub:
         is_alive=None,
         querier_account: str | None = None,
         model_id: str | None = None,
+        on_draft=None,
+        speculate: bool = True,
     ) -> tuple[str, dict]:
         """Run one chat turn against `conv.history` via delegation.
 
@@ -1427,6 +1611,8 @@ class Hub:
         # routing key is the chat client's conv.id.
         if on_token is not None:
             self._token_routers[conv.id] = on_token
+        if on_draft is not None:
+            self._draft_routers[conv.id] = on_draft
 
         # Diagnostic: print the chain we're about to drive so an
         # observer can tell which workers are involved. Multi-worker
@@ -1445,6 +1631,7 @@ class Hub:
         ui.notice(f"turn {conv.id[:8]} · {selected_model} → {chain_desc}")
         # Track tokens-so-far per conv so the watchdog can report progress.
         self._turn_token_counts[conv.id] = 0
+        self._serving[conv.id] = {worker.id, *(hop["worker_id"] for hop in chain_payload)}
         try:
             t0 = time.perf_counter()
             call_payload = dict(
@@ -1453,6 +1640,8 @@ class Hub:
                 history=conv.history,
                 max_tokens=max_new_tokens,
                 temperature=temperature,
+                speculate=speculate,
+                template_kwargs=conv.template_kwargs,
             )
             if chain_payload:
                 call_payload["my_layer_end"] = my_layer_end
@@ -1492,6 +1681,8 @@ class Hub:
             tokens_total = self._turn_token_counts.get(conv.id, 0)
             ui.notice(
                 f"turn {conv.id[:8]} done in {wall_ms:.0f}ms · tokens={tokens_total}"
+                + _speculation_note(resp)
+                + describe_chain(resp if isinstance(resp, dict) else {})
             )
             # delegate_token notifications dispatch as fire-and-forget
             # tasks; the response (delegate_done) may resolve before the
@@ -1500,7 +1691,9 @@ class Hub:
             await asyncio.sleep(0)
         finally:
             self._token_routers.pop(conv.id, None)
+            self._draft_routers.pop(conv.id, None)
             self._turn_token_counts.pop(conv.id, None)
+            self._serving.pop(conv.id, None)
 
         if resp.get("kind") != "delegate_done":
             raise RuntimeError(resp.get("error", "delegate_turn failed"))
@@ -1511,8 +1704,9 @@ class Hub:
         active = int(resp.get("active_params") or 0)
         if active and not deployment.active_params:
             deployment.active_params = active
+        speedup = _note_speed(deployment, resp, hops=len(chain_payload))
 
-        return resp["text"], {
+        stats = {
             "prefill_tokens": int(resp.get("prefill_tokens", 0)),
             "prefill_ms": float(resp.get("prefill_ms", 0.0)),
             "decode_tokens": int(resp.get("decode_tokens", 0)),
@@ -1520,8 +1714,24 @@ class Hub:
             "worker_id": worker.id,
             "model_id": selected_model,
         }
+        if speedup is not None:
+            stats["speedup"] = speedup  # against the same pool decoding one token at a time
+        return resp["text"], stats
 
     # ─────────────────────── delegation helpers ──────────────────────
+
+    def _ready_in_pool(self, deployment: ModelDeployment) -> "list[Participant]":
+        """The Macs that can take a turn of `deployment`'s model: ready with it, and lending to its pool. A Mac
+        lending to another pool never answers this one, even when it is free."""
+        candidates = []
+        for participant in self.participants.values():
+            if not participant.compute or not self.in_pool(participant, deployment.model_id):
+                continue
+            state = deployment.worker_states.get(participant.id)
+            ready, backend = (participant.ready, participant.backend) if state is None else (state.ready, state.backend)
+            if ready and backend == deployment.selected_backend:
+                candidates.append(participant)
+        return candidates
 
     def _build_chain_spec(
         self,
@@ -1548,17 +1758,7 @@ class Hub:
         the head; non-dominated tiebreak picks the highest-TPS chain.
         """
         deployment = self._deployment_for()
-        candidates = []
-        for participant in self.participants.values():
-            state = deployment.worker_states.get(participant.id)
-            if state is None:
-                ready = participant.ready
-                backend = participant.backend
-            else:
-                ready = state.ready
-                backend = state.backend
-            if participant.compute and ready and backend == deployment.selected_backend:
-                candidates.append(participant)
+        candidates = self._ready_in_pool(deployment)
         if not candidates:
             return None, 0, []
 
@@ -1628,7 +1828,7 @@ class Hub:
             WorkUnit(
                 unit_id=f"block_{i}",
                 ram_required_gb=0.0,
-                flops_per_token=per_layer_flops,
+                flops_per_token=per_layer_flops + (_head_flops(geom) if i == 0 else 0.0),
             )
             for i in range(geom.n_layers)
         ]
@@ -1700,17 +1900,7 @@ class Hub:
         That's the policy we want for single-worker delegation.
         """
         deployment = self._deployment_for()
-        candidates = []
-        for participant in self.participants.values():
-            state = deployment.worker_states.get(participant.id)
-            if state is None:
-                ready = participant.ready
-                backend = participant.backend
-            else:
-                ready = state.ready
-                backend = state.backend
-            if participant.compute and ready and backend == deployment.selected_backend:
-                candidates.append(participant)
+        candidates = self._ready_in_pool(deployment)
         if not candidates:
             return None
 
@@ -1950,6 +2140,14 @@ class Hub:
         text = msg.get("text", "")
         if not conv_id:
             return None
+        if msg.get("draft"):  # a proposal or how a check went, not a token: show it, don't count it
+            draft_cb = self._draft_routers.get(conv_id)
+            if draft_cb is not None:
+                try:
+                    await draft_cb({k: msg[k] for k in ("text", "kept", "proposed") if k in msg})
+                except Exception:
+                    self._draft_routers.pop(conv_id, None)
+            return None
         # Increment per-conv token counter so the run_turn watchdog can
         # report progress (e.g. "still in flight · 30s · tokens=12").
         if conv_id in self._turn_token_counts:
@@ -2011,3 +2209,10 @@ class Hub:
             mode=mode,
             max_segments=max_segments,
         )
+
+
+def _strings(value) -> list[str] | None:
+    """A list of strings from a hello, or None"""
+    if not isinstance(value, list):
+        return None
+    return [v for v in value if isinstance(v, str)] or None

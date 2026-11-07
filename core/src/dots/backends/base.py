@@ -14,7 +14,9 @@ from typing import Any
 from ..placement.work_units import ModelGeometry
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
-ForwardHidden = Callable[[Any], Awaitable[Any]]
+# Runs a hidden state through the rest of the model's layers, wherever they are: `await f(hidden, keep_last=n)`.
+# `keep_last` asks for only the last n positions back (a prefill needs one), so the last Mac sends less.
+ForwardHidden = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,9 @@ class PrefillOutput:
     logits_row: Any | None
     prefill_tokens: int
     prefill_ms: float
+    # The whole conversation as tokens, when the backend has them: speculative decoding looks for its next
+    # words in it before asking a draft model
+    context_ids: list[int] | None = None
 
 
 class BackendRuntime(ABC):
@@ -115,7 +120,12 @@ class BackendRuntime(ABC):
         history: list[dict],
         *,
         forward_hidden: ForwardHidden | None = None,
-    ) -> PrefillOutput: ...
+        template_kwargs: dict | None = None,
+        keep_rows: int = 1,
+    ) -> PrefillOutput:
+        """Feeds the conversation's new tokens. `template_kwargs` go to the model's chat template
+        (`enable_thinking`, say). `keep_rows` of the prompt's last hidden states are kept for a draft that
+        reads them; one picks the first token."""
 
     @abstractmethod
     async def decode_one(
@@ -125,6 +135,44 @@ class BackendRuntime(ABC):
         *,
         forward_hidden: ForwardHidden | None = None,
     ) -> Any: ...
+
+    # ---- speculative decoding --------------------------------------------
+    # A backend that can verify several tokens in one pass and roll its cache back supports a draft
+    # model. The defaults say it can't, so a backend opts in by overriding all three.
+
+    @property
+    def supports_speculation(self) -> bool:
+        return False
+
+    async def decode_many(
+        self,
+        conv_id: str,
+        tokens: list[int],
+        *,
+        forward_hidden: ForwardHidden | None = None,
+    ) -> Any:
+        """Feeds `tokens` in one pass and returns the logits after each, one row per token."""
+        raise NotImplementedError(f"{type(self).__name__} can't verify several tokens at once")
+
+    def trim(self, conv_id: str, n: int) -> None:
+        """Drops the last `n` tokens from the conversation's cache, as if they had never been fed."""
+        raise NotImplementedError(f"{type(self).__name__} can't roll its cache back")
+
+    async def propose(self, conv_id: str, token: int, k: int, recent: list[int] = (),
+                      penalty: float = 1.0) -> list[int]:
+        """As a draft model: its k most likely next tokens after `token`, each fed back in, greedily, with
+        the big model's repetition `penalty` on the `recent` tokens and its own guesses.
+
+        The cache ends holding `token` and all but the last guess. A backend can do this faster than
+        k separate steps, for instance without stopping to read each guess back.
+        """
+        guesses: list[int] = []
+        fed = token
+        for _ in range(k):
+            row = await self.decode_one(conv_id, fed)
+            guesses.append(self.sample_token(row, 0.0, recent_tokens=[*recent, *guesses], repetition_penalty=penalty))
+            fed = guesses[-1]
+        return guesses
 
     @abstractmethod
     def forward_segment(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import subprocess
 import sys
 
@@ -14,6 +15,11 @@ SUPPORTED_BACKENDS = ("mlx", "llama_cpp")
 # Backends this build can actually execute. Workers advertise this list by
 # default; the hub still requires an explicit selected backend per assignment.
 IMPLEMENTED_BACKENDS = ("mlx",)
+
+
+log = logging.getLogger(__name__)
+# Why MLX can't run here, when a packaged worker finds it can't
+why_no_mlx: str | None = None
 
 
 def get_backend_runtime(name: str) -> BackendRuntime:
@@ -53,6 +59,21 @@ def is_backend_available(name: str) -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _mlx_available() -> bool:
+    if getattr(sys, "frozen", False):
+        # A packaged worker (the one inside the Mac app) is its own interpreter, with no Python to probe with
+        try:
+            import mlx.core as mx
+
+            return bool(mx.metal.is_available())
+        except Exception as e:
+            global why_no_mlx
+            causes, cause = [str(e)], e.__cause__ or e.__context__
+            while cause is not None and len(causes) < 4:
+                causes.append(f"{type(cause).__name__}: {cause}")
+                cause = cause.__cause__ or cause.__context__
+            why_no_mlx = " <- ".join(causes)
+            log.warning("MLX isn't usable in this worker: %s", why_no_mlx)
+            return False
     probe = (
         "import mlx.core as mx; "
         "import sys; "

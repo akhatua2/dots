@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Models the network can run
 
 /// What a pool can run is set by how much memory its Macs lend (4-bit weights plus room for the cache).
-/// The lines follow the case study: Qwen3 235B at 136 GB, DeepSeek V3.1 at 396, Kimi K2 at 620.
+/// The cloud sends the real lines in every sync; these are the offline demo's, from the case study.
 struct ModelTier: Codable, Hashable, Identifiable {
     var id: String
     var name: String
@@ -14,22 +14,31 @@ struct ModelTier: Codable, Hashable, Identifiable {
     var credits: Int            // what an answer costs on a public pool
     var layers: Int             // transformer layers, shared out across the pool's Macs
     var activeB: Double         // parameters used for each token, in billions (fewer than the total for mixture-of-experts models)
+    var readsImages: Bool? = nil  // the cloud says so for models whose vision encoder a pool runs
 }
 
 enum Ladder {
-    static let tiers: [ModelTier] = [
-        ModelTier(id: "llama-3.1-8b", name: "Llama 3.1 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 62, credits: 1, layers: 32, activeB: 8),
-        ModelTier(id: "gemma-3-27b", name: "Gemma 3 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 38, credits: 1, layers: 62, activeB: 27),
-        ModelTier(id: "llama-3.3-70b", name: "Llama 3.3 70B", minGB: 40, params: "70B", paramsLong: "70 billion parameters", tokPerSec: 19, credits: 1, layers: 80, activeB: 70),
-        ModelTier(id: "qwen3-235b", name: "Qwen3 235B", minGB: 136, params: "235B", paramsLong: "235 billion parameters", tokPerSec: 24, credits: 2, layers: 94, activeB: 22),
-        ModelTier(id: "deepseek-v3.1", name: "DeepSeek V3.1", minGB: 396, params: "671B", paramsLong: "671 billion parameters", tokPerSec: 11, credits: 3, layers: 61, activeB: 37),
-        ModelTier(id: "kimi-k2", name: "Kimi K2", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 9, credits: 4, layers: 61, activeB: 32),
+    /// The cloud sends the ladder in every sync (see `adopt`). This is the starting point until the first one arrives.
+    static private(set) var tiers: [ModelTier] = [
+        ModelTier(id: "lfm2.5-8b", name: "LFM2.5 8B", minGB: 6, params: "8B", paramsLong: "8 billion parameters", tokPerSec: 60, credits: 1, layers: 24, activeB: 1.5),
+        ModelTier(id: "qwen3.8-27b", name: "Qwen3.8 27B", minGB: 18, params: "27B", paramsLong: "27 billion parameters", tokPerSec: 14, credits: 1, layers: 64, activeB: 27),
+        ModelTier(id: "qwen3.6-35b", name: "Qwen3.6 35B", minGB: 40, params: "35B", paramsLong: "35 billion parameters", tokPerSec: 35, credits: 1, layers: 40, activeB: 3),
+        ModelTier(id: "minimax-m2.7", name: "MiniMax M2.7", minGB: 136, params: "230B", paramsLong: "230 billion parameters", tokPerSec: 18, credits: 2, layers: 62, activeB: 10),
+        ModelTier(id: "glm-5.3", name: "GLM 5.3", minGB: 396, params: "744B", paramsLong: "744 billion parameters", tokPerSec: 9, credits: 3, layers: 78, activeB: 40),
+        ModelTier(id: "kimi-k2.5", name: "Kimi K2.5", minGB: 620, params: "1T", paramsLong: "1 trillion parameters", tokPerSec: 8, credits: 4, layers: 61, activeB: 32),
     ]
 
     /// Coding pools can prefer a coding model when they have room for it.
-    static let special: [ModelTier] = [
-        ModelTier(id: "qwen3-coder-480b", name: "Qwen3 Coder 480B", minGB: 270, params: "480B", paramsLong: "480 billion parameters", tokPerSec: 13, credits: 3, layers: 62, activeB: 35),
+    static private(set) var special: [ModelTier] = [
+        ModelTier(id: "qwen3-coder-next", name: "Qwen3 Coder Next", minGB: 270, params: "80B", paramsLong: "80 billion parameters", tokPerSec: 30, credits: 3, layers: 48, activeB: 3),
     ]
+
+    /// Takes the ladder the cloud sent, so a pool's models are the ones its hub can actually serve.
+    static func adopt(_ ladder: LadderData) {
+        guard !ladder.tiers.isEmpty else { return }
+        tiers = ladder.tiers
+        special = ladder.special
+    }
 
     static func tier(_ id: String) -> ModelTier? { (tiers + special).first { $0.id == id } }
     static func best(for gb: Int) -> ModelTier? { tiers.last { $0.minGB <= gb } }
@@ -55,9 +64,9 @@ struct FrontierModel: Hashable, Identifiable {
 
 /// What a run is in tokens, on average: a prompt and its answer.
 enum Runs {
+    /// The mock's stand-in for tokens in a run; a real cloud counts them
     static let tokensPerRun = 420
     /// 160_000 -> "160K", 5_210_520 -> "5.2M"
-    static func tokens(_ runs: Int) -> String { Self.short(runs * tokensPerRun) }
     static func short(_ n: Int) -> String {
         switch n {
         case 1_000_000...: let m = Double(n) / 1e6; return (m >= 10 ? String(format: "%.0fM", m) : String(format: "%.1fM", m)).replacingOccurrences(of: ".0M", with: "M")
@@ -98,6 +107,8 @@ struct PoolMac: Codable, Hashable, Identifiable {
 
 struct UnlockEvent: Codable, Hashable, Identifiable {
     var id = UUID()
+    /// The pool it happened in, when the cloud says
+    var poolID: String?
     var modelID: String
     var byMacID: String
     var fromGB: Int
@@ -108,7 +119,13 @@ struct UnlockEvent: Codable, Hashable, Identifiable {
 struct Invite: Codable, Hashable {
     var code: String
     var expires: Date
-    var url: String { "https://dots.link/\(code)" }
+
+    /// The link to send: it names the cloud when friends reach it from elsewhere, so their app joins it there
+    func link(cloud: String?) -> String {
+        var link = URLComponents(string: "dots://invite/\(code)")!
+        if let cloud, !cloud.isEmpty { link.queryItems = [URLQueryItem(name: "cloud", value: cloud)] }
+        return link.string ?? "dots://invite/\(code)"
+    }
 }
 
 struct Pool: Codable, Hashable, Identifiable {
@@ -134,6 +151,13 @@ struct Pool: Codable, Hashable, Identifiable {
     var phase: Double
     var createdAt: Date
     var servesModelID: String?
+    /// The one model a pool started from a link runs, as the cloud read it from its repo: its name, whether it
+    /// writes "text" or draws "pictures", and the size of its weights. Nil for pools that climb the ladder.
+    var modelName: String? = nil
+    var kind: String? = nil
+    var modelGB: Double? = nil
+    /// The image model a Mac in the pool draws pictures with, if one offers it
+    var drawsWith: String? = nil
     /// How close the pool's Macs are to you: scales the speed you'd get.
     var speedFactor = 1.0
     /// How busy the pool is: scales what a lending Mac earns there.
@@ -177,11 +201,23 @@ struct PoolActivity: Codable, Hashable, Identifiable {
 }
 
 /// A night this Mac lent: where, for how long, and the runs it took part in. Nights run from noon to noon.
+extension NetworkState {
+    /// Everything this Mac has answered, in one pool or in all of them, and the tokens in it.
+    func served(in poolID: String? = nil) -> (runs: Int, tokens: Int) {
+        let rows = (nights ?? []).filter { poolID == nil || $0.poolID == poolID }
+        return (rows.reduce(0) { $0 + $1.runs }, rows.reduce(0) { $0 + $1.tokenCount })
+    }
+}
+
 struct NightLent: Codable, Hashable {
     var date: Date
     var poolID: String
     var minutes: Double
     var runs: Int
+    /// Tokens in those runs, from the hub's ledger; nil from the mock, which only counts runs
+    var tokens: Int?
+
+    var tokenCount: Int { tokens ?? runs * Runs.tokensPerRun }
     /// When this Mac began and last lent that night
     var from: Date?
     var to: Date?
@@ -201,8 +237,30 @@ extension Pool {
     var pooledGB: Int { macs.filter { $0.state == .lending }.reduce(0) { $0 + $1.lendGB } + crowdGB }
 
     var model: ModelTier? {
+        // A pool that names its model runs that one, whatever its memory; pictures have no layers to share
+        if modelName != nil { return kind == "pictures" ? nil : servesModelID.flatMap(Ladder.tier) }
         if let id = servesModelID, let special = Ladder.tier(id), special.minGB <= pooledGB { return special }
         return Ladder.best(for: pooledGB)
+    }
+    /// The model it runs, by name, however the pool chose it
+    var modelLabel: String? { modelName ?? model?.name }
+    /// Whether it names its one model, rather than climbing the ladder as it grows
+    var runsOneModel: Bool { modelName != nil }
+    var draws: Bool { kind == "pictures" }
+    /// What its model needs: a picture is drawn whole on one Mac, so one Mac must lend this much; text is shared
+    /// across the pool's Macs, so together they must
+    var needsGB: Int? { modelGB.map { Int($0.rounded(.up)) } }
+    /// Whether a Mac can lend here: any Mac adds to a pool that shares out text, but only one with room for the
+    /// whole model can draw
+    func canLend(_ mac: MacDevice) -> Bool {
+        guard draws, let needs = needsGB else { return mac.maxLendGB > 0 }
+        return mac.maxLendGB >= needs
+    }
+    /// Why a Mac can't lend here, for the places that would offer it
+    func whyCantLend(_ mac: MacDevice) -> String? {
+        guard !canLend(mac) else { return nil }
+        if let needs = needsGB, draws { return "Your Mac can't lend here: each picture needs \(needs) GB on one Mac" }
+        return "Your Mac can't lend: it keeps all its memory for itself"
     }
     var nextModel: ModelTier? { Ladder.next(after: pooledGB) }
     /// Levels climb the model ladder: Level 1 runs the smallest model.
@@ -216,12 +274,21 @@ extension Pool {
 
 // MARK: - You
 
+/// This Mac's rules for lending, the same for every pool it lends to. How much each pool gets is its share.
 struct LendingSettings: Codable, Hashable {
     var isOn = false
-    var limitGB = 0
     var onlyWhenPluggedIn = true
     var pauseWhileInUse = false
     var pausedUntil: Date?
+}
+
+/// What this Mac lends one pool: some of its memory, held by a worker of its own for that pool.
+struct LendingShare: Codable, Hashable {
+    var poolID: String
+    var gb: Int
+    var since: Date?
+    /// The pool's name at the hub, which its worker gives: the hub's own pool is its default ("")
+    var hubPool: String?
 }
 
 struct CreditEvent: Codable, Hashable, Identifiable {
@@ -333,9 +400,9 @@ struct NetworkState: Codable {
     var apiKeys: [APIKey]
     var requests: [RequestRecord]
     var lending: LendingSettings
-    var lendingPoolID: String?
+    /// The pools this Mac lends to, an amount to each
+    var lendingShares: [LendingShare]
     var networkLendingNow: Int
-    var lendingSince: Date?
     /// Pools endorsed before this history starts (the sample profile has a past).
     var endorsedBefore = 0
     /// Hours this Mac has lent, and the compute the hub measured for it, all time
@@ -347,13 +414,34 @@ struct NetworkState: Codable {
     var nights: [NightLent]?
 
     var me: Person { people.first { $0.id == meID }! }
-    var thisMac: MacDevice { devices.first { $0.id == thisMacID }! }
+    /// This Mac as the cloud knows it. Before its first heartbeat a cloud may not list it yet, so it falls
+    /// back to an unknown Mac rather than failing.
+    var thisMac: MacDevice {
+        devices.first { $0.id == thisMacID } ?? MacDevice(id: thisMacID, ownerID: meID, kind: "Mac", memoryGB: 0)
+    }
     func person(_ id: String) -> Person? { people.first { $0.id == id } }
     func device(_ id: String) -> MacDevice? { devices.first { $0.id == id } }
     func pool(_ id: String?) -> Pool? { guard let id else { return nil }; return pools.first { $0.id == id } }
     var myPools: [Pool] { pools.filter { $0.isMember(meID) } }
     var publicPools: [Pool] { pools.filter(\.isPublic) }
-    var lendingPool: Pool? { pool(lendingPoolID) }
+    func share(in poolID: String?) -> LendingShare? { lendingShares.first { $0.poolID == poolID } }
+    func isLending(to poolID: String?) -> Bool { share(in: poolID) != nil }
+    var lendingPools: [Pool] { lendingShares.compactMap { pool($0.poolID) } }
+    var lendingPoolIDs: Set<String> { Set(lendingShares.map(\.poolID)) }
+    /// What this Mac lends in all, across its pools
+    var lentGB: Int { lendingShares.reduce(0) { $0 + $1.gb } }
+    /// What joining or lending to a pool gives it by default: all this Mac has left, when that is of use there
+    /// (a pool that draws needs room for its whole model on one Mac)
+    func offerGB(for pool: Pool) -> Int {
+        let left = mostGB(for: pool.id)
+        guard pool.canLend(thisMac) else { return 0 }
+        if pool.draws, let needs = pool.needsGB, left < needs { return 0 }
+        return left
+    }
+    /// The most a pool's share can be: what this Mac can lend, less what its other pools have
+    func mostGB(for poolID: String) -> Int {
+        max(0, thisMac.maxLendGB - lentGB + (share(in: poolID)?.gb ?? 0))
+    }
     /// People you know in a pool, as Explore shows them
     func friends(in pool: Pool) -> [Person] { pool.memberIDs.filter { $0 != meID }.compactMap { person($0) } }
     var poolsEndorsed: Int { endorsedBefore + pools.filter(\.endorsedByMe).count }

@@ -1,14 +1,70 @@
 import Foundation
+import ImageIO
 import PDFKit
+import UniformTypeIdentifiers
 
 struct ChatMessage: Codable, Hashable {
     var role: String
     var content: String
+    /// Images asked about with the text, as JPEG. They go out as OpenAI image parts before it.
+    var images: [Data] = []
+
+    init(role: String, content: String, images: [Data] = []) {
+        self.role = role
+        self.content = content
+        self.images = images
+    }
+
+    private enum CodingKeys: String, CodingKey { case role, content }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(role, forKey: .role)
+        if images.isEmpty {
+            try c.encode(content, forKey: .content)
+        } else {
+            let pictures = images.map { ContentPart.image("data:image/jpeg;base64," + $0.base64EncodedString()) }
+            try c.encode(pictures + [.text(content)], forKey: .content)
+        }
+    }
+}
+
+/// One part of a message that mixes text and images, in OpenAI's format.
+private enum ContentPart: Encodable {
+    case text(String)
+    case image(String)
+
+    private enum Keys: String, CodingKey { case type, text, image_url }
+    private struct ImageURL: Encodable { var url: String }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .text(let text):
+            try c.encode("text", forKey: .type)
+            try c.encode(text, forKey: .text)
+        case .image(let url):
+            try c.encode("image_url", forKey: .type)
+            try c.encode(ImageURL(url: url), forKey: .image_url)
+        }
+    }
 }
 
 /// What an answer stream carries: text, and the moments a Mac leaves or the others take over.
 enum AnswerEvent {
     case text(String)
+    /// What a draft model has proposed and the pool is still checking; "" once there is none. Never the answer.
+    case draft(String)
+    /// A check of the draft: how many of its proposed tokens the big model kept
+    case verified(kept: Int, proposed: Int)
+    /// How much faster the draft made this answer than the same pool without one
+    case speedup(Double)
     case macAsleep(macID: String, name: String)
     case resumed
     case model(String)      // the model an endpoint says it used
@@ -25,6 +81,8 @@ enum AnswerEvent {
 enum TransportError: LocalizedError {
     case badEndpoint
     case http(Int, String)
+    /// The endpoint started answering, then said it couldn't (a pool whose Macs aren't ready, say)
+    case failed(String)
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +90,7 @@ enum TransportError: LocalizedError {
         case .http where needsWorkspace:
             "This key works in more than one Anthropic workspace, so dots has to say which one to use. Pick it in Settings, under the key."
         case let .http(code, body): "The endpoint answered \(code). \(Self.message(in: body) ?? String(body.prefix(240)))"
+        case let .failed(message): message.prefix(1).uppercased() + message.dropFirst()
         }
     }
 
@@ -64,6 +123,8 @@ extension URLRequest {
             setValue(key, forHTTPHeaderField: "x-api-key")
         }
         if inWorkspace, let workspace = endpoint.workspace { setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id") }
+        if endpoint.draftAhead == false { setValue("off", forHTTPHeaderField: "X-Dots-Speculate") }
+        if let level = endpoint.privacy?.wire { setValue(level, forHTTPHeaderField: "X-Dots-Privacy") }
     }
 }
 
@@ -84,6 +145,7 @@ enum OpenAIClient {
             var delta: Delta?
         }
         struct Usage: Decodable { var prompt_tokens: Int?; var completion_tokens: Int? }
+        struct Failure: Decodable { var message: String }
         /// What the dots hub and gateway add: the Macs answering, a Mac falling asleep, credits charged
         struct Dots: Decodable {
             struct Mac: Decodable { var id: String; var name: String; var initial: String }
@@ -91,6 +153,10 @@ enum OpenAIClient {
             var macs: [Mac]?
             var mac_id: String?
             var name: String?
+            var text: String?
+            var kept: Int?
+            var proposed: Int?
+            var speedup: Double?
             var credits: Int?
             var simulated: Bool?
         }
@@ -98,6 +164,7 @@ enum OpenAIClient {
         var choices: [Choice]?
         var usage: Usage?
         var dots: Dots?
+        var error: Failure?
     }
 
     static func stream(_ endpoint: EndpointConfig, messages: [ChatMessage]) -> AsyncThrowingStream<AnswerEvent, Error> {
@@ -132,6 +199,7 @@ enum OpenAIClient {
                         if payload == "[DONE]" { break }
                         guard let data = payload.data(using: .utf8),
                               let chunk = try? JSONDecoder().decode(Chunk.self, from: data) else { continue }
+                        if let failure = chunk.error { throw TransportError.failed(failure.message) }
                         if !sentModel, let m = chunk.model, !m.isEmpty { continuation.yield(.model(m)); sentModel = true }
                         if let text = chunk.choices?.first?.delta?.content, !text.isEmpty { continuation.yield(.text(text)) }
                         if let u = chunk.usage, let i = u.prompt_tokens, let o = u.completion_tokens { continuation.yield(.usage(input: i, output: o)) }
@@ -141,6 +209,11 @@ enum OpenAIClient {
                             }
                             if d.event == "asleep", let id = d.mac_id { continuation.yield(.macAsleep(macID: id, name: d.name ?? "A Mac")) }
                             if d.event == "resumed" { continuation.yield(.resumed) }
+                            if d.event == "draft" { continuation.yield(.draft(d.text ?? "")) }
+                            if d.event == "speed", let s = d.speedup { continuation.yield(.speedup(s)) }
+                            if d.event == "verified", let kept = d.kept, let proposed = d.proposed {
+                                continuation.yield(.verified(kept: kept, proposed: proposed))
+                            }
                             if let c = d.credits { continuation.yield(.charged(c)) }
                             if let sim = d.simulated { continuation.yield(.simulated(sim)) }
                         }
@@ -258,6 +331,32 @@ enum SimulatedAnswers {
 }
 
 /// Text from a document you give the ask panel, sent along with the question.
+/// Pictures someone asks about, shrunk before they leave this Mac: a pool reads at most so many pixels anyway.
+enum Pictures {
+    static func isPicture(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+    }
+
+    /// The picture upright, scaled to at most `maxPixels`, as a JPEG.
+    static func jpeg(from url: URL, maxPixels: Int) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return nil }
+        let scale = min(1, (Double(maxPixels) / Double(width * height)).squareRoot())
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(Double(max(width, height)) * scale),
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? out as Data : nil
+    }
+}
+
 enum Documents {
     static func text(from url: URL, limit: Int = 24_000) -> String? {
         if url.pathExtension.lowercased() == "pdf" {

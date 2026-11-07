@@ -19,16 +19,25 @@ interactive `ChatUI` when the user does want to talk to the model.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import sys
+import time
+import uuid
 from typing import Callable
 
 from .. import ui
 from ..backends.base import BackendRuntime, ModelAssignment
 from ..backends.registry import get_backend_runtime
+from ..backends.mlx.draft import draft_for, load_draft
 from ..generation.base import GenerationRequest
 from ..generation.registry import get_generation_strategy
+from ..generation.speculative import SpeculativeGeneration
+from ..image_tools import runners as image_runners
+from ..images import ImageJob
+from .chain_timing import ChainTiming
 from .peer import PeerConnection
 from .iroh_net import IrohEndpoint, IrohStreamTransport, load_or_create_secret_key
 from .pool import resource_decl_to_hello_field
@@ -76,6 +85,7 @@ class Worker:
         account_id: str | None = None,
         account_alias: str | None = None,
         requested_model_id: str | None = None,
+        pool: str = "",
     ):
         # The hub's shareable iroh ticket — the "join token". The worker dials
         # this over iroh (NAT-traversed) rather than a host:port.
@@ -89,6 +99,8 @@ class Worker:
         # ram_gb_free value we send to the hub, so placement decisions
         # never assign more than the user agreed to.
         self.max_load_gb = max_load_gb
+        # The pool this worker lends to: the hub runs only that pool's model on it. "" is the hub's default pool.
+        self.pool = pool
         self.resource_limits = discover_worker_limits(max_ram_gb=self.max_load_gb)
         # Whether this Worker contributes compute to the pool. False
         # makes it a pure chat client: the hub won't send `load_units`
@@ -97,7 +109,7 @@ class Worker:
         # Stable UUID that survives reconnects. Tests pass an explicit one
         # so multiple workers in the same process don't share the on-disk
         # ~/.dots/identity file.
-        self.identity = identity if identity is not None else load_or_create_identity()
+        self.identity = identity if identity is not None else load_or_create_identity(pool)
         # Human-owner account: who earns/spends CU. Persisted across
         # devices (copy ~/.dots/account to attribute multiple workers to
         # the same account). Tests pass an explicit one to avoid touching
@@ -119,6 +131,12 @@ class Worker:
         self.backend: BackendRuntime | None = None
         self.backends: dict[str, BackendRuntime] = {}
         self.generation = get_generation_strategy()
+        # Drafts for speculative decoding, by (draft repo, model): a model's own head or a small model
+        # (None: it failed to load)
+        self._drafts: dict[tuple[str, str], object | None] = {}
+        # How this Mac draws each family of image model it can (image_tools/runners.toml); one picture at a time
+        self.runners = image_runners.here()
+        self._drawing = asyncio.Lock()
         self._host_ready = asyncio.Event()
         self._host_ready_by_model: dict[str, asyncio.Event] = {}
         self._host_load_task: asyncio.Task | None = None
@@ -139,6 +157,12 @@ class Worker:
         # the head worker in a multi-worker placement). Keyed by peer
         # worker_id; cached so the per-token hot path doesn't reconnect.
         self._peer_conns: dict[str, PeerConnection] = {}
+        # Passes sent round a ring, waiting for the hidden state to come home
+        self._ring_waiters: dict[str, asyncio.Future] = {}
+        # Hidden states for one conversation are run one at a time, in the order they arrived: a prompt
+        # sent in chunks must reach the cache in order. `_next_chunk` is the chunk each expects next.
+        self._segment_locks: dict[str, asyncio.Lock] = {}
+        self._next_chunk: dict[str, int] = {}
         # Per-conversation handler lock: two delegate_turn calls for the
         # same conv would corrupt the KV cache.
         self._turn_locks: dict[str, asyncio.Lock] = {}
@@ -243,6 +267,12 @@ class Worker:
             if self.compute:
                 self._peer_ticket = await self._endpoint.ticket()
 
+        if self.compute and not self.resource_limits.backends:
+            from ..backends import registry
+
+            ui.notice("this Mac can't run models here: " + (registry.why_no_mlx or "MLX isn't usable"))
+        if self.compute and self.pool:
+            ui.info("draws " + (", ".join(sorted({r.name for r in self.runners})) or "nothing on this Mac"))
         ui.info("connecting to hub (iroh)…")
         self.conn = await self._endpoint.connect(self.hub_ticket, self._handle)
         # Build the worker's bounded resource declaration. Defaults are
@@ -270,6 +300,7 @@ class Worker:
         device = await asyncio.to_thread(detect_device)
         hello_payload: dict = {
             "worker_id": self.identity,
+            "pool": self.pool,
             "account_id": self.account_id,
             "compute": bool(self.compute),
             "resources": resource_decl_to_hello_field(decl),
@@ -290,6 +321,9 @@ class Worker:
             hello_payload["join_token"] = join_token
         if self.account_alias:
             hello_payload["account_alias"] = self.account_alias
+        if self.runners and self.compute:
+            # The originals it can draw models of; its pool says which model when it asks for a picture
+            hello_payload["images"] = sorted({o for r in self.runners for o in r.originals})
         # A chat client tells the hub which model it intends to query so
         # the hub knows that model is "in use" and won't evict it to make
         # room for another. Compute-only workers leave this unset.
@@ -346,37 +380,105 @@ class Worker:
             return {"kind": "peer_pong", "ts_ns": msg.get("ts_ns")}
         if kind == "compute_unit":
             return await self._handle_compute_unit(msg)
+        if kind == "trim_cache":
+            return self._handle_trim_cache(msg)
+        if kind == "ring_unit":
+            await self._handle_ring_unit(msg)
+            return None
+        if kind == "ring_result":
+            self._handle_ring_result(msg)
+            return None
         return {"kind": "error", "error": f"unknown peer kind: {kind!r}"}
+
+    def _handle_trim_cache(self, msg: dict) -> dict:
+        """The head rejected some draft tokens: drop them from this worker's slice of the cache too."""
+        runtime = self._runtime_for_model(msg.get("model_id") or self.model_id or "")
+        if runtime is None:
+            return {"kind": "error", "error": "backend not selected"}
+        try:
+            runtime.trim(str(msg["conv_id"]), int(msg["n"]))
+        except Exception as e:
+            log.exception("trim_cache failed")
+            return {"kind": "error", "error": str(e)}
+        return {"kind": "trim_cache_ok"}
 
     async def _handle_compute_unit(self, msg: dict) -> dict:
         """Run a single hidden-state forward through this worker's
         assigned layer range. Used by head workers chaining work
         through multi-worker placements."""
+        conv_id = str(msg.get("conv_id"))
+        # Taken before anything else awaits, so requests for a conversation queue in the order they came
+        async with self._segment_locks.setdefault(conv_id, asyncio.Lock()):
+            chunk = msg.get("chunk")
+            if chunk is not None:
+                expected = 0 if chunk == 0 else self._next_chunk.get(conv_id)
+                if chunk != expected:  # never let a chunk into the cache out of order
+                    return {"kind": "error", "error": f"prompt chunk {chunk} arrived, expected {expected}"}
+                self._next_chunk[conv_id] = chunk + 1
+            wire, compute_ms, error = await self._run_segment(msg, keep_last=msg.get("keep_last"))
+        if error is not None:
+            return {"kind": "error", "error": error}
+        return {
+            "kind": "compute_unit_out",
+            "hidden": wire,
+            # So the head can tell this Mac's time from the network's
+            "compute_ms": compute_ms,
+        }
+
+    async def _run_segment(self, msg: dict, keep_last: int | None = None) -> tuple[dict | None, float, str | None]:
+        """This worker's layers over a hidden state from a peer: (hidden out, compute ms, error).
+        `keep_last` sends back only the last positions; the cache still holds them all."""
         model_id = msg.get("model_id") or self.model_id
         if not isinstance(model_id, str) or not model_id:
-            return {"kind": "error", "error": "model_id is required"}
+            return None, 0.0, "model_id is required"
         runtime = self._runtime_for_model(model_id)
         if runtime is None:
-            return {"kind": "error", "error": "backend not selected"}
+            return None, 0.0, "backend not selected"
         try:
             await asyncio.wait_for(
                 self._ready_event_for(model_id).wait(), timeout=120.0
             )
         except asyncio.TimeoutError:
-            return {"kind": "error", "error": "model not loaded yet"}
-        conv_id = msg["conv_id"]
-        start = int(msg["layer_start"])
-        end = int(msg["layer_end"])
-        hidden_in = runtime.decode_hidden(msg["hidden"])
+            return None, 0.0, "model not loaded yet"
+        started = time.perf_counter()
         try:
-            hidden_out = runtime.forward_segment(conv_id, hidden_in, start, end)
+            hidden_in = runtime.decode_hidden(msg["hidden"])
+            hidden_out = runtime.forward_segment(msg["conv_id"], hidden_in, int(msg["layer_start"]), int(msg["layer_end"]))
+            if keep_last is not None:  # 0 sends nothing back: a prompt chunk before the last
+                hidden_out = hidden_out[:, hidden_out.shape[1] - int(keep_last):, :]
+            wire = runtime.encode_hidden(hidden_out)  # MLX computes the layers here
         except Exception as e:
             log.exception("compute_unit failed")
-            return {"kind": "error", "error": str(e)}
-        return {
-            "kind": "compute_unit_out",
-            "hidden": runtime.encode_hidden(hidden_out),
-        }
+            return None, 0.0, str(e)
+        return wire, round((time.perf_counter() - started) * 1000, 3), None
+
+    async def _handle_ring_unit(self, msg: dict) -> None:
+        """One stop on a ring: run our layers, then hand the hidden state straight to the next peer, or, as the
+        last stop, back to the head. Nothing returns along the way, so each extra peer costs one network leg
+        instead of two. A failure goes straight to the head, so it never waits out a timeout."""
+        hops = msg.get("hops") or []
+        # Only the last stop trims: the ones before it pass every position on
+        wire, compute_ms, error = await self._run_segment(msg, keep_last=None if hops else msg.get("keep_last"))
+        computed = [*msg.get("compute_ms", []), compute_ms]
+        try:
+            if error is None and hops:
+                nxt = hops[0]
+                conn = await self._get_or_open_peer(str(nxt["worker_id"]), str(nxt["ticket"]))
+                onward = {k: v for k, v in msg.items() if k not in ("kind", "rid")}
+                await conn.notify("ring_unit", **{**onward, "hidden": wire, "layer_start": nxt["layer_start"],
+                                                  "layer_end": nxt["layer_end"], "hops": hops[1:],
+                                                  "compute_ms": computed})
+                return
+            head = await self._get_or_open_peer(str(msg["head_ticket"]), str(msg["head_ticket"]))
+            await head.notify("ring_result", pass_id=msg["pass_id"], hidden=wire, compute_ms=computed, error=error)
+        except Exception:
+            log.exception("ring hand-off failed")
+
+    def _handle_ring_result(self, msg: dict) -> None:
+        """The hidden state coming home to the head at the end of a ring."""
+        waiter = self._ring_waiters.pop(str(msg.get("pass_id")), None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(msg)
 
     async def _get_or_open_peer(self, peer_id: str, ticket: str) -> PeerConnection:
         """Cached outgoing iroh connection to a peer worker. Workers in the
@@ -641,6 +743,8 @@ class Worker:
             return await self._handle_delegate_turn(msg)
         if kind == "probe_peer":
             return await self._handle_probe_peer(msg)
+        if kind == "make_image":
+            return await self._handle_make_image(msg)
         if kind == "reset_conversation":
             conv_id = msg.get("conv_id")
             model_id = msg.get("model_id")
@@ -652,6 +756,8 @@ class Worker:
                 else:
                     for runtime in self.backends.values():
                         runtime.reset_conversation(conv_id)
+                self._segment_locks.pop(conv_id, None)
+                self._next_chunk.pop(conv_id, None)
             return {"kind": "ok"}
         if kind == "token":
             # Notification — route through whichever consumer is installed
@@ -819,6 +925,7 @@ class Worker:
 
         conv_id = msg["conv_id"]
         history = msg["history"]
+        template_kwargs = msg.get("template_kwargs") or None
         max_tokens = int(msg.get("max_tokens", 256))
         temperature = float(msg.get("temperature", 0.7))
         # Optional multi-worker chain spec. Empty / missing = single-worker
@@ -844,6 +951,24 @@ class Worker:
             except Exception:
                 log.debug("delegate_token notify failed", exc_info=True)
 
+        async def on_draft(text: str) -> None:
+            """The draft model's unconfirmed proposal, for the asker to see while the pool checks it."""
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify("delegate_token", conv_id=conv_id, text=text, draft=True)
+            except Exception:
+                log.debug("draft notify failed", exc_info=True)
+
+        async def on_verified(kept: int, proposed: int) -> None:
+            """How a check of the draft went, so the asker can see speculation working."""
+            if self.conn is None:
+                return
+            try:
+                await self.conn.notify("delegate_token", conv_id=conv_id, draft=True, kept=kept, proposed=proposed)
+            except Exception:
+                log.debug("verified notify failed", exc_info=True)
+
         async with lock:
             try:
                 forward_hidden = (
@@ -857,18 +982,32 @@ class Worker:
                     if chain
                     else None
                 )
-                result = await self.generation.generate(
+                trim_remote = (
+                    await self._build_chain_trimmer(conv_id=conv_id, model_id=model_id, chain=chain)
+                    if chain
+                    else None
+                )
+                generation = await self._generation_for(model_id, runtime, spans_macs=bool(chain),
+                                                        speculate=bool(msg.get("speculate", True)))
+                result = await generation.generate(
                     GenerationRequest(
                         runtime=runtime,
                         conv_id=conv_id,
                         history=history,
+                        template_kwargs=template_kwargs,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         on_token=on_token,
+                        on_draft=on_draft,
+                        on_verified=on_verified,
                         forward_hidden=forward_hidden,
+                        trim_remote=trim_remote,
                     )
                 )
                 text, stats = result.text, result.stats
+                timing = getattr(forward_hidden, "timing", None)
+                if timing is not None:
+                    stats = {**stats, **timing.stats()}
             except Exception as e:
                 log.exception("delegate_turn failed")
                 return {"kind": "error", "error": str(e)}
@@ -907,27 +1046,191 @@ class Worker:
             conn = await self._get_or_open_peer(peer_id, ticket)
             peer_conns.append((conn, start, end))
 
-        async def forward_through_chain(hidden):
+        if os.environ.get("DOTS_CHAIN", "star").strip() == "ring" and self._peer_ticket is not None:
+            return self._ring_forwarder(conv_id=conv_id, model_id=model_id, runtime=runtime,
+                                        my_layer_end=my_layer_end, chain=chain, first=peer_conns[0][0])
+
+        timing = ChainTiming(peers=len(peer_conns))
+        chunk_tokens = int(os.environ.get("DOTS_PREFILL_CHUNK", "1024"))
+
+        async def through_peers(wire, chunk: int | None, keep_last: int | None):
+            """One hidden state through every peer in turn; returns what the last one sends back."""
+            for i, (conn, start, end) in enumerate(peer_conns):
+                last = i == len(peer_conns) - 1
+                resp = await conn.call("compute_unit", model_id=model_id, conv_id=conv_id, layer_start=start,
+                                       layer_end=end, hidden=wire, chunk=chunk, keep_last=keep_last if last else None)
+                if resp.get("kind") != "compute_unit_out":
+                    raise RuntimeError(f"compute_unit failed: {resp.get('error', resp)}")
+                wire = resp["hidden"]
+            return wire
+
+        async def prefill_in_chunks(hidden, keep_last: int):
+            """A long prompt in chunks: while the peers work on one chunk, this Mac computes and sends the
+            next, so compute and network overlap instead of taking turns. Only the last chunk's last rows
+            come back; the earlier ones return nothing."""
+            n = hidden.shape[1]
+            starts = list(range(0, n, chunk_tokens))
+            in_flight = []
+            for c, start in enumerate(starts):
+                piece = runtime.forward_segment(conv_id, hidden[:, start:start + chunk_tokens, :], 0, my_layer_end)
+                last = c == len(starts) - 1
+                wire = runtime.encode_hidden(piece)
+                in_flight.append(asyncio.create_task(through_peers(wire, c, keep_last if last else 0)))
+                await asyncio.sleep(0)  # let this chunk's send go out before computing the next
+            results = await asyncio.gather(*in_flight)
+            return runtime.decode_hidden(results[-1])
+
+        async def forward_through_chain(hidden, keep_last: int | None = None):
+            if keep_last and chunk_tokens > 0 and hidden.shape[1] > chunk_tokens:
+                return await prefill_in_chunks(hidden, keep_last)
             # Our local segment first.
+            started = time.perf_counter()
             hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
             # Then each downstream chain segment.
-            for conn, start, end in peer_conns:
+            for i, (conn, start, end) in enumerate(peer_conns):
+                wire = runtime.encode_hidden(hidden)  # MLX computes our layers here
+                sent = time.perf_counter()
+                if i == 0:
+                    timing.here_ms += (sent - started) * 1000
                 resp = await conn.call(
                     "compute_unit",
                     model_id=model_id,
                     conv_id=conv_id,
                     layer_start=start,
                     layer_end=end,
-                    hidden=runtime.encode_hidden(hidden),
+                    hidden=wire,
+                    # The last Mac sends back only what the head needs (one row for a prompt)
+                    keep_last=keep_last if i == len(peer_conns) - 1 else None,
                 )
                 if resp.get("kind") != "compute_unit_out":
                     raise RuntimeError(
                         f"compute_unit failed: {resp.get('error', resp)}"
                     )
+                timing.round_trip_ms[i] += (time.perf_counter() - sent) * 1000
+                timing.peer_compute_ms[i] += float(resp.get("compute_ms") or 0.0)
                 hidden = runtime.decode_hidden(resp["hidden"])
+            timing.passes += 1
             return hidden
 
+        forward_through_chain.timing = timing
         return forward_through_chain
+
+    def _ring_forwarder(self, *, conv_id: str, model_id: str, runtime: BackendRuntime, my_layer_end: int,
+                        chain: list, first: PeerConnection):
+        """Like the star forwarder, but the hidden state goes peer to peer and comes home once.
+
+        With n peers that is n + 1 network legs a pass instead of 2n. The head waits on a future that the
+        last peer's `ring_result` resolves; a peer that fails reports straight here.
+        """
+        hops = [{"worker_id": str(e["worker_id"]), "ticket": str(e["ticket"]),
+                 "layer_start": int(e["layer_start"]), "layer_end": int(e["layer_end"])} for e in chain]
+        timeout = float(os.environ.get("DOTS_RING_TIMEOUT_S", "120"))
+        timing = ChainTiming(peers=1, ring=True)
+
+        async def forward_round_ring(hidden, keep_last: int | None = None):
+            started = time.perf_counter()
+            hidden = runtime.forward_segment(conv_id, hidden, 0, my_layer_end)
+            wire = runtime.encode_hidden(hidden)  # MLX computes our layers here
+            sent = time.perf_counter()
+            timing.here_ms += (sent - started) * 1000
+            pass_id = uuid.uuid4().hex
+            home = asyncio.get_running_loop().create_future()
+            self._ring_waiters[pass_id] = home
+            try:
+                await first.notify("ring_unit", model_id=model_id, conv_id=conv_id,
+                                   layer_start=hops[0]["layer_start"], layer_end=hops[0]["layer_end"],
+                                   hidden=wire, hops=hops[1:], head_ticket=self._peer_ticket,
+                                   pass_id=pass_id, compute_ms=[], keep_last=keep_last)
+                result = await asyncio.wait_for(home, timeout=timeout)
+            finally:
+                self._ring_waiters.pop(pass_id, None)
+            if result.get("error"):
+                raise RuntimeError(f"ring pass failed: {result['error']}")
+            timing.round_trip_ms[0] += (time.perf_counter() - sent) * 1000
+            timing.peer_compute_ms[0] += sum(result.get("compute_ms") or [])
+            timing.passes += 1
+            return runtime.decode_hidden(result["hidden"])
+
+        forward_round_ring.timing = timing
+        return forward_round_ring
+
+    async def _build_chain_trimmer(self, *, conv_id: str, model_id: str, chain: list):
+        """Drops rejected draft tokens from every chain member's cache, reusing the turn's connections."""
+        conns = [
+            await self._get_or_open_peer(str(entry["worker_id"]), str(entry["ticket"]))
+            for entry in chain
+        ]
+
+        async def trim_through_chain(n: int) -> None:
+            for conn in conns:
+                resp = await conn.call("trim_cache", model_id=model_id, conv_id=conv_id, n=n)
+                if resp.get("kind") != "trim_cache_ok":
+                    raise RuntimeError(f"trim_cache failed: {resp.get('error', resp)}")
+
+        return trim_through_chain
+
+    async def _generation_for(self, model_id: str, runtime: BackendRuntime, *, spans_macs: bool,
+                              speculate: bool = True):
+        """How this turn writes: guessing ahead where it pays, one token at a time otherwise.
+
+        Guesses looked up in the conversation are free, so every turn uses them (scripts/bench_decode.py:
+        answers that copy or edit what they were given came 2.55x faster on one Mac, others the same).
+        `DOTS_DRAFT_MODEL` adds the model's own draft head, on every turn, or a small draft model, on turns
+        that cross the network, where it pays (`draft_for`).
+        """
+        lookup = os.environ.get("DOTS_PROMPT_LOOKUP", "1") != "0"
+        if not speculate or not runtime.supports_speculation:
+            return self.generation
+        draft = None
+        draft_id = os.environ.get("DOTS_DRAFT_MODEL", "").strip()
+        if draft_id and draft_id != model_id:
+            draft = draft_for(await self._load_draft(draft_id, model_id, runtime), runtime, spans_macs=spans_macs)
+        if draft is None and not lookup:
+            return self.generation
+        guesses = int(os.environ.get("DOTS_DRAFT_TOKENS", draft.most_guesses if draft is not None else 4))
+        return SpeculativeGeneration(draft, draft_tokens=guesses,
+                                     adaptive=os.environ.get("DOTS_DRAFT_ADAPTIVE", "1") != "0", lookup=lookup)
+
+    async def _load_draft(self, draft_id: str, model_id: str, runtime: BackendRuntime):
+        """The draft, loaded on this Mac the first time this model needs it. None if it won't load."""
+        key = (draft_id, model_id)
+        if key not in self._drafts:
+            try:
+                self._drafts[key] = await asyncio.to_thread(load_draft, draft_id, runtime)
+            except Exception:
+                log.exception("draft %s failed to load for %s; guessing ahead without it", draft_id, model_id)
+                self._drafts[key] = None
+        return self._drafts[key]
+
+    async def _handle_make_image(self, msg: dict) -> dict:
+        """Draws one picture, whole, with the pool's model and the runner this Mac has for it, and sends it back as
+        base64 PNG. The job names the model; the command is always the runner's own."""
+        runner = image_runners.for_original(msg.get("original"), self.runners)
+        if runner is None:
+            return {"kind": "error", "error": "this Mac can't draw this pool's model"}
+        try:
+            tool = runner.tool(str(msg.get("model") or ""))
+            image = msg.get("image")
+            job = ImageJob(prompt=str(msg.get("prompt", "")), width=msg.get("width"), height=msg.get("height"),
+                           steps=msg.get("steps"), seed=msg.get("seed"),
+                           image=base64.b64decode(image) if image else None, strength=msg.get("strength"),
+                           keep_unchanged=bool(msg.get("keep_unchanged", True)))
+        except (ValueError, TypeError, binascii.Error) as e:
+            return {"kind": "error", "error": str(e)}
+        job_id = msg.get("job_id")
+
+        async def on_step(step: int, total: int, preview: bytes) -> None:
+            if job_id and self.conn is not None:
+                await self.conn.notify("image_step", job_id=job_id, step=step, of=total,
+                                       preview=base64.b64encode(preview).decode())
+
+        async with self._drawing:
+            try:
+                png, ms = await tool.draw(job, on_step if job_id else None)
+            except RuntimeError as e:
+                log.warning("image job failed: %s", e)
+                return {"kind": "error", "error": str(e)}
+        return {"kind": "image_ok", "png": base64.b64encode(png).decode(), "model": tool.model, "ms": ms}
 
     async def _handle_probe_peer(self, msg: dict) -> dict:
         """Hub-triggered probe: open (or reuse) a connection to the target

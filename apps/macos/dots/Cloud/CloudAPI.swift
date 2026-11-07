@@ -19,8 +19,7 @@ struct CloudState: Codable {
     var creditLog: [CreditEvent]
     var badges: [Badge]
     var networkLendingNow: Int
-    var lendingPoolID: String?
-    var lendingSince: Date?
+    var lendingShares: [LendingShare]
     var endorsedBefore: Int
     var hoursLent: Double?
     var computePF: Double?
@@ -89,23 +88,73 @@ struct CloudSync: Codable {
     var invites: [InviteDetails]
     /// Answers and pools are simulated by the mock cloud
     var mock: Bool
+    /// The models pools can run, by the memory they need. Older clouds don't send it.
+    var ladder: LadderData?
+    /// The hub behind the cloud: whether it answers, its model, and the ticket a worker dials to lend.
+    var hub: HubInfo?
+    /// What this Mac earned lately, from the hub's ledger. The mock doesn't send it.
+    var earning: Earning?
+    /// Where friends reach this cloud, for invite links. Unset: invites name no cloud.
+    var cloud: CloudInfo?
+}
+
+struct CloudInfo: Codable, Equatable { var address: String? }
+
+struct Earning: Codable, Equatable {
+    var lastHour: Int
+}
+
+struct HubInfo: Codable, Equatable {
+    var online: Bool
+    var model: String?
+    var ticket: String?
+    /// The token the hub asks of every Mac that joins, shared with everyone signed in to the cloud
+    var joinToken: String?
+}
+
+/// The cloud's model ladder: the models in order of the memory a pool needs, and the special ones.
+struct LadderData: Codable {
+    var tiers: [ModelTier]
+    var special: [ModelTier]
 }
 
 /// This Mac's report to the hub, every couple of seconds.
 struct Heartbeat: Codable {
     var active: Bool
-    var lendGB: Int
     /// Seconds of simulated time since the last report (the demo speed is already applied)
     var seconds: Double
     var macKind: String
     var memoryGB: Int
 }
 
+/// How much this Mac lends a pool, when joining or after
+struct Share: Codable { var gb: Int }
+
 struct HeartbeatReply: Codable { var sync: CloudSync; var unlock: UnlockEvent? }
 struct JoinReply: Codable { var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
+/// Joining a friend's cloud through their invite: who you are there, and the token to use there from now on
+struct Newcomer: Codable { var name: String; var account: String; var gb: Int }
+/// Signing up on a public cloud from the first launch: the token to use there from now on
+struct SignUp: Codable { var name: String; var account: String }
+struct SignUpReply: Codable { var token: String; var sync: CloudSync }
+struct NewcomerReply: Codable { var token: String; var macNumber: Int; var poolID: String; var unlock: UnlockEvent?; var sync: CloudSync }
 struct BadgeReply: Codable { var badge: Badge?; var sync: CloudSync }
 struct PoolReply: Codable { var pool: Pool; var sync: CloudSync }
 struct InviteReply: Codable { var invite: Invite; var sync: CloudSync }
+
+/// What a Hugging Face link runs, as the cloud reads it from the repo: for starting a pool from a link
+struct ModelDescription: Codable, Equatable {
+    var id: String
+    var name: String
+    /// "text", "pictures", or "unknown"
+    var kind: String
+    var family: String?
+    /// The size of its weights
+    var gb: Double
+    /// Whether dots runs it; nil when the cloud can't tell
+    var runs: Bool?
+    var why: String?
+}
 
 // MARK: - Calling it
 
@@ -130,7 +179,7 @@ struct CloudClient {
         guard let url = parts.url else { throw TransportError.badEndpoint }
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder.dots.encode(AnyEncodable(body))

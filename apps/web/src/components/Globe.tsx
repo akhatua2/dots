@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useRef } from 'react'
 import createGlobe from 'cobe'
 
 export interface Marker {
@@ -10,12 +10,12 @@ export interface Marker {
 // land dots, sienna worker markers. Auto-rotates. Rebuilds only when the marker
 // set changes, preserving rotation across rebuilds via a ref.
 export function Globe({ markers }: { markers: Marker[] }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const phi = useRef(0)
   const key = markers.map((m) => `${m.location[0]},${m.location[1]}:${m.size}`).join('|')
 
-  useEffect(() => {
-    const canvas = canvasRef.current
+  // React calls this with the canvas once it is in the page, and runs what it returns when the canvas
+  // goes or the markers change (a new callback), so the globe is built and torn down with no effect.
+  const mount = useCallback((canvas: HTMLCanvasElement | null) => {
     if (!canvas) return
     let width = canvas.offsetWidth
     const onResize = () => (width = canvas.offsetWidth)
@@ -55,7 +55,7 @@ export function Globe({ markers }: { markers: Marker[] }) {
 
   return (
     <canvas
-      ref={canvasRef}
+      ref={mount}
       className="aspect-square w-full max-w-[440px]"
       style={{ contain: 'layout paint size' }}
     />

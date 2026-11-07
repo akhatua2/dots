@@ -20,6 +20,12 @@ final class CloudBackend: DotsBackend {
     var client: CloudClient
     private(set) var note: WeeklyNote?
     private(set) var worker: WorkerStatus?
+    /// The hub behind a real cloud, with the ticket this Mac's worker dials. Nil from the mock.
+    private(set) var hub: HubInfo?
+    /// Where friends reach this cloud, when it says
+    private(set) var cloudAddress: String?
+    /// What this Mac earned in the last hour, from the ledger. Nil from the mock.
+    private(set) var earning: Earning?
     private(set) var invites: [InviteDetails] = []
     private(set) var isMock = true
     private(set) var isConnected = false
@@ -28,6 +34,9 @@ final class CloudBackend: DotsBackend {
     var pendingUnlock: (poolID: String, event: UnlockEvent)?
 
     @ObservationIgnored private var beating = false
+    /// Changes sent that the cloud hasn't answered yet: until it has, a heartbeat's state is older than this Mac's
+    @ObservationIgnored private var unanswered = 0
+    @ObservationIgnored private var wantActive = false
     @ObservationIgnored private var pendingSeconds: Double = 0
     @ObservationIgnored private var lastBeat = Date.distantPast
     @ObservationIgnored private var lastActive: Bool?
@@ -65,6 +74,10 @@ final class CloudBackend: DotsBackend {
     private func adopt(_ sync: CloudSync) {
         mirror.adopt(sync.state)
         Pricing.terms = sync.terms
+        if let ladder = sync.ladder { Ladder.adopt(ladder) }
+        hub = sync.hub
+        cloudAddress = sync.cloud?.address
+        earning = sync.earning
         note = sync.note
         worker = sync.worker
         invites = sync.invites
@@ -79,11 +92,17 @@ final class CloudBackend: DotsBackend {
     }
 
     /// Sends a change, and takes the cloud's answer as the truth. A heartbeat sent before this change can't undo it.
+    /// Changes reach the cloud in the order they were made: giving one pool less, then another pool more, must not
+    /// arrive the other way round.
     private func send(_ op: @escaping () async throws -> CloudSync) {
         serial += 1
+        unanswered += 1
+        let previous = inFlight.last
         inFlight.removeAll { $0.isCancelled }
         inFlight.append(Task {
+            await previous?.value
             do { adopt(try await op()) } catch { failed(error) }
+            unanswered -= 1
         })
     }
 
@@ -96,12 +115,14 @@ final class CloudBackend: DotsBackend {
         }
     }
 
-    /// The worker's report to the hub: lending or not, how much, and how much simulated time has passed.
+    /// The worker's report to the hub: lending or not, and how much simulated time has passed. One goes at a time;
+    /// when lending starts or stops while one is on its way, another follows it with the change.
     func beat(active: Bool) {
+        wantActive = active
         guard !beating else { return }
         beating = true
         Task {
-            await beatNow(active: active)
+            repeat { await beatNow(active: wantActive) } while lastActive != wantActive
             beating = false
         }
     }
@@ -113,11 +134,13 @@ final class CloudBackend: DotsBackend {
         lastBeat = .now
         lastActive = active
         let atSerial = serial
-        let report = Heartbeat(active: active, lendGB: state.lending.limitGB, seconds: seconds, macKind: ThisMac.kind, memoryGB: ThisMac.memoryGB)
+        let report = Heartbeat(active: active, seconds: seconds, macKind: ThisMac.kind, memoryGB: ThisMac.memoryGB)
         do {
             let reply: HeartbeatReply = try await client.send("POST", "hub/v1/heartbeat", body: report)
-            if atSerial == serial { adopt(reply.sync) } else { worker = reply.sync.worker }
-            if let u = reply.unlock, u.byMacID == state.thisMacID, let pool = state.lendingPoolID { pendingUnlock = (pool, u) }
+            if atSerial == serial, unanswered == 0 { adopt(reply.sync) } else { worker = reply.sync.worker }
+            if let u = reply.unlock, u.byMacID == state.thisMacID, let pool = u.poolID ?? state.lendingShares.first?.poolID {
+                pendingUnlock = (pool, u)
+            }
         } catch {
             pendingSeconds += seconds
             failed(error)
@@ -129,8 +152,9 @@ final class CloudBackend: DotsBackend {
         try await client.get("v1/invites/\(code)", query: [URLQueryItem(name: "memory_gb", value: "\(ThisMac.memoryGB)")])
     }
 
-    func accept(code: String) async throws -> JoinReply {
-        let reply: JoinReply = try await client.send("POST", "v1/invites/\(code)/accept")
+    func accept(code: String, gb: Int) async throws -> JoinReply {
+        await settled()  // after the changes made before it, which may have made the room it lends
+        let reply: JoinReply = try await client.send("POST", "v1/invites/\(code)/accept", body: Share(gb: gb))
         serial += 1
         adopt(reply.sync)
         return reply
@@ -148,11 +172,16 @@ final class CloudBackend: DotsBackend {
 
     // MARK: The network (the cloud's part)
 
-    func join(poolID: String) -> JoinOutcome {
-        let outcome = mirror.join(poolID: poolID)
+    func join(poolID: String, gb: Int) -> JoinOutcome {
+        let outcome = mirror.join(poolID: poolID, gb: gb)
         saveLocal()
-        send { (try await self.client.send("POST", "v1/pools/\(poolID)/join") as JoinReply).sync }
+        send { (try await self.client.send("POST", "v1/pools/\(poolID)/join", body: Share(gb: gb)) as JoinReply).sync }
         return outcome
+    }
+
+    func setShare(poolID: String, gb: Int) {
+        mirror.setShare(poolID: poolID, gb: gb)
+        send { try await self.client.send("POST", "v1/pools/\(poolID)/share", body: Share(gb: gb)) }
     }
 
     func leave(poolID: String) {
@@ -166,11 +195,20 @@ final class CloudBackend: DotsBackend {
         return badge
     }
 
-    func createPool(name: String, isPublic: Bool) -> Pool {
+    func createPool(name: String, isPublic: Bool) -> Pool { createPool(name: name, isPublic: isPublic, model: nil) }
+
+    /// A pool that runs the model at `model` (a Hugging Face repo), when one is given
+    func createPool(name: String, isPublic: Bool, model: String?) -> Pool {
         let pool = mirror.createPool(name: name, isPublic: isPublic)
-        struct Body: Encodable { var id: String; var name: String; var isPublic: Bool }
-        send { (try await self.client.send("POST", "v1/pools", body: Body(id: pool.id, name: name, isPublic: isPublic)) as PoolReply).sync }
+        struct Body: Encodable { var id: String; var name: String; var isPublic: Bool; var model: String? }
+        let body = Body(id: pool.id, name: name, isPublic: isPublic, model: model)
+        send { (try await self.client.send("POST", "v1/pools", body: body) as PoolReply).sync }
         return pool
+    }
+
+    /// What a Hugging Face link runs, read by the cloud
+    func describeModel(_ link: String) async throws -> ModelDescription {
+        try await client.get("v1/models/describe", query: [URLQueryItem(name: "link", value: link)])
     }
 
     func createInvite(poolID: String) -> Invite {
@@ -230,8 +268,11 @@ final class CloudBackend: DotsBackend {
         saveLocal()
     }
 
+    /// Against the mock, the change shows at once by the same rules the mock runs. Against a real cloud the pool
+    /// counts what this Mac's worker really lends, which only the hub knows, so the app waits for its answer:
+    /// guessing from the setting made the pool's level flip between the guess and the truth on every heartbeat.
     func applyLendingStatus(active: Bool) -> UnlockEvent? {
-        let unlock = mirror.applyLendingStatus(active: active)
+        let unlock = isMock ? mirror.applyLendingStatus(active: active) : nil
         if active != lastActive { beat(active: active) }
         return unlock
     }

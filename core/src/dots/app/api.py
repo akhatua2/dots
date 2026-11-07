@@ -4,6 +4,8 @@ A `dots hub` can optionally expose a second port speaking the chat-
 completions subset of the OpenAI API:
 
     POST /v1/chat/completions   — generate a response (streaming or not)
+    POST /v1/images/generations — draw a picture from words
+    POST /v1/images/edits       — draw from a starting picture and words
     GET  /v1/models             — list the served model
     GET  /healthz               — basic liveness probe
 
@@ -20,10 +22,13 @@ weights are sharded behind the scenes.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -50,6 +55,48 @@ _CORS_HEADERS = {
     "Access-Control-Allow-Headers": "Authorization, Content-Type, ngrok-skip-browser-warning",
     "Access-Control-Max-Age": "86400",
 }
+
+
+# Who an HTTP turn is charged to. /v1 is behind the join token, so a caller that holds it may name the
+# account (the dots cloud names the person asking); anything else is charged to a shared "api" account.
+_API_ACCOUNT = "api"
+_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _querier(request: web.Request) -> str:
+    named = request.headers.get("X-Dots-Account", "")
+    return named if _ACCOUNT_ID.match(named) else _API_ACCOUNT
+
+
+# A request's privacy level: "mine" runs only on the asker's own Macs, and is refused rather than run anywhere else
+_ONLY_MINE = "mine"
+
+
+def _only_mine(body: dict) -> bool:
+    return str(body.get("privacy") or "") == _ONLY_MINE
+
+
+# "pools": kept in the asker's pools, so its head runs on the asker's own Mac when they lend there
+_MY_POOLS = "pools"
+
+
+def _in_my_pools(body: dict) -> bool:
+    return str(body.get("privacy") or "") in (_MY_POOLS, _ONLY_MINE)
+
+
+def _template_kwargs(body: dict) -> dict:
+    """Options for the model's chat template. A request can pass them as vLLM does, in
+    `chat_template_kwargs`; without `enable_thinking` there, the hub's DOTS_THINKING setting decides (off by
+    default: a thinking model answers straight away instead of writing out its reasoning first)."""
+    given = body.get("chat_template_kwargs")
+    kwargs = dict(given) if isinstance(given, dict) else {}
+    kwargs.setdefault("enable_thinking", os.environ.get("DOTS_THINKING", "0") == "1")
+    return kwargs
+
+
+def _speculate(request: web.Request) -> bool:
+    """`X-Dots-Speculate: off` asks for one-token-at-a-time decoding, to compare against a draft model."""
+    return request.headers.get("X-Dots-Speculate", "").strip().lower() != "off"
 
 
 def _bearer(request: web.Request) -> str | None:
@@ -101,6 +148,8 @@ class HttpApi:
             middlewares=[_auth_cors_middleware],
         )
         app.router.add_post("/v1/chat/completions", self._chat_completions)
+        app.router.add_post("/v1/images/generations", self._images)
+        app.router.add_post("/v1/images/edits", self._images)
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/v1/credits", self._credits_all)
         app.router.add_get("/v1/credits/{account_id}", self._credits_one)
@@ -127,7 +176,7 @@ class HttpApi:
     # ──────────────────────────── handlers ──────────────────────────────
 
     async def _models(self, _request: web.Request) -> web.Response:
-        models = sorted(self.hub.deployments)
+        deployments = self.hub.deployments
         return web.json_response(
             {
                 "object": "list",
@@ -136,11 +185,88 @@ class HttpApi:
                         "id": model_id,
                         "object": "model",
                         "owned_by": "dots",
+                        # Recent decode speed across the pool; 0 until a turn has finished
+                        "tok_per_sec": round(deployments[model_id].tok_per_sec, 1),
                     }
-                    for model_id in models
+                    for model_id in sorted(deployments)
+                ] + [
+                    {"id": model_id, "object": "model", "owned_by": "dots", "type": "image"}
+                    for model_id in self.hub.image_models()
                 ],
             }
         )
+
+    async def _images(self, request: web.Request) -> web.Response:
+        """OpenAI's image API, drawn whole on a Mac that offers an image model. An edit sends its starting
+        picture as `image`: a data: URL or base64 in JSON, or a file in a multipart form, as OpenAI's own."""
+        from ..distributed.hub import NoImageMac
+        from ..images import ImageJob, parse_size
+
+        editing = request.path.endswith("/edits")
+        try:
+            body, image = await _image_request(request)
+            width, height = parse_size(body.get("size"))
+            job = ImageJob(prompt=str(body.get("prompt", "")), width=width, height=height,
+                           steps=_int_or_none(body.get("steps")), seed=_int_or_none(body.get("seed")), image=image,
+                           strength=float(body["strength"]) if body.get("strength") is not None else None,
+                           keep_unchanged=str(body.get("keep_unchanged", True)).lower() not in ("false", "0", "no"))
+        except (ValueError, TypeError) as e:
+            return _error(400, str(e))
+        if editing and job.image is None:
+            return _error(400, "an edit needs the picture to start from, as `image`")
+        # The pool's model, and the original it was made from, which says how a Mac runs it
+        model, original = body.get("model"), body.get("original")
+        if not isinstance(model, str) or not model or not isinstance(original, str) or not original:
+            return _error(400, "name the pool's image model and the original it was made from")
+        payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
+                   "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged,
+                   "pool": str(body.get("pool") or ""), "model": model, "original": original}
+        if _only_mine(body):
+            account = _querier(request)
+            if account == _API_ACCOUNT:
+                return _error(400, "only my Macs needs to know whose Macs: name the account asking")
+            payload["only_account"] = account
+        if job.image is not None:
+            payload["image"] = base64.b64encode(job.image).decode()
+        if str(body.get("stream", False)).lower() in ("true", "1"):
+            return await self._stream_image(request, payload, "image_edit" if editing else "image_generation")
+        try:
+            drawn = await self.hub.make_image(**payload)
+        except NoImageMac as e:
+            return _error(503, str(e))
+        except RuntimeError as e:
+            return _error(502, str(e))
+        return web.json_response({
+            "created": int(time.time()),
+            "data": [{"b64_json": drawn["png"]}],
+            "dots": {"model": drawn.get("model"), "ms": round(drawn.get("ms", 0)), "worker_id": drawn["worker_id"]},
+        })
+
+    async def _stream_image(self, request: web.Request, payload: dict, kind: str) -> web.StreamResponse:
+        """The picture as it forms, a preview after each step, then the picture itself, as server-sent events
+        named as OpenAI's streamed images are (`image_generation.partial_image`, `...completed`)."""
+        from ..distributed.hub import NoImageMac
+
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await response.prepare(request)
+
+        async def send(event: str, data: dict) -> None:
+            await response.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
+
+        async def on_step(step: int, of: int, preview: str) -> None:
+            await send(f"{kind}.partial_image", {"type": f"{kind}.partial_image", "partial_image_index": step - 1,
+                                                 "b64_json": preview, "dots": {"step": step, "of": of}})
+
+        try:
+            drawn = await self.hub.make_image(on_step=on_step, **payload)
+        except (NoImageMac, RuntimeError) as e:
+            await send("error", {"type": "error", "error": {"message": str(e)}})
+        else:
+            await send(f"{kind}.completed", {"type": f"{kind}.completed", "b64_json": drawn["png"],
+                                             "dots": {"model": drawn.get("model"), "ms": round(drawn.get("ms", 0)),
+                                                      "worker_id": drawn["worker_id"]}})
+        await response.write_eof()
+        return response
 
     async def _credits_all(self, _request: web.Request) -> web.Response:
         return web.json_response(self.hub.ledger.as_dict())
@@ -173,11 +299,20 @@ class HttpApi:
                 "device": p.device,
                 "model": p.requested_model_id,
                 "layer_range": list(p.layer_range) if p.layer_range else None,
+                "pool": p.pool,
+                # The memory this worker offers the pool (its own cap applied), in GB.
+                "ram_gb": self._ram_gb(p.id),
+                # Part of a turn being answered right now
+                "serving": self.hub.is_serving(p.id),
                 "geo": p.geo,
             }
             for p in self.hub.participants.values()
             if p.compute
         ]
+
+    def _ram_gb(self, worker_id: str) -> float | None:
+        decl = self.hub.pool_view.resources.get(worker_id)
+        return round(decl.ram_gb_free, 1) if decl is not None else None
 
     async def _pool_nodes(self, _request: web.Request) -> web.Response:
         """List the compute workers in the pool, with their advertised location."""
@@ -276,9 +411,20 @@ class HttpApi:
         if not isinstance(model_id, str) or not model_id:
             return _error(400, "model must be a non-empty string")
 
-        deployment = await self.hub.ensure_model_started(model_id)
+        # A question kept in your pools runs its head on your own Mac, when you lend to the pool
+        if _in_my_pools(body) and _querier(request) != _API_ACCOUNT:
+            self.hub.want_head_on(model_id, _querier(request))
+        # The pool that asks: its model runs on its own Macs only. Unnamed, the hub's default pool.
+        deployment = await self.hub.ensure_model_started(model_id, pool=str(body.get("pool") or ""))
         if not deployment.pool_ready.is_set():
-            return _error(503, "pool not ready — no compute workers available")
+            # The first question after the hub starts loads the model; with Macs in the pool it waits for that
+            # instead of turning the question away
+            wait = float(os.environ.get("DOTS_FIRST_ANSWER_WAIT_S", "180"))
+            if not any(p.compute for p in self.hub.participants.values()) or not await _ready_within(deployment, wait):
+                return _error(503, "pool not ready — no compute workers available")
+        # Only my Macs: every Mac holding the model must be the asker's own, or it doesn't run at all
+        if _only_mine(body) and (_querier(request) == _API_ACCOUNT or not self.hub.only_on(deployment, _querier(request))):
+            return _error(409, "only my Macs: this pool's model is on Macs that aren't yours, so it didn't run")
 
         # Each HTTP request gets a fresh, stateless Conversation. The hub
         # routes worker COMPUTE responses by conv_id, so a unique id per
@@ -288,10 +434,13 @@ class HttpApi:
         conv = Conversation(id=f"http-{uuid.uuid4()}")
         conv.history = list(messages)
         conv.token_count = 0
+        conv.template_kwargs = _template_kwargs(body)
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created_at = int(time.time())
 
+        account = _querier(request)
+        speculate = _speculate(request)
         try:
             if stream:
                 return await self._stream(
@@ -302,6 +451,8 @@ class HttpApi:
                     max_tokens,
                     temperature,
                     model_id,
+                    account,
+                    speculate,
                 )
             return await self._nonstream(
                 conv,
@@ -310,6 +461,8 @@ class HttpApi:
                 max_tokens,
                 temperature,
                 model_id,
+                account,
+                speculate,
             )
         finally:
             # Drop the per-conv KV cache from every worker so stateless
@@ -332,17 +485,22 @@ class HttpApi:
         max_new_tokens: int,
         temperature: float,
         model_id: str,
+        account: str,
+        speculate: bool = True,
     ) -> web.Response:
         try:
             text, stats = await self.hub.run_turn(
                 conv,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
+                querier_account=account,
                 model_id=model_id,
+                speculate=speculate,
             )
         except Exception as e:
             log.exception("turn failed")
             return _error(500, f"turn failed: {e}")
+        self.hub.record_api_turn(conv, account, stats, model_id)
 
         return web.json_response(
             {
@@ -375,6 +533,8 @@ class HttpApi:
         max_new_tokens: int,
         temperature: float,
         model_id: str,
+        account: str,
+        speculate: bool = True,
     ) -> web.StreamResponse:
         response = web.StreamResponse(
             status=200,
@@ -409,13 +569,26 @@ class HttpApi:
         async def emit(text: str) -> None:
             await response.write(chunk({"content": text}))
 
+        async def emit_draft(event: dict) -> None:
+            # Not part of the answer: OpenAI clients ignore the extra field. The dots app shows the draft's
+            # proposal greyed out, and each check as kept and rejected tokens.
+            if "kept" in event:
+                dots = {"event": "verified", "kept": int(event["kept"]), "proposed": int(event["proposed"])}
+            else:
+                dots = {"event": "draft", "text": event.get("text", "")}
+            payload = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}], "dots": dots}
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+
         try:
-            await self.hub.run_turn(
+            _, stats = await self.hub.run_turn(
                 conv,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 on_token=emit,
+                querier_account=account,
                 model_id=model_id,
+                on_draft=emit_draft,
+                speculate=speculate,
             )
         except Exception as e:
             log.exception("streaming turn failed")
@@ -424,9 +597,51 @@ class HttpApi:
             await response.write(b"data: [DONE]\n\n")
             return response
 
+        self.hub.record_api_turn(conv, account, stats, model_id)
+        if "speedup" in stats:
+            speed = {"choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                     "dots": {"event": "speed", "speedup": stats["speedup"]}}
+            await response.write(f"data: {json.dumps(speed)}\n\n".encode("utf-8"))
         await response.write(chunk({}, finish_reason="stop"))
         await response.write(b"data: [DONE]\n\n")
         return response
+
+
+async def _image_request(request: web.Request) -> tuple[dict, bytes | None]:
+    """The request's fields, and its starting picture if it sent one."""
+    if request.content_type.startswith("multipart/"):
+        form = await request.post()
+        upload = form.get("image") or form.get("image[]")
+        image = upload.file.read() if hasattr(upload, "file") else None
+        return {k: v for k, v in form.items() if isinstance(v, str)}, image
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError("request body must be valid JSON") from e
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    image = body.get("image")
+    if image is None:
+        return body, None
+    if not isinstance(image, str):
+        raise ValueError("image is a data: URL or base64")
+    payload = image.split(",", 1)[1] if image.startswith("data:") else image
+    try:
+        return body, base64.b64decode(payload, validate=True)
+    except binascii.Error as e:
+        raise ValueError("image isn't valid base64") from e
+
+
+async def _ready_within(deployment, seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(deployment.pool_ready.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+def _int_or_none(value) -> int | None:
+    return None if value is None or value == "" else int(value)
 
 
 def _error(status: int, message: str) -> web.Response:

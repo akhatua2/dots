@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listModels, streamChat, ApiError, type ChatMessage } from '../lib/api'
 import type { Conn } from '../lib/config'
@@ -19,11 +19,6 @@ export function ChatView({ conn }: { conn: Conn }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
-  const scrollRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages])
 
   async function send() {
     const text = input.trim()
@@ -86,8 +81,8 @@ export function ChatView({ conn }: { conn: Conn }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl space-y-6 px-6 py-8">
+      <div className="flex-1 overflow-y-auto">
+        <div ref={followGrowth} className="mx-auto max-w-2xl space-y-6 px-6 py-8">
           {messages.map((m) => (
             <Entry key={m.id} msg={m} />
           ))}
@@ -99,6 +94,15 @@ export function ChatView({ conn }: { conn: Conn }) {
       </div>
     </div>
   )
+}
+
+/** Keeps the transcript scrolled to the bottom as it grows, a new message or a streaming token alike. */
+function followGrowth(content: HTMLDivElement | null) {
+  const scroller = content?.parentElement
+  if (!content || !scroller) return
+  const observer = new ResizeObserver(() => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
+  observer.observe(content)
+  return () => observer.disconnect()
 }
 
 function Entry({ msg }: { msg: Msg }) {
@@ -134,18 +138,22 @@ function Composer({
   busy: boolean
   disabled: boolean
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.style.height = '0px'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-  }, [value])
+  // Grows with what is typed, up to 200 px. A new callback per value makes React run it after each change,
+  // including when the box is emptied after sending.
+  const fit = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      if (!el) return
+      el.style.height = '0px'
+      el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [value],
+  )
 
   return (
     <div className="rounded-3xl border border-line-2 bg-bg p-2 transition-shadow focus-within:border-faint">
       <textarea
-        ref={ref}
+        ref={fit}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {

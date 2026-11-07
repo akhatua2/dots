@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// `dots --selftest` checks every user story end to end. It runs a mock cloud of its own (fresh, never saved),
 /// the local API on a spare port, and stand-ins for a model on this Mac and a provider behind your own key,
@@ -71,6 +71,9 @@ enum SelfTest {
         if model.state.thisMac.maxLendGB > 0 {
             await lendingStories(rig)
             await communityStories(rig)
+            await privacyStories(rig)
+            await welcomeStory(rig)
+            await friendsCloudStory(rig)
         } else {
             print("\nThis Mac can't lend (it needs more than 8 GB of memory), so stories 7 to 17 can't run here.")
         }
@@ -78,9 +81,83 @@ enum SelfTest {
             await realAnswers(url, rig)
         }
         await workspaceChecks()
+        answerFormatting()
 
         print("\n\(passes) passed, \(failures) failed.")
         return failures == 0
+    }
+
+    /// A 1600x1200 photo, edited as a small copy with a red square drawn in: the result is 1600x1200, red where
+    /// the square was, and the photo's own pixels far from it.
+    private static func putBackKeepsThePhoto() -> Bool {
+        func picture(_ size: NSSize, square: NSRect?) -> Data? {
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSGradient(starting: .systemTeal, ending: .systemIndigo)?.draw(in: rect, angle: 30)
+                if let square { NSColor.systemRed.setFill(); square.fill() }
+                return true
+            }
+            guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+            rep.size = size
+            return rep.representation(using: .png, properties: [:])
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-photo.png")
+        guard let full = picture(NSSize(width: 1600, height: 1200), square: nil), (try? full.write(to: url)) != nil,
+              let sent = picture(NSSize(width: 400, height: 300), square: nil),
+              let edited = picture(NSSize(width: 400, height: 300), square: NSRect(x: 50, y: 50, width: 80, height: 60)),
+              let out = Compositing.putBack(edited: edited, sent: sent, into: url),
+              let result = NSBitmapImageRep(data: out), let original = NSBitmapImageRep(data: full) else { return false }
+        func close(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.02 && abs(a.greenComponent - b.greenComponent) < 0.02
+                && abs(a.blueComponent - b.blueComponent) < 0.02
+        }
+        let red = result.colorAt(x: 360, y: 1200 - 360)?.usingColorSpace(.sRGB)
+        return result.pixelsWide == 1600 && result.pixelsHigh == 1200
+            && close(result.colorAt(x: 1400, y: 200), original.colorAt(x: 1400, y: 200))
+            && close(result.colorAt(x: 1200, y: 900), original.colorAt(x: 1200, y: 900))
+            && (red?.redComponent ?? 0) > 0.8 && (red?.greenComponent ?? 1) < 0.4
+    }
+
+    /// A question about a photo stays on your own Macs, and only goes to a model that reads images.
+    private static func pictureStories(_ model: AppModel) {
+        let photo = RequestFacts(inputTokens: 40, hasImages: true)
+        let studio = model.state.myPools.first { $0.name == "Studio 9" }
+        let ask = { Router.decide(question: "What's in this photo?", hasDocument: true, state: model.state,
+                                  rules: model.settings.rules, facts: photo) }
+        let noReader = ask()
+        check("A photo stays on your own Macs, and with none of them reading images it asks first",
+              noReader.chosen == nil && noReader.level == .mine && noReader.needsConsent?.contains("your own Macs") == true)
+        let saved = LadderData(tiers: Ladder.tiers, special: Ladder.special)
+        Ladder.adopt(LadderData(tiers: Ladder.tiers.map { var t = $0; t.readsImages = t.id == studio?.model?.id; return t },
+                                special: Ladder.special))
+        let reader = ask()
+        check("Even once Studio 9's model reads images, the photo doesn't go there: friends' Macs lend in it",
+              reader.chosen == nil && reader.needsConsent != nil)
+        let mac = RouteCandidate(id: "mac", destination: .thisMac, place: "This Mac", model: "A model that reads images",
+                                 modelID: "local", credits: 0, listCredits: 0, tokPerSec: 30, isPrivate: true, poolID: nil,
+                                 minGB: 18, canReadImages: true, onlyMine: true)
+        let onMine = Router.decide(question: "What's in this photo?", hasDocument: true, state: model.state,
+                                   rules: model.settings.rules, facts: photo, thisMac: mac)
+        check("A model on this Mac that reads images takes it, free and only on your Macs",
+              onMine.chosen?.destination == .thisMac && onMine.level == .mine && onMine.chosen?.credits == 0)
+        Ladder.adopt(saved)
+        let sent = (try? JSONEncoder().encode(ChatMessage(role: "user", content: "What is this?", images: [Data([1, 2, 3])])))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let parts = sent?["content"] as? [[String: Any]]
+        check("A question with a photo goes out as an image part, then its text",
+              parts?.first?["type"] as? String == "image_url" && parts?.last?["text"] as? String == "What is this?")
+        // Draw takes a photo to change, shrunk to what a pool reads, and not a document
+        let draw = DrawController(persists: false)
+        let drawPhoto = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-draw.jpg")
+        let note = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-note.txt")
+        try? SampleData.photo?.write(to: drawPhoto)
+        try? "a note".write(to: note, atomically: true, encoding: .utf8)
+        draw.attach(note, maxPixels: 100_000)
+        let ignoredNote = draw.start == nil
+        draw.attach(drawPhoto, maxPixels: 100_000)
+        let shrunk = draw.start.flatMap { NSImage(data: $0.sent) }.map { $0.size.width * $0.size.height <= 101_000 } ?? false  // the short side rounds up
+        check("Draw changes a photo, sent shrunk to what a pool reads, and leaves documents to Ask",
+              ignoredNote && shrunk && draw.start?.drawn == nil)
     }
 
     // MARK: Stories 1 to 6: the router and the endpoint
@@ -92,7 +169,7 @@ enum SelfTest {
         let list = await call(base, "GET", "/models")
         let ids = ((list.json?["data"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
         check("GET /v1/models lists auto, the pools' models and Claude, without a key",
-              list.code == 200 && ids.contains("auto") && ids.contains("deepseek-v3.1") && ids.contains("claude-opus-5-5"))
+              list.code == 200 && ids.contains("auto") && ids.contains("glm-5.3") && ids.contains("claude-opus-5-5"))
         let noKey = await call(base, "POST", "/chat/completions", body: ask("hi"))
         check("Without a key, OpenAI's format gets a 401 in OpenAI's error shape", noKey.code == 401 && noKey.errorType == "authentication_error")
         let noKeyA = await call(base, "POST", "/messages", format: .anthropic, body: ask("hi", format: .anthropic))
@@ -136,10 +213,11 @@ enum SelfTest {
         check("Preferring the best answer sends it to Claude instead", best.code == 200 && best.text("ran_on") == "Anthropic" && best.int("credits") > 0)
         let tools = await call(base, "POST", "/chat/completions", key: secret, body: ask("What's the weather in Lisbon?", extra: ["tools": [weatherTool]]))
         check("A request with tools goes to a frontier model, the only kind that takes them", tools.code == 200 && tools.text("ran_on") == "Anthropic")
-        let kimi = await call(base, "POST", "/chat/completions", key: secret, body: ask("Summarise this paper.", model: "kimi-k2"))
-        let fastest = model.state.publicPools.filter { $0.model?.id == "kimi-k2" && $0.lendingMacs > 0 }.max { $0.tokPerSec < $1.tokPerSec }
-        check("Pinning kimi-k2 runs it in the fastest public pool that has it (\(fastest?.name ?? "none")), for its credits",
-              kimi.code == 200 && fastest != nil && kimi.text("ran_on").contains(fastest?.name ?? "?") && kimi.int("credits") == Ladder.tier("kimi-k2")?.credits)
+        pictureStories(model)
+        let kimi = await call(base, "POST", "/chat/completions", key: secret, body: ask("Summarise this paper.", model: "kimi-k2.5"))
+        let fastest = model.state.publicPools.filter { $0.model?.id == "kimi-k2.5" && $0.lendingMacs > 0 }.max { $0.tokPerSec < $1.tokPerSec }
+        check("Pinning kimi-k2.5 runs it in the fastest public pool that has it (\(fastest?.name ?? "none")), for its credits",
+              kimi.code == 200 && fastest != nil && kimi.text("ran_on").contains(fastest?.name ?? "?") && kimi.int("credits") == Ladder.tier("kimi-k2.5")?.credits)
         model.settings.poolEndpoint = EndpointConfig(enabled: true, label: "LM Studio", baseURL: "http://127.0.0.1:\(rig.macPort)/v1",
                                                      model: "qwen3-8b", keychainAccount: "dots-selftest-none")
         let local = await call(base, "POST", "/chat/completions", key: secret, body: ask("What's a good name for a cat?"))
@@ -252,11 +330,12 @@ enum SelfTest {
         model.join(model.state.pool("studio-9")!)
         await model.backend.settled()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
-        check("Lending to Studio 9: the hub has this Mac lending \(model.state.lending.limitGB) GB",
-              mine("studio-9")?.state == .lending && mine("studio-9")?.lendGB == model.state.lending.limitGB)
+        let studioShare = model.state.share(in: "studio-9")?.gb ?? 0
+        check("Joining Studio 9 lends it all this Mac has to lend: \(studioShare) GB, and the hub has it lending",
+              studioShare == model.state.thisMac.maxLendGB && mine("studio-9")?.state == .lending && mine("studio-9")?.lendGB == studioShare)
         let worker = model.backend.worker
         check("The hub gives this Mac its share of the model's layers",
-              worker?.poolName == "Studio 9" && worker?.layers == 94 && (worker.map { $0.lastLayer >= $0.firstLayer } ?? false))
+              worker?.poolName == "Studio 9" && worker?.layers == model.state.pool("studio-9")?.model?.layers && (worker.map { $0.lastLayer >= $0.firstLayer } ?? false))
         print("      \(worker?.line ?? "no worker")")
         model.pauseForAnHour()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
@@ -273,6 +352,7 @@ enum SelfTest {
         model.refreshLending()
         await model.backend.beatNow(active: model.lendingStatus.isActive)
         check("Plugged back in, it lends again", mine("studio-9")?.state == .lending)
+        await launcherChecks()
 
         story(8, "Credits for measured work, every entry visible")
         cloud.forcedWorking = true
@@ -280,7 +360,7 @@ enum SelfTest {
         await model.backend.beatNow(active: true, adding: 3_600)
         let after = cloud.world.state
         let studio = after.pool("studio-9")!
-        let lend = after.lending.limitGB
+        let lend = after.share(in: "studio-9")?.gb ?? 0
         let rate = studio.creditsPerHour(lendGB: lend)
         let compute = Simulation.computePF(pool: studio, lendGB: lend, seconds: 3_600)
         let entry = after.creditLog.first
@@ -355,29 +435,49 @@ enum SelfTest {
 
         story(12, "Joining a pool is a moment")
         let union = model.state.pool("student-union")!
+        let studio = model.state.pool("studio-9")!
+        // Studio 9 has all this Mac lends: give it nothing, staying in it, so Student Union can have it all
+        model.setShare(studio, gb: 0)
         model.join(union)
         let joined = joinedMoment(model, "student-union")
         check("Joining Student Union shows the moment: this Mac is its \(union.totalMacs + 1)th", joined?.macNumber == union.totalMacs + 1)
         await model.backend.settled()
+        await model.backend.beatNow(active: model.lendingStatus.isActive)
         let inCloud = cloud.world.state.pool("student-union")
-        check("The cloud has you in it, lending there, and only there",
+        check("The cloud has you in it, lending there, and only there; still in Studio 9, lending it nothing",
               inCloud?.isMember(model.state.meID) == true && inCloud?.macs.first { $0.macID == me }?.state == .lending
-              && cloud.world.state.lendingPoolID == "student-union" && cloud.world.state.pool("studio-9")?.macs.contains { $0.macID == me } == false)
+              && cloud.world.state.lendingShares.map(\.poolID) == ["student-union"]
+              && cloud.world.state.pool("studio-9")?.macs.contains { $0.macID == me } == false
+              && cloud.world.state.pool("studio-9")?.isMember(model.state.meID) == true)
+        let half = model.state.thisMac.maxLendGB / 2
+        model.setShare(union, gb: half)
+        model.setShare(studio, gb: model.state.thisMac.maxLendGB)
+        await model.backend.settled()
+        await model.backend.beatNow(active: model.lendingStatus.isActive)
+        let split = cloud.world.state
+        check("One Mac lends to two pools, an amount to each: \(half) GB to Student Union, the other \(split.share(in: "studio-9")?.gb ?? 0) to Studio 9",
+              split.share(in: "student-union")?.gb == half && split.share(in: "studio-9")?.gb == split.thisMac.maxLendGB - half
+              && split.pool("student-union")?.macs.first { $0.macID == me }?.lendGB == half
+              && split.pool("studio-9")?.macs.first { $0.macID == me }?.lendGB == split.thisMac.maxLendGB - half)
+        check("...and neither can take what the other has", model.state.mostGB(for: "studio-9") == split.thisMac.maxLendGB - half)
+        model.setShare(studio, gb: 0)
+        model.setShare(union, gb: model.state.thisMac.maxLendGB)
+        await model.backend.settled()
 
         story(13, "An unlock names the Mac that tipped it")
-        check("This Mac took Student Union from \(union.pooledGB) GB over DeepSeek V3.1's line",
-              joined?.unlock?.modelID == "deepseek-v3.1" && joined?.unlock?.byMacID == me)
+        check("This Mac took Student Union from \(union.pooledGB) GB over GLM 5.3's line",
+              joined?.unlock?.modelID == "glm-5.3" && joined?.unlock?.byMacID == me)
         check("The cloud records the unlock against this Mac, and the pool runs it now",
-              inCloud?.unlocks.contains { $0.modelID == "deepseek-v3.1" && $0.byMacID == me } == true && inCloud?.model?.id == "deepseek-v3.1")
+              inCloud?.unlocks.contains { $0.modelID == "glm-5.3" && $0.byMacID == me } == true && inCloud?.model?.id == "glm-5.3")
 
         story(14, "Badges for showing up")
         await model.backend.beatNow(active: true, adding: 3 * 3_600)
         check("Passing 100 hours lent earns 100 hours", badges().contains("hours-100") && (cloud.world.state.hoursLent ?? 0) >= 100)
-        check("Taking a pool over a line earns Unlocker", badges().contains("unlock-student-union-deepseek-v3.1"))
+        check("Taking a pool over a line earns Unlocker", badges().contains("unlock-student-union-glm-5.3"))
         model.endorse(model.state.pool("student-union")!)
         await model.backend.settled()
         check("Endorsing a pool of fewer than 20 Macs earns Early backer", badges().contains("backer-student-union"))
-        model.startPool(name: "Self-test Lab", isPublic: false)
+        model.startPool(name: "Self-test Lab", isPublic: false, model: nil)
         await model.backend.settled()
         let lab = cloud.world.state.pools.first { $0.name == "Self-test Lab" }
         check("Starting a pool earns Pool starter, and the cloud keeps the pool under the app's id",
@@ -411,18 +511,21 @@ enum SelfTest {
               preview?.unlocks != nil && preview?.unlocks == expected && preview?.addGB == model.state.thisMac.maxLendGB)
         let small: InviteDetails? = try? await model.backend.client.get("v1/invites/LATE7Q", query: [URLQueryItem(name: "memory_gb", value: "8")])
         check("For a Mac with nothing to lend, it says how far the pool still is",
-              small?.unlocks == nil && small?.nextModel == "Qwen3 235B" && (small?.shortGB ?? 0) > 0)
+              small?.unlocks == nil && small?.nextModel == "MiniMax M2.7" && (small?.shortGB ?? 0) > 0)
         var refused = false
         do { _ = try await model.backend.preview(code: "NOPE99") } catch { refused = true }
         check("A code that isn't valid says so", refused)
         model.openInviteLink("dots://invite/LATE7Q")
         let loaded = await until { model.openInvite?.preview != nil }
         check("dots://invite/LATE7Q opens the invite sheet, with the preview", model.sheet == .openInvite && loaded)
+        // Make room: Late Night Lab gets all this Mac lends
+        model.setShare(union, gb: 0)
         if let p = model.openInvite?.preview { model.acceptInvite(p) }
         let accepted = await until(5) { joinedMoment(model, "late-night-lab") != nil }
         let late = joinedMoment(model, "late-night-lab")
         check("Accepting joins the pool, with the moment and the unlock this Mac caused",
-              accepted && late?.unlock?.modelID == Ladder.best(for: lateGB + model.state.lending.limitGB)?.id && late?.unlock?.byMacID == me)
+              accepted && late?.unlock?.modelID == Ladder.best(for: lateGB + (model.state.share(in: "late-night-lab")?.gb ?? 0))?.id
+              && late?.unlock?.byMacID == me)
         check("...and the invite is used up", !(cloud.world.state.invitesForMe ?? []).contains("LATE7Q") && model.backend.invites.isEmpty)
         let invite = model.backend.createInvite(poolID: "studio-9")
         await model.backend.settled()
@@ -447,7 +550,7 @@ enum SelfTest {
         story(18, "A boost to plan together, and the nights your Mac lent")
         let boost = cloud.world.state.pool("late-night-lab")?.boost
         check("Late Night Lab plans \(boost?.title ?? "a boost"): \(boost?.pledgedGB ?? 0) of \(boost?.targetGB ?? 0) GB pledged, guests welcome",
-              boost?.title == "DeepSeek Boost" && boost?.pledgedGB == 296 && boost?.targetGB == 396 && boost?.pledges.contains { $0.guest } == true)
+              boost?.title == "GLM Boost" && boost?.pledgedGB == 296 && boost?.targetGB == 396 && boost?.pledges.contains { $0.guest } == true)
         let spare = model.state.thisMac.maxLendGB
         model.backend.pledgeBoost(poolID: "late-night-lab", gb: spare)
         await model.backend.settled()
@@ -455,16 +558,16 @@ enum SelfTest {
         check("Count Me In pledges this Mac's \(spare) GB, as a member", pledged?.gb == spare && pledged?.guest == false
               && model.state.pool("late-night-lab")?.boost?.pledgedGB == 296 + spare)
         if let b = model.state.pool("late-night-lab")?.boost {
-            let wasPool = model.state.lendingPoolID, wasLimit = model.state.lending.limitGB
-            model.setLimit(4)
+            let lab = model.state.pool("late-night-lab")!
+            let was = model.state.share(in: lab.id)?.gb ?? 0
+            model.setShare(lab, gb: 4)
             model.runBoosts(now: b.starts.addingTimeInterval(60))
             check("When the boost starts, this Mac lends its \(spare) GB there, awake",
-                  model.boosting == "late-night-lab" && model.state.lendingPoolID == "late-night-lab"
-                  && model.state.lending.limitGB == spare && model.state.lending.isOn)
+                  model.boosting == "late-night-lab" && model.state.share(in: lab.id)?.gb == spare && model.state.lending.isOn)
             model.runBoosts(now: b.ends.addingTimeInterval(60))
-            check("...and when it ends, lending goes back to how it was", model.boosting == nil && model.state.lending.limitGB == 4
-                  && model.state.lendingPoolID == wasPool)
-            model.setLimit(wasLimit)
+            check("...and when it ends, lending goes back to how it was",
+                  model.boosting == nil && model.state.share(in: lab.id)?.gb == 4)
+            model.setShare(lab, gb: was)
         }
         model.backend.pledgeBoost(poolID: "late-night-lab", gb: nil)
         await model.backend.settled()
@@ -482,6 +585,29 @@ enum SelfTest {
         let recap = NightRecap.last(in: model.state, now: Date().nightStart.addingTimeInterval(19 * 3_600))
         check("The morning after, the recap says: \(recap?.headline(macKind: model.state.thisMac.kind) ?? "nothing")",
               recap?.pool.id == "late-night-lab" && (recap?.night.runs ?? 0) > 0)
+
+        story(19, "A pool names its one model, and says whether this Mac can lend to it")
+        let big = cloud.world.createPool(name: "Big Pictures", isPublic: true, id: "big-pictures")
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == big.id }) {
+                s.pools[i].servesModelID = "owner/big-draw"
+                s.pools[i].modelName = "Big Draw"
+                s.pools[i].kind = "pictures"
+                s.pools[i].modelGB = Double(s.thisMac.maxLendGB + 4)
+            }
+        }
+        await model.backend.syncNow()
+        let bigPool = model.state.pool(big.id)!
+        check("A pool that draws with a model too big for this Mac says so, with what it needs",
+              bigPool.modelLabel == "Big Draw" && bigPool.model == nil && !bigPool.canLend(model.state.thisMac)
+              && bigPool.whyCantLend(model.state.thisMac)?.contains("\(bigPool.needsGB ?? 0) GB on one Mac") == true)
+        check("...so it is offered nothing, and joining it still lets you ask it", model.state.offerGB(for: bigPool) == 0)
+        model.leave(bigPool)
+        await model.backend.settled()
+        model.join(model.state.pool(big.id)!)
+        await model.backend.settled()
+        check("...as a member lending it nothing", cloud.world.state.pool(big.id)?.isMember(model.state.meID) == true
+              && cloud.world.state.share(in: big.id) == nil)
     }
 
     /// With DOTS_SELFTEST_ENDPOINT set to any OpenAI-compatible server (LM Studio, Ollama), answers are real.
@@ -503,6 +629,41 @@ enum SelfTest {
         print("      \(real.text("ran_on")), \(chat): \(real.answer.prefix(90).replacingOccurrences(of: "\n", with: " "))")
         let stream = await call(rig.base, "POST", "/chat/completions", key: rig.secret, body: ask("And a cat? One line.", stream: true))
         check("Streaming passes its words through", !openAIText(stream.body).isEmpty)
+    }
+
+    /// Answers read as formatted text: Markdown blocks are found, and math becomes readable symbols.
+    private static func answerFormatting() {
+        print("\nAnswers are formatted")
+        let blocks = Markdown.blocks("""
+        ### Math
+        1. **Equation:**
+          \\[ x = a^2 + b \\]
+        2. Next
+
+        ```python
+        def f(x):
+            return x
+        ```
+        | a | b |
+        |---|---|
+        | 1 | 2 |
+        """)
+        check("A heading, a list, display math, code and a table are each a block", blocks == [
+            .heading(level: 3, text: "Math"),
+            .list([.init(marker: "1.", text: "**Equation:**", depth: 0)]),
+            .math("x = a^2 + b"),
+            .list([.init(marker: "2.", text: "Next", depth: 0)]),
+            .code(language: "python", code: "def f(x):\n    return x"),
+            .table(header: ["a", "b"], rows: [["1", "2"]]),
+        ])
+        check("A code fence still streaming runs to the end", Markdown.blocks("```\nlet x = 1") == [.code(language: "", code: "let x = 1")])
+        check("Math reads as symbols", LaTeX.plain("\\frac{a+b}{2} \\times x^2 \\leq \\sqrt{y_1} + \\alpha") == "(a+b)/2 × x² ≤ √y₁ + α")
+        let drafted = Markdown.inline("The sky is" + Markdown.draftMark + " blue because")
+        check("A draft follows the answer, greyed out, with no trace of its mark",
+              String(drafted.characters) == "The sky is blue because"
+              && drafted.runs.filter { $0.foregroundColor != nil }.map { String(drafted[$0.range].characters) } == [" blue because"])
+        check("Inline math is converted and a price is left alone",
+              String(Markdown.inline("costs $5 and \\(x^2\\) grows").characters) == "costs $5 and x² grows")
     }
 
     /// A key made for more than one Anthropic workspace has to name its workspace on every request.
@@ -577,6 +738,112 @@ enum SelfTest {
     }
 
     // MARK: Helpers
+
+    /// Story 22: the first launch ends lending to a pool, under the name you gave.
+    private static func welcomeStory(_ rig: Rig) async {
+        let model = rig.model
+        story(22, "The first launch: your name, what this Mac lends, and a pool to start in")
+        // A new Mac lends nowhere yet
+        for share in model.state.lendingShares { if let pool = model.state.pool(share.poolID) { model.setShare(pool, gb: 0) } }
+        await model.backend.settled()
+        model.settings.onboarded = false
+        let first = model.firstPool
+        model.finishOnboarding(name: "Robin", lendGB: 2)
+        let done = await until(5) { model.settings.onboarded && model.state.share(in: first?.id) != nil }
+        await model.backend.settled()
+        check("Finishing it lends 2 GB to \(first?.name ?? "a public pool"), the busiest that answers questions, as Robin",
+              done && model.state.share(in: first?.id)?.gb == 2 && model.state.me.name == "Robin")
+        model.moment = nil
+    }
+
+    /// Story 21: an invite to a friend's cloud. A second mock cloud plays the friend's; the app joins it there and uses
+    /// it from then on. Last, because the app stays on the friend's cloud.
+    private static func friendsCloudStory(_ rig: Rig) async {
+        let model = rig.model
+        story(21, "An invite link names the friend's cloud, and joining it makes you one of its people")
+        let friends = MockCloud(port: UInt16.random(in: 19_700..<19_900), fresh: true, persists: false)
+        do { try friends.start() } catch { check("The friend's cloud starts", false); return }
+        defer { friends.stop() }
+        let invite = friends.world.createInvite(poolID: "studio-9", code: "FRIEND1")
+        let address = "http://127.0.0.1:\(friends.port)"
+        let link = invite.link(cloud: address)
+        check("The link names the cloud: \(link)", link == "dots://invite/FRIEND1?cloud=http://127.0.0.1:\(friends.port)")
+        check("...and reads back as the code and the cloud",
+              AppModel.invite(in: link)?.code == "FRIEND1" && AppModel.invite(in: link)?.cloud?.port == Int(friends.port))
+        model.openInviteLink(link)
+        let loaded = await until(5) { model.openInvite?.preview != nil }
+        check("Opened, it shows the invite from the friend's cloud, with no token yet",
+              loaded && model.openInvite?.cloud?.port == Int(friends.port) && model.openInvite?.preview?.poolName == "Studio 9")
+        if let p = model.openInvite?.preview { model.acceptInvite(p, lendGB: 2) }
+        let switched = await until(5) { model.settings.cloud.address == address && model.backend.isConnected }
+        check("Joining keeps the token it gives and moves the app to that cloud",
+              switched && model.cloudToken == AppModel.mockToken && !model.settings.cloud.useMock
+              && model.backend.client.baseURL.port == Int(friends.port))
+    }
+
+    /// Story 20: three levels of privacy, held to, never widened.
+    private static func privacyStories(_ rig: Rig) async {
+        let model = rig.model
+        story(20, "Every request has a privacy level, and dots never runs it anywhere wider")
+        let rules = RouterRules()
+        let document = Router.decide(question: "Summarize this lease", hasDocument: true, state: model.state, rules: rules)
+        check("A document of yours stays on your own Macs: with friends' Macs in every pool, nothing takes it, and you decide",
+              document.level == .mine && document.chosen == nil && document.needsConsent?.contains("your own Macs") == true)
+        let personal = Router.decide(question: "What does my lease say about pets?", hasDocument: false, state: model.state, rules: rules)
+        check("A question that looks personal stays in your pools, friends' Macs included: \(personal.chosen?.place ?? "nowhere")",
+              personal.level == .myPools && personal.chosen?.destination == .yourPool)
+        let ordinary = Router.decide(question: "What is a haiku?", hasDocument: false, state: model.state, rules: rules)
+        check("An ordinary question may go anywhere", ordinary.level == .anywhere)
+
+        let studio = model.state.pool("studio-9")!
+        var endpoint = model.backend.client.hub(poolID: studio.id, model: studio.model?.id ?? "")
+        endpoint.privacy = .mine
+        var refused = ""
+        do {
+            for try await _ in OpenAIClient.stream(endpoint, messages: [ChatMessage(role: "user", content: "hi")]) {}
+        } catch { refused = error.localizedDescription }
+        check("Asked for Only my Macs, a pool with friends' Macs in it refuses rather than run it there",
+              refused.contains("409") || refused.contains("aren't yours"))
+    }
+
+    /// The real worker launcher, with a stand-in for the worker: a worker for each pool, held to its share.
+    private static func launcherChecks() async {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("dots-workers-\(UUID().uuidString)").path
+        let standIn = home + "/stand-in"
+        try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        try? "#!/bin/sh\ntrap 'kill $!; exit 0' TERM\nsleep 30 &\nwait\n".write(toFile: standIn, atomically: true, encoding: .utf8)
+        chmod(standIn, 0o755)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let launcher = WorkerProcess(environment: ["DOTS_WORKER": standIn, "DOTS_HOME": home])
+        func pid(_ file: String) -> String? {
+            (try? String(contentsOfFile: home + "/" + file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commandLine(_ file: String) -> String {
+            guard let pid = pid(file) else { return "" }
+            let ps = Process()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+            ps.arguments = ["-o", "command=", "-p", pid]
+            let out = Pipe()
+            ps.standardOutput = out
+            guard (try? ps.run()) != nil else { return "" }
+            ps.waitUntilExit()
+            return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        }
+        let home4 = LendingShare(poolID: "hub", gb: 4, hubPool: ""), prism2 = LendingShare(poolID: "prism", gb: 2, hubPool: "prism")
+        launcher.reconcile(lend: true, shares: [home4, prism2], ticket: "the-ticket")
+        let hubLine = commandLine("worker.pid"), prismLine = commandLine("worker-prism.pid")
+        check("Lending to two pools runs a worker for each, held to its share: 4 GB in the hub's own pool, 2 GB in Prism",
+              hubLine.contains("the-ticket --pool  --max-ram 4") && prismLine.contains("the-ticket --pool prism --max-ram 2"))
+        let hubPid = pid("worker.pid")
+        launcher.reconcile(lend: true, shares: [home4, LendingShare(poolID: "prism", gb: 3, hubPool: "prism")], ticket: "the-ticket")
+        check("Changing Prism's share restarts only Prism's worker",
+              pid("worker.pid") == hubPid && commandLine("worker-prism.pid").contains("--pool prism --max-ram 3"))
+        launcher.reconcile(lend: true, shares: [home4], ticket: "the-ticket")
+        check("Stopping lending to Prism stops its worker, and the other goes on", pid("worker-prism.pid") == nil && pid("worker.pid") == hubPid)
+        launcher.reconcile(lend: false, shares: [home4], ticket: "the-ticket")
+        try? await Task.sleep(for: .milliseconds(200))
+        check("Pausing stops every worker", pid("worker.pid") == nil && !launcher.isRunning)
+    }
 
     private static func story(_ n: Int, _ title: String) {
         print("\n\(n). \(title)")
