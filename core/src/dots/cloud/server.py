@@ -6,6 +6,7 @@ Pool answers go to the hub; frontier answers go through the gateway (see gateway
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
@@ -14,7 +15,7 @@ import uuid
 
 from aiohttp import web
 
-from . import catalog, gateway, timefmt
+from . import catalog, gateway, links, timefmt
 from .config import CloudConfig
 from .hub import HubClient, HubError
 from .store import Store, expires_in, is_expired
@@ -50,6 +51,7 @@ class Cloud:
         r.add_get("/healthz", self.healthz)
         r.add_get("/v1/state", self.state)
         r.add_get("/v1/pricing", self.pricing)
+        r.add_get("/v1/models/describe", self.describe_model)
         r.add_get("/v1/notes/latest", self.latest_note)
         r.add_patch("/v1/me", self.rename_me)
         r.add_post("/v1/badges/seen", self.badges_seen)
@@ -115,6 +117,14 @@ class Cloud:
     async def badges_seen(self, _r: web.Request) -> web.Response:
         self.store.run("update badges set seen = 1")
         return await self.whole()
+
+    async def describe_model(self, request: web.Request) -> web.Response:
+        """What a Hugging Face link runs, for starting a pool from it (links.py)."""
+        try:
+            described = await asyncio.to_thread(links.describe, request.query.get("link", ""))
+        except ValueError as e:
+            return error(400, str(e), "invalid_request_error")
+        return web.json_response(described.as_dict())
 
     # ---- pools ---------------------------------------------------------------
 
