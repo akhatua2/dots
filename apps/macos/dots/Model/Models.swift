@@ -90,9 +90,15 @@ struct MacDevice: Codable, Hashable, Identifiable {
     var kind: String            // "MacBook Pro"
     var memoryGB: Int
 
-    /// Every Mac keeps a quarter of its memory for itself, and at least 8 GB.
-    var keptGB: Int { max(memoryGB / 4, 8) }
+    /// Every Mac keeps a quarter of its memory for itself, and at least 8 GB. A small Mac (8 GB or less) keeps less
+    /// so it can draw a picture, and lends only while it's idle and plugged in (`lendsOnlyWhenIdle`).
+    var keptGB: Int { isSmall ? Self.smallMacKeepsGB : max(memoryGB / 4, Self.keepsAtLeastGB) }
     var maxLendGB: Int { max(0, memoryGB - keptGB) }
+    var isSmall: Bool { memoryGB > 0 && memoryGB <= Self.keepsAtLeastGB }
+    var lendsOnlyWhenIdle: Bool { isSmall }
+
+    static let keepsAtLeastGB = 8
+    static let smallMacKeepsGB = 3
 }
 
 enum MacState: String, Codable { case lending, online, asleep }

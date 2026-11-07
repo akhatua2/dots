@@ -294,7 +294,7 @@ class Cloud:
         you = self.you(request) if caller else SyncBuilder(self.store, self.config, "", "")
         hub = await HubView.read(self.hub, self.config.pool_model)
         memory = int(request.query.get("memory_gb", "0") or 0)
-        add_gb = max(0, memory - max(memory // 4, 8))
+        add_gb = lendable_gb(memory)
         pooled = you.pooled_gb(pool["id"], hub)
         tiers = you.tiers(hub)["tiers"]
         now_model = catalog.best_for(tiers, pooled)
@@ -481,6 +481,18 @@ def _name(cloud: Cloud, caller: Caller, mac_id: str) -> str:
 
 def _initial(cloud: Cloud, caller: Caller, mac_id: str) -> str:
     return "You" if mac_id == caller.mac else _name(cloud, caller, mac_id)[:1].upper()
+
+
+# What a Mac keeps for itself: a quarter of its memory, and at least this much; a smaller Mac keeps less so it can
+# draw a picture, and its app lends only while it's idle and plugged in (the Mac app's MacDevice says the same)
+KEEPS_AT_LEAST_GB = 8
+SMALL_MAC_KEEPS_GB = 3
+
+
+def lendable_gb(memory_gb: int) -> int:
+    if 0 < memory_gb <= KEEPS_AT_LEAST_GB:
+        return memory_gb - SMALL_MAC_KEEPS_GB
+    return max(0, memory_gb - max(memory_gb // 4, KEEPS_AT_LEAST_GB))
 
 
 def _memory_gb() -> int:

@@ -74,7 +74,7 @@ enum SelfTest {
             await privacyStories(rig)
             await friendsCloudStory(rig)
         } else {
-            print("\nThis Mac can't lend (it needs more than 8 GB of memory), so stories 7 to 17 can't run here.")
+            print("\nThis Mac has no memory to spare for lending, so stories 7 to 21 can't run here.")
         }
         if let url = ProcessInfo.processInfo.environment["DOTS_SELFTEST_ENDPOINT"] {
             await realAnswers(url, rig)
@@ -738,11 +738,20 @@ enum SelfTest {
 
     // MARK: Helpers
 
+    /// A small Mac lends what drawing needs, and only while it's idle and plugged in.
+    private static func smallMacChecks() {
+        let small = MacDevice(id: "m", ownerID: "o", kind: "MacBook Pro", memoryGB: 8)
+        let big = MacDevice(id: "b", ownerID: "o", kind: "MacBook Pro", memoryGB: 16)
+        check("An 8 GB Mac keeps 3 GB and lends 5, enough to draw a picture; a 16 GB Mac still keeps 8",
+              small.maxLendGB == 5 && small.lendsOnlyWhenIdle && big.maxLendGB == 8 && !big.lendsOnlyWhenIdle)
+    }
+
     /// Story 21: an invite to a friend's cloud. A second mock cloud plays the friend's; the app joins it there and uses
     /// it from then on. Last, because the app stays on the friend's cloud.
     private static func friendsCloudStory(_ rig: Rig) async {
         let model = rig.model
         story(21, "An invite link names the friend's cloud, and joining it makes you one of its people")
+        smallMacChecks()
         let friends = MockCloud(port: UInt16.random(in: 19_700..<19_900), fresh: true, persists: false)
         do { try friends.start() } catch { check("The friend's cloud starts", false); return }
         defer { friends.stop() }

@@ -1203,7 +1203,14 @@ class Worker:
         if runner is None:
             return {"kind": "error", "error": "this Mac can't draw this pool's model"}
         try:
-            tool = runner.tool(str(msg.get("model") or ""))
+            # A runner that reads files of its own fetches them the first time (several GB), so not on the loop
+            tool = await asyncio.to_thread(runner.tool, str(msg.get("model") or ""))
+        except ValueError as e:
+            return {"kind": "error", "error": str(e)}
+        except Exception as e:  # the model's files couldn't be fetched: offline, or Hugging Face refused
+            log.warning("couldn't fetch the files for %s: %s", runner.name, e)
+            return {"kind": "error", "error": f"this Mac couldn't fetch {runner.name}'s files"}
+        try:
             image = msg.get("image")
             job = ImageJob(prompt=str(msg.get("prompt", "")), width=msg.get("width"), height=msg.get("height"),
                            steps=msg.get("steps"), seed=msg.get("seed"),

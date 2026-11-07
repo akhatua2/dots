@@ -108,6 +108,17 @@ Within the shared levels, dots also keeps the plain-text parts where the asker t
 End-to-end encryption past the hub (the asker sealing the question to the head Mac's key, so the hub only routes)
 is possible on top of this; with the head on the asker's own Mac, the hub sees nothing either.
 
+## Older Macs
+
+MLX, which runs dots' models, needs macOS 14, and the Mac app needs macOS 15. A Mac on macOS 13 (Mangala's: an
+M1 with 8 GB on 13.4, which can't update) still lends to a pool that draws: its worker draws FLUX.2 klein with
+stable-diffusion.cpp, built on the Mac once (`infra/remote-worker.sh <host> tools`, which runs `infra/sdcpp.sh`),
+reading the same original from its own 4-bit files (about 5.3 GB). `runners.toml` lists it after mflux, so a newer
+Mac keeps using mflux. It is slower (a few minutes a picture on an M1) and shows no previews. A small Mac (8 GB or
+less) keeps 3 GB and lends the rest only while idle and plugged in.
+
+Not yet checked on the Mac itself: the build and a picture need permission to fetch and build stable-diffusion.cpp.
+
 ## Safety
 
 A worker never runs a command it receives. The pool names a model (and, for pictures, its family); each worker
