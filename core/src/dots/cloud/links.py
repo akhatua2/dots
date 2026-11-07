@@ -66,9 +66,11 @@ def describe(link: str, hub=None) -> ModelDescription:
     if info.library_name == "mflux" or "mflux" in tags:
         from ..image_tools import runners
 
+        from .catalog import picture_model_name
+
         original = _original(info)
         known = runners.for_original(original, runners.load()) is not None
-        return ModelDescription(repo, name, "pictures", _pipeline_class(info, hub), gb, runs=None if known else False,
+        return ModelDescription(repo, picture_model_name(repo, original), "pictures", _pipeline_class(info, hub), gb, runs=None if known else False,
                                 why=None if known else "dots has no way to draw with this kind of model yet",
                                 original=original)
     if "config.json" in files and (info.pipeline_tag is None or info.pipeline_tag in _TEXT_TASKS):

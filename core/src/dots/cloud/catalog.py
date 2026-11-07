@@ -69,6 +69,18 @@ def short_name(model_id: str) -> str:
     return re.sub(r"-(?=[0-9A-Z])", " ", tail).strip()  # a hyphen before a size or a version is a space
 
 
+def picture_model_name(model_id: str, original: str | None) -> str:
+    """A picture model by the name of its family, as dots' runner for it says, with the size its original names:
+    an mflux build of black-forest-labs/FLUX.2-klein-4B is "FLUX.2 klein 4B". Without a runner, its own short name."""
+    from ..image_tools import runners
+
+    runner = runners.for_original(original, runners.load())
+    if runner is None:
+        return short_name(model_id)
+    size = re.search(r"(?<![\w.])(\d+(?:\.\d+)?[BM])\b", original.split("/")[-1].replace("-", " "))
+    return f"{runner.name} {size.group(1)}" if size else runner.name
+
+
 def served_tier(model_id: str, layers: int, tok_per_sec: float) -> dict:
     """The model the hub serves, as a rung of the ladder. It needs only a little memory, so it sits first."""
     match = re.search(r"(\d+(?:\.\d+)?)\s*([BbMm])\b", model_id)

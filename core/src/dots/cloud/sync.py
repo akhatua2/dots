@@ -132,8 +132,9 @@ class SyncBuilder:
             pool["servesModelID"] = row["serves_model_id"]
         # What it runs, by name, and whether it writes text or draws pictures
         if pool.get("servesModelID"):
-            pool["modelName"] = catalog.short_name(pool["servesModelID"])
             pool["kind"] = row["model_kind"] or "text"
+            pool["modelName"] = (catalog.picture_model_name(pool["servesModelID"], row["model_original"])
+                                 if pool["kind"] == "pictures" else catalog.short_name(pool["servesModelID"]))
             if row["serves_model_id"] == pool["servesModelID"] and row["model_gb"]:
                 pool["modelGB"] = row["model_gb"]  # the size of its weights: what its Macs hold between them
             if pool["kind"] == "pictures":

@@ -463,3 +463,15 @@ async def test_the_sync_says_where_friends_reach_this_cloud(tmp_path):
     async with TestClient(TestServer(cloud.app())) as client:
         assert (await state(client))["cloud"] == {"address": "https://dots.example.org"}
     await hub_server.close()
+
+
+@pytest.mark.parametrize("model_id,original,name", [
+    ("mflux-community/flux2-klein-4b-mflux-q4", "black-forest-labs/FLUX.2-klein-4B", "FLUX.2 klein 4B"),
+    ("mflux-community/flux-3-image-klein-mflux-q4", "black-forest-labs/flux-3-image-klein", "FLUX 3 Image Klein"),
+    ("mflux-community/Z-Image-Turbo-mflux-q4", "Tongyi-MAI/Z-Image-Turbo", "Z-Image Turbo"),
+    ("owner/draw-q4", "owner/unknown", "draw"),
+])
+def test_a_picture_model_goes_by_its_familys_name(model_id, original, name):
+    from dots.cloud.catalog import picture_model_name
+
+    assert picture_model_name(model_id, original) == name
