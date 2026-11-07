@@ -1691,6 +1691,19 @@ class Hub:
 
     # ─────────────────────── delegation helpers ──────────────────────
 
+    def _ready_in_pool(self, deployment: ModelDeployment) -> "list[Participant]":
+        """The Macs that can take a turn of `deployment`'s model: ready with it, and lending to its pool. A Mac
+        lending to another pool never answers this one, even when it is free."""
+        candidates = []
+        for participant in self.participants.values():
+            if not participant.compute or not self.in_pool(participant, deployment.model_id):
+                continue
+            state = deployment.worker_states.get(participant.id)
+            ready, backend = (participant.ready, participant.backend) if state is None else (state.ready, state.backend)
+            if ready and backend == deployment.selected_backend:
+                candidates.append(participant)
+        return candidates
+
     def _build_chain_spec(
         self,
         querier_account: str | None = None,
@@ -1716,17 +1729,7 @@ class Hub:
         the head; non-dominated tiebreak picks the highest-TPS chain.
         """
         deployment = self._deployment_for()
-        candidates = []
-        for participant in self.participants.values():
-            state = deployment.worker_states.get(participant.id)
-            if state is None:
-                ready = participant.ready
-                backend = participant.backend
-            else:
-                ready = state.ready
-                backend = state.backend
-            if participant.compute and ready and backend == deployment.selected_backend:
-                candidates.append(participant)
+        candidates = self._ready_in_pool(deployment)
         if not candidates:
             return None, 0, []
 
@@ -1868,17 +1871,7 @@ class Hub:
         That's the policy we want for single-worker delegation.
         """
         deployment = self._deployment_for()
-        candidates = []
-        for participant in self.participants.values():
-            state = deployment.worker_states.get(participant.id)
-            if state is None:
-                ready = participant.ready
-                backend = participant.backend
-            else:
-                ready = state.ready
-                backend = state.backend
-            if participant.compute and ready and backend == deployment.selected_backend:
-                candidates.append(participant)
+        candidates = self._ready_in_pool(deployment)
         if not candidates:
             return None
 

@@ -44,3 +44,14 @@ async def test_only_my_macs_refuses_a_pool_with_a_friends_mac_in_it():
 async def test_only_my_macs_needs_to_know_who_is_asking():
     status, _ = await _ask(_hub([("w1", "me")]))
     assert status == 409
+
+
+def test_a_turn_goes_only_to_macs_lending_to_the_pool_that_runs_the_model():
+    def mac(wid, pool):
+        return SimpleNamespace(id=wid, compute=True, ready=True, backend="mlx", pool=pool)
+
+    macs = {m.id: m for m in (mac("home", ""), mac("prism", "prism"), mac("home-2", ""))}
+    hub = SimpleNamespace(participants=macs, _model_pool={"qwen": ""})
+    hub.in_pool = lambda p, model_id: Hub.in_pool(hub, p, model_id)
+    deployment = SimpleNamespace(model_id="qwen", worker_states={}, selected_backend="mlx")
+    assert [p.id for p in Hub._ready_in_pool(hub, deployment)] == ["home", "home-2"], "Prism's Mac never answers Home"
