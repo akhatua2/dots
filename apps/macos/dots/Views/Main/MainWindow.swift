@@ -156,7 +156,7 @@ struct Sidebar: View {
                                         }
                                     }
                             case .drawing(let thread):
-                                ChatRow(title: thread.title, updated: thread.updated, symbol: "paintbrush.pointed",
+                                ChatRow(title: thread.title, updated: thread.updated,
                                         selected: model.route == .draw && thread.id == model.draw.threadID) {
                                     model.draw.open(thread.id)
                                     model.open(.draw)
@@ -387,24 +387,18 @@ struct SidebarSection<Content: View>: View {
 }
 
 /// A chat in the sidebar: its first question, and when it was last used.
-/// A chat or a drawing in the sidebar: its title and when it last changed, a drawing marked with a brush
+/// A chat or a drawing in the sidebar: its title and when it last changed
 struct ChatRow: View {
     var title: String
     var updated: Date
-    var symbol: String? = nil
     var selected: Bool
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    if let symbol {
-                        Image(systemName: symbol).font(.system(size: 10, weight: .medium)).foregroundStyle(D.t4)
-                    }
-                    Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
-                        .lineLimit(1)
-                }
+                Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                    .lineLimit(1)
                 Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
