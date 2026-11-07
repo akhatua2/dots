@@ -17,6 +17,8 @@ final class WorkerProcess {
         var ticket: String
         var pool: String
         var gb: Int
+        /// The token the hub asks of every Mac that joins, when it asks one
+        var joinToken: String?
     }
 
     /// The running workers, by their pool at the hub
@@ -54,9 +56,10 @@ final class WorkerProcess {
     var isRunning: Bool { running.values.contains { $0.process.isRunning } }
 
     /// Brings the workers in line with the rules: one for each share, running with its pool and memory, or none.
-    func reconcile(lend: Bool, shares: [LendingShare], ticket: String?) {
+    func reconcile(lend: Bool, shares: [LendingShare], ticket: String?, joinToken: String? = nil) {
         guard lend, let ticket, command != nil else { stop(); return }
-        let plans = shares.filter { $0.gb > 0 }.map { Plan(ticket: ticket, pool: $0.hubPool ?? $0.poolID, gb: $0.gb) }
+        let plans = shares.filter { $0.gb > 0 }
+            .map { Plan(ticket: ticket, pool: $0.hubPool ?? $0.poolID, gb: $0.gb, joinToken: joinToken) }
         wanted = Dictionary(plans.map { ($0.pool, $0) }, uniquingKeysWith: { first, _ in first })
         for (pool, worker) in running where wanted[pool] != worker.plan {
             stop(pool: pool)
@@ -127,6 +130,12 @@ final class WorkerProcess {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: command[0])
         p.arguments = Array(command.dropFirst()) + [plan.ticket, "--pool", plan.pool, "--max-ram", String(plan.gb)]
+        // Its home is this Mac's dots home, so it carries the account the app signs up with; the hub's token, if
+        // it asks one, goes in its environment rather than on its command line
+        var environment = ProcessInfo.processInfo.environment
+        environment["DOTS_HOME"] = home
+        if let token = plan.joinToken { environment["DOTS_JOIN_TOKEN"] = token }
+        p.environment = environment
         // Run from the worker's own home so it never picks up a .env from some other working directory.
         try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
         p.currentDirectoryURL = URL(fileURLWithPath: home)

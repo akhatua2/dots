@@ -134,7 +134,8 @@ async def test_credits_and_the_worker_come_from_the_hub(env):
     assert s["creditLog"][0]["kind"] == "lend" and s["creditLog"][0]["amount"] == 6
     assert sync["worker"]["firstLayer"] == 0 and sync["worker"]["lastLayer"] == 23
     assert sync["ladder"]["tiers"][0]["id"] == MODEL, "the model the hub serves is on the ladder"
-    assert sync["hub"] == {"online": True, "model": MODEL, "ticket": "node-ticket"}, "a Mac's worker needs the ticket"
+    assert sync["hub"] == {"online": True, "model": MODEL, "ticket": "node-ticket", "joinToken": None}, \
+        "a Mac's worker needs the ticket"
 
 
 async def test_start_join_and_leave_a_pool(env):

@@ -14,6 +14,8 @@ struct MainWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(D.bg2)
         }
+        // Any text in the app can be selected and copied: answers, chats, settings, labels
+        .textSelection(.enabled)
         .background(D.bg1)
         .overlay {
             // The first launch's welcome covers the window until it's through

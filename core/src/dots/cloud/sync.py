@@ -247,7 +247,9 @@ class SyncBuilder:
             "invites": [],
             "mock": False,
             "ladder": self.tiers(hub),
-            "hub": {"online": hub.online, "model": hub.model, "ticket": self.config.hub_ticket or None},
+            # The hub's ticket, and the token it asks of every Mac that joins (shared with everyone signed in here)
+            "hub": {"online": hub.online, "model": hub.model, "ticket": self.config.hub_ticket or None,
+                    "joinToken": self.config.hub_token or None},
             # Where friends reach this cloud, for the invite links you send them
             "cloud": {"address": self.config.public_url or None},
             "earning": {"lastHour": self.earned_since(hub, timedelta(hours=1))},

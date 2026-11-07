@@ -253,7 +253,8 @@ final class AppModel {
         let active = lendingStatus.isActive
         // With a real cloud, lending runs the real worker; the mock simulates the work instead.
         if !backend.isMock {
-            workerProcess.reconcile(lend: active, shares: state.lendingShares, ticket: backend.hub?.ticket)
+            workerProcess.reconcile(lend: active, shares: state.lendingShares, ticket: backend.hub?.ticket,
+                                    joinToken: backend.hub?.joinToken)
         }
         let unlock = backend.applyLendingStatus(active: active)
         if let unlock, let pid = unlock.poolID ?? state.lendingShares.first?.poolID { show(unlock, in: pid) }

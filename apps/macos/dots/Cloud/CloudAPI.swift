@@ -108,6 +108,8 @@ struct HubInfo: Codable, Equatable {
     var online: Bool
     var model: String?
     var ticket: String?
+    /// The token the hub asks of every Mac that joins, shared with everyone signed in to the cloud
+    var joinToken: String?
 }
 
 /// The cloud's model ladder: the models in order of the memory a pool needs, and the special ones.
