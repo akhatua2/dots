@@ -75,3 +75,21 @@ def test_when_a_model_must_be_split_the_head_goes_to_the_faster_mac():
     head, *rest = hub._assign_units_to_workers()
     assert head[0] == "fast" and head[3] is True, "the head runs on the faster Mac"
     assert [r[0] for r in rest] == ["slow"]
+
+
+def test_a_mac_that_joined_after_the_model_was_placed_answers_its_own_questions():
+    hub = _hub_with({"mac-b": 16.0, "mac-a": 8.0})
+    hub._deployment_for(MODEL).current_placement = [("mac-b", 0, LAYERS, True)]
+    head, _, chain = hub._build_chain_spec(querier_account="acc-mac-a")
+    assert head.id == "mac-a" and chain == []
+
+
+def test_while_your_copy_loads_another_macs_copy_answers_rather_than_waiting():
+    from dots.distributed.hub import ModelWorkerState
+
+    hub = _hub_with({"mac-b": 16.0, "mac-a": 8.0})
+    loading = ModelWorkerState()
+    loading.ready = False
+    hub._deployment_for(MODEL).worker_states["mac-a"] = loading
+    head, _, _ = hub._build_chain_spec(querier_account="acc-mac-a")
+    assert head.id == "mac-b"
