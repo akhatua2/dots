@@ -132,6 +132,8 @@ class SyncBuilder:
         if pool.get("servesModelID"):
             pool["modelName"] = catalog.short_name(pool["servesModelID"])
             pool["kind"] = row["model_kind"] or "text"
+            if row["serves_model_id"] == pool["servesModelID"] and row["model_gb"]:
+                pool["modelGB"] = row["model_gb"]  # the size of its weights: what its Macs hold between them
             if pool["kind"] == "pictures":
                 pool["drawsWith"] = pool["servesModelID"]  # its Macs draw pictures with it
         invite = s.one("select code, expires from invites where pool_id = ? order by expires desc", pool_id)

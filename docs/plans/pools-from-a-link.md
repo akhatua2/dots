@@ -120,7 +120,9 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 4. Lending per pool: an amount to each pool, one worker each. Done: the cloud keeps a share per pool, the app runs a
    worker for each with its pool and memory, and each worker has its own identity at the hub.
 5. Workers learn what to run from their pool; runners by kind, no models in code.
-6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
+6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend. Done:
+   a pool says its model, kind and size; its page shows what it runs, needs and has in place of the ladder; a Mac
+   that can't hold a drawing pool's model joins it to ask, lending nothing.
 7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
 8. Privacy levels on every request (Only my Macs, My pools, Anywhere), never falling back to a wider one; your
    question's head on your own Mac within the shared levels (see Who can see what).

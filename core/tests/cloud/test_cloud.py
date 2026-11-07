@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -59,6 +60,15 @@ def fake_hub(*, nodes: list[dict] | None = None) -> web.Application:
 
     app.router.add_post("/v1/chat/completions", complete)
     return app
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """No Hugging Face from tests: a link can't be read unless a test says what it is."""
+    def describe(link):
+        raise ValueError(f"no network in tests: {link}")
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
 
 
 @pytest_asyncio.fixture
@@ -318,7 +328,7 @@ async def test_a_pool_runs_the_model_its_link_names(env, monkeypatch):
     r = await client.post("/v1/pools", json={"id": "prism", "name": "Prism", "isPublic": True, "model": "owner/draw-q4"})
     pool = (await r.json())["pool"]
     assert r.status == 200 and pool["servesModelID"] == "owner/draw-q4" and pool["kind"] == "pictures"
-    assert pool["modelName"] and pool["isPublic"] is True
+    assert pool["modelName"] and pool["isPublic"] is True and pool["modelGB"] == 4.6, "it says how big its model is"
     r = await client.post("/v1/pools", json={"id": "talk", "name": "Talk", "model": "owner/speech"})
     assert r.status == 400 and "can't run" in (await r.json())["error"]["message"]
 
@@ -329,3 +339,25 @@ def test_a_database_from_one_pool_lending_keeps_its_pool_as_a_share(tmp_path):
     store = Store(path)
     assert [(r["pool_id"], r["gb"]) for r in store.shares()] == [("hub", 6)]
     assert store.lending()["pool_id"] is None
+
+
+async def test_the_hub_pool_reads_what_it_runs_from_its_repo(tmp_path, monkeypatch):
+    from dots.cloud.links import ModelDescription
+
+    read = asyncio.Event()
+
+    def describe(link):
+        read.set()
+        return ModelDescription(link, "Qwen3.5 0.8B", "text", "qwen3_5", 1.7, runs=True)
+
+    monkeypatch.setattr("dots.cloud.links.describe", describe)
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_model=MODEL)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        await asyncio.wait_for(read.wait(), 5)
+        await asyncio.sleep(0.05)
+        home = next(p for p in (await state(client))["state"]["pools"] if p["id"] == "hub")
+        assert home["servesModelID"] == MODEL and home["kind"] == "text" and home["modelGB"] == 1.7
+    await hub_server.close()

@@ -145,6 +145,11 @@ struct Pool: Codable, Hashable, Identifiable {
     var phase: Double
     var createdAt: Date
     var servesModelID: String?
+    /// The one model a pool started from a link runs, as the cloud read it from its repo: its name, whether it
+    /// writes "text" or draws "pictures", and the size of its weights. Nil for pools that climb the ladder.
+    var modelName: String? = nil
+    var kind: String? = nil
+    var modelGB: Double? = nil
     /// The image model a Mac in the pool draws pictures with, if one offers it
     var drawsWith: String? = nil
     /// How close the pool's Macs are to you: scales the speed you'd get.
@@ -226,8 +231,30 @@ extension Pool {
     var pooledGB: Int { macs.filter { $0.state == .lending }.reduce(0) { $0 + $1.lendGB } + crowdGB }
 
     var model: ModelTier? {
+        // A pool that names its model runs that one, whatever its memory; pictures have no layers to share
+        if modelName != nil { return kind == "pictures" ? nil : servesModelID.flatMap(Ladder.tier) }
         if let id = servesModelID, let special = Ladder.tier(id), special.minGB <= pooledGB { return special }
         return Ladder.best(for: pooledGB)
+    }
+    /// The model it runs, by name, however the pool chose it
+    var modelLabel: String? { modelName ?? model?.name }
+    /// Whether it names its one model, rather than climbing the ladder as it grows
+    var runsOneModel: Bool { modelName != nil }
+    var draws: Bool { kind == "pictures" }
+    /// What its model needs: a picture is drawn whole on one Mac, so one Mac must lend this much; text is shared
+    /// across the pool's Macs, so together they must
+    var needsGB: Int? { modelGB.map { Int($0.rounded(.up)) } }
+    /// Whether a Mac can lend here: any Mac adds to a pool that shares out text, but only one with room for the
+    /// whole model can draw
+    func canLend(_ mac: MacDevice) -> Bool {
+        guard draws, let needs = needsGB else { return mac.maxLendGB > 0 }
+        return mac.maxLendGB >= needs
+    }
+    /// Why a Mac can't lend here, for the places that would offer it
+    func whyCantLend(_ mac: MacDevice) -> String? {
+        guard !canLend(mac) else { return nil }
+        if let needs = needsGB, draws { return "Your Mac can't lend here: each picture needs \(needs) GB on one Mac" }
+        return "Your Mac can't lend: it keeps all its memory for itself"
     }
     var nextModel: ModelTier? { Ladder.next(after: pooledGB) }
     /// Levels climb the model ladder: Level 1 runs the smallest model.
@@ -397,6 +424,14 @@ struct NetworkState: Codable {
     var lendingPoolIDs: Set<String> { Set(lendingShares.map(\.poolID)) }
     /// What this Mac lends in all, across its pools
     var lentGB: Int { lendingShares.reduce(0) { $0 + $1.gb } }
+    /// What joining or lending to a pool gives it by default: all this Mac has left, when that is of use there
+    /// (a pool that draws needs room for its whole model on one Mac)
+    func offerGB(for pool: Pool) -> Int {
+        let left = mostGB(for: pool.id)
+        guard pool.canLend(thisMac) else { return 0 }
+        if pool.draws, let needs = pool.needsGB, left < needs { return 0 }
+        return left
+    }
     /// The most a pool's share can be: what this Mac can lend, less what its other pools have
     func mostGB(for poolID: String) -> Int {
         max(0, thisMac.maxLendGB - lentGB + (share(in: poolID)?.gb ?? 0))

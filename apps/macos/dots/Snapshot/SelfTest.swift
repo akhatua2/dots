@@ -575,6 +575,29 @@ enum SelfTest {
         let recap = NightRecap.last(in: model.state, now: Date().nightStart.addingTimeInterval(19 * 3_600))
         check("The morning after, the recap says: \(recap?.headline(macKind: model.state.thisMac.kind) ?? "nothing")",
               recap?.pool.id == "late-night-lab" && (recap?.night.runs ?? 0) > 0)
+
+        story(19, "A pool names its one model, and says whether this Mac can lend to it")
+        let big = cloud.world.createPool(name: "Big Pictures", isPublic: true, id: "big-pictures")
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == big.id }) {
+                s.pools[i].servesModelID = "owner/big-draw"
+                s.pools[i].modelName = "Big Draw"
+                s.pools[i].kind = "pictures"
+                s.pools[i].modelGB = Double(s.thisMac.maxLendGB + 4)
+            }
+        }
+        await model.backend.syncNow()
+        let bigPool = model.state.pool(big.id)!
+        check("A pool that draws with a model too big for this Mac says so, with what it needs",
+              bigPool.modelLabel == "Big Draw" && bigPool.model == nil && !bigPool.canLend(model.state.thisMac)
+              && bigPool.whyCantLend(model.state.thisMac)?.contains("\(bigPool.needsGB ?? 0) GB on one Mac") == true)
+        check("...so it is offered nothing, and joining it still lets you ask it", model.state.offerGB(for: bigPool) == 0)
+        model.leave(bigPool)
+        await model.backend.settled()
+        model.join(model.state.pool(big.id)!)
+        await model.backend.settled()
+        check("...as a member lending it nothing", cloud.world.state.pool(big.id)?.isMember(model.state.meID) == true
+              && cloud.world.state.share(in: big.id) == nil)
     }
 
     /// With DOTS_SELFTEST_ENDPOINT set to any OpenAI-compatible server (LM Studio, Ollama), answers are real.

@@ -387,7 +387,7 @@ final class AppModel {
     /// joins to ask, and lends nothing until another pool makes room).
     func join(_ pool: Pool, gb: Int? = nil) {
         let wasMember = pool.isMember(state.meID)
-        let outcome = backend.join(poolID: pool.id, gb: min(gb ?? .max, state.mostGB(for: pool.id)))
+        let outcome = backend.join(poolID: pool.id, gb: min(gb ?? .max, state.offerGB(for: pool)))
         let unlock = backend.applyLendingStatus(active: lendingStatus.isActive)
         let waiting: String? = lendingStatus.isActive ? nil : lendingStatus.headline
         route = .pool(pool.id)

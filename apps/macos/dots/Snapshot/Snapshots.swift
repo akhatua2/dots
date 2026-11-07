@@ -186,6 +186,30 @@ enum Snapshots {
             save(RecapSheet(), model, CGSize(width: 720, height: 800), dir, "22-recap", fitHeight: true,
                  clock: Date().nightStart.addingTimeInterval(19.03 * 3_600))
         }
+
+        // 10. Pools that name their one model: Home writes text with a small model, Prism draws pictures
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == "home" }) {
+                s.pools[i].servesModelID = "Qwen/Qwen3.5-0.8B"
+                s.pools[i].modelName = "Qwen3.5 0.8B"
+                s.pools[i].kind = "text"
+                s.pools[i].modelGB = 1.7
+            }
+        }
+        _ = cloud.world.createPool(name: "Prism", isPublic: true, id: "prism")
+        cloud.world.update { s in
+            if let i = s.pools.firstIndex(where: { $0.id == "prism" }) {
+                s.pools[i].servesModelID = "mflux-community/flux2-klein-4b-mflux-q4"
+                s.pools[i].modelName = "FLUX.2 klein 4B"
+                s.pools[i].kind = "pictures"
+                s.pools[i].modelGB = 4.6
+                s.pools[i].blurb = "Pictures, drawn whole on one Mac."
+            }
+        }
+        await model.backend.syncNow()
+        save(Shell(route: .pool("home")), model, window, dir, "23-home-runs")
+        save(Shell(route: .pool("prism")), model, window, dir, "24-prism-runs")
+        save(Shell(route: .explore), model, window, dir, "25-explore-runs")
         cloud.stop()
         print("snapshots written to \(dir.path)")
     }

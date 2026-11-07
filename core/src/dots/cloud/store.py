@@ -23,7 +23,7 @@ create table if not exists devices (
 create table if not exists pools (
     id text primary key, name text not null, is_public integer not null, blurb text not null,
     host_id text, created_at text not null, offers_idle integer not null default 0,
-    serves_model_id text, model_kind text, phase real not null
+    serves_model_id text, model_kind text, model_gb real, phase real not null
 );
 create table if not exists members (pool_id text, person_id text, primary key (pool_id, person_id));
 create table if not exists macs_seen (mac_id text primary key, first_seen text not null);
@@ -75,7 +75,7 @@ class Store:
         self._move_old_lending()
 
     # Columns added since a database was first made: (table, column, type)
-    _ADDED = [("pools", "model_kind", "text")]
+    _ADDED = [("pools", "model_kind", "text"), ("pools", "model_gb", "real")]
 
     def _add_missing_columns(self) -> None:
         for table, column, kind in self._ADDED:
@@ -129,9 +129,10 @@ class Store:
         )
         self.run("insert or ignore into members (pool_id, person_id) values (?, ?)", pool_id, host_id)
 
-    def set_pool_model(self, pool_id: str, model_id: str, kind: str) -> None:
-        """What a pool runs: one model, which writes text or draws pictures"""
-        self.run("update pools set serves_model_id = ?, model_kind = ? where id = ?", model_id, kind, pool_id)
+    def set_pool_model(self, pool_id: str, model_id: str, kind: str, gb: float | None = None) -> None:
+        """What a pool runs: one model, which writes text or draws pictures, and the size of its weights"""
+        self.run("update pools set serves_model_id = ?, model_kind = ?, model_gb = ? where id = ?",
+                 model_id, kind, gb, pool_id)
 
     def describe_pool(self, pool_id: str, blurb: str) -> None:
         self.run("update pools set blurb = ? where id = ?", blurb, pool_id)

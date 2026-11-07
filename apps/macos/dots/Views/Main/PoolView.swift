@@ -111,8 +111,12 @@ struct PoolView: View {
     private var subtitle: String {
         var parts: [String] = []
         if pool.isPublic { parts.append("Public pool") }
-        parts.append(pool.model?.name ?? "No model yet")
-        if pool.level > 0 { parts.append("Level \(pool.level)") }
+        if pool.runsOneModel {
+            parts.append("Runs \(pool.modelLabel ?? "")")
+        } else {
+            parts.append(pool.model?.name ?? "No model yet")
+            if pool.level > 0 { parts.append("Level \(pool.level)") }
+        }
         if pool.isPublic { parts.append(pool.totalMacs.counted("Mac")) }
         return parts.joined(separator: " · ")
     }
@@ -241,9 +245,10 @@ struct MemberFace: View {
     }
 }
 
-// MARK: - The next level
+// MARK: - What it runs, or the next level
 
-/// How far the pool is from its next level, and the one thing that gets it there.
+/// A pool that names its model: what it runs, what that needs, and what the pool has. A pool on the ladder: how far
+/// it is from its next level, and the one thing that gets it there.
 struct LevelCard: View {
     @Environment(AppModel.self) private var model
     @Environment(\.artClock) private var artClock
@@ -257,7 +262,9 @@ struct LevelCard: View {
         let tonight = (artClock ?? .now).nightStart
         let justUnlocked = pool.unlocks.last.flatMap { $0.byMacID == s.thisMacID && $0.date >= tonight && $0.modelID == pool.model?.id ? $0 : nil }
         VStack(alignment: .leading, spacing: 0) {
-            if let event = justUnlocked, let tier = Ladder.tier(event.modelID) {
+            if pool.runsOneModel {
+                runs(mine: mine)
+            } else if let event = justUnlocked, let tier = Ladder.tier(event.modelID) {
                 CardHeader("Level \(pool.level)", note: "\(gb.grouped) GB")
                 Text("Unlocked").font(D.ui(40, .semibold)).tracking(-1).foregroundStyle(D.accentText).padding(.top, 14)
                 Text(pool.isPublic ? "\(tier.name) now runs here, for everyone." : "\(tier.name) now runs here, free.")
@@ -294,6 +301,47 @@ struct LevelCard: View {
             }
         }
         .panel()
+    }
+
+    @ViewBuilder private func runs(mine: Int) -> some View {
+        let s = model.state
+        let gb = pool.pooledGB
+        let needs = pool.needsGB
+        // A picture needs one Mac with room for the whole model; text needs the pool's Macs together
+        let drawers = pool.macs.filter { $0.state == .lending && $0.lendGB >= (needs ?? 0) }.count
+        let ready = pool.draws ? drawers > 0 : gb >= (needs ?? 1)
+        CardHeader("Runs", note: pool.draws ? "draws pictures" : "writes text")
+        Text(pool.modelLabel ?? "").font(D.ui(30, .semibold)).tracking(-0.6).foregroundStyle(D.t1)
+            .lineLimit(1).minimumScaleFactor(0.6).padding(.top, 10)
+        Text(runsLine(needs: needs, gb: gb, drawers: drawers))
+            .font(D.ui(13)).foregroundStyle(D.t3).lineSpacing(2).padding(.top, 8)
+            .fixedSize(horizontal: false, vertical: true)
+        StatRow(stats: [.init(value: needs.map { "\($0) GB" } ?? "?", label: pool.draws ? "on one Mac" : "in all"),
+                        .init(value: "\(gb.grouped) GB", label: "lent now", accent: ready),
+                        .init(value: pool.lendingMacs.grouped, label: pool.lendingMacs == 1 ? "Mac lending" : "Macs lending")], size: 18)
+            .padding(.top, 16)
+        if !pool.draws, let needs { bar(target: needs, mine: mine) }
+        let canLendHere = pool.isMember(s.meID) && !s.isLending(to: pool.id) && s.offerGB(for: pool) > 0
+        if canLendHere || !pool.isPublic {
+            HStack(spacing: 16) {
+                if canLendHere {
+                    Button("Lend Here") { model.setShare(pool, gb: s.offerGB(for: pool)); model.setLendingOn(true) }
+                        .buttonStyle(DButtonStyle(kind: .primary, large: true))
+                }
+                if !pool.isPublic { bringAMac }
+            }
+            .padding(.top, 18)
+        }
+    }
+
+    private func runsLine(needs: Int?, gb: Int, drawers: Int) -> String {
+        guard let needs else { return pool.draws ? "Each picture is drawn whole on one Mac." : "Shared out across the Macs lending here." }
+        if pool.draws {
+            let now = drawers == 0 ? "None lends that much yet." : drawers == 1 ? "One does now." : "\(drawers) do now."
+            return "Each picture is drawn whole on one Mac lending \(needs) GB or more. \(now)"
+        }
+        let togo = needs - gb
+        return "Its weights are shared out across the Macs lending here." + (togo > 0 ? " \(togo) GB to go." : "")
     }
 
     /// The pool's memory as segments: each Mac's in grey, yours orange, and the stretch still to go outlined.
@@ -368,13 +416,13 @@ struct ContributionCard: View {
                 Spacer()
                 OrangeSwitch(isOn: Binding(get: { on }, set: { want in
                     if want {
-                        if !here { model.setShare(pool, gb: most) }
+                        if !here { model.setShare(pool, gb: s.offerGB(for: pool)) }
                         model.setLendingOn(true)
                     } else {
                         model.setShare(pool, gb: 0)
                     }
                 }), label: "Lend in \(pool.name)")
-                .disabled(maxLend == 0 || (!here && most == 0))
+                .disabled(!pool.canLend(s.thisMac) || (!here && s.offerGB(for: pool) == 0))
             }
             .frame(height: 20)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -409,7 +457,9 @@ struct ContributionCard: View {
     }
 
     private func note(here: Bool, on: Bool, most: Int, status: LendingStatus) -> String {
-        if !here { return most == 0 ? "your other pools have all of this Mac" : "not lending here" }
+        let s = model.state
+        if !here, let why = pool.whyCantLend(s.thisMac) { return why.replacingOccurrences(of: "Your Mac can't lend here: ", with: "") }
+        if !here { return s.offerGB(for: pool) == 0 ? "your other pools have what this Mac lends" : "not lending here" }
         if !on { return "in this pool" }
         return status.isActive ? "lending now" : status.headline.lowercased()
     }
@@ -457,6 +507,13 @@ struct ContributionCard: View {
         }
         let names = pool.macs.filter { $0.state == .lending && $0.macID != s.thisMacID }
             .compactMap { s.device($0.macID).flatMap { s.person($0.ownerID)?.name } }
+        if pool.draws {
+            switch names.count {
+            case 0: return "No one else draws here now"
+            case 1: return "\(names[0])'s Mac draws here"
+            default: return "\(names.dropLast().joined(separator: ", ")) and \(names.last!) draw here"
+            }
+        }
         switch names.count {
         case 0: return pool.isPublic ? "The pool carries the model" : "No one is lending here now"
         case 1: return "\(names[0]) carries the model"
@@ -473,7 +530,7 @@ struct JoinCard: View {
 
     var body: some View {
         let s = model.state
-        let add = s.mostGB(for: pool.id)
+        let add = s.offerGB(for: pool)
         let after = pool.pooledGB + add
         let next = pool.nextModel
         VStack(alignment: .leading, spacing: 0) {
@@ -484,8 +541,13 @@ struct JoinCard: View {
             }
             .padding(.top, 10)
             Group {
-                if add == 0 {
-                    Text("Your other pools have all this Mac lends. Join to ask \(pool.name), and give it a share later.")
+                if let why = pool.whyCantLend(s.thisMac) {
+                    Text("\(why). Join to ask it all the same.").foregroundStyle(D.t3)
+                } else if add == 0 {
+                    Text("Your other pools have what this Mac lends. Join to ask \(pool.name), and give it a share later.")
+                        .foregroundStyle(D.t3)
+                } else if pool.runsOneModel {
+                    Text(pool.draws ? "Enough to draw \(pool.name)'s pictures on your Mac." : "Shares out \(pool.modelLabel ?? "its model") with the Macs here.")
                         .foregroundStyle(D.t3)
                 } else if let next, after >= next.minGB {
                     Text("Takes \(pool.name) to \(after.grouped) GB, past \(next.name)'s line, for everyone here.")

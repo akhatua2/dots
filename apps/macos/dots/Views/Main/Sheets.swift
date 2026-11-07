@@ -222,7 +222,7 @@ struct InvitePreview: View {
                 EmblemView(macs: pool.totalMacs, phase: pool.phase, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(inviter) invited you to \(pool.name)").font(D.ui(14, .semibold)).foregroundStyle(D.t1)
-                    Text("\(pool.lendingMacs) lending · runs \(pool.model?.name ?? "nothing yet")").font(D.ui(12.5)).foregroundStyle(D.t3)
+                    Text("\(pool.lendingMacs) lending · runs \(pool.modelLabel ?? "nothing yet")").font(D.ui(12.5)).foregroundStyle(D.t3)
                 }
             }
             if let next = pool.nextModel {

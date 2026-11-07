@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import re
 import uuid
@@ -20,6 +21,8 @@ from .config import CloudConfig
 from .hub import HubClient, HubError
 from .store import Store, expires_in, is_expired
 from .sync import HUB_POOL, HubView, SyncBuilder, hub_pool
+
+log = logging.getLogger(__name__)
 
 _POOL_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 
@@ -44,10 +47,30 @@ class Cloud:
         store.rename_pool(HUB_POOL, config.pool_name)
         store.describe_pool(HUB_POOL, config.pool_blurb)
 
+    async def _read_hub_pool_model(self, app: web.Application):
+        """The hub's own pool runs the model the cloud asks the hub for: read its repo once, in the background, so
+        the pool says what it runs and how big it is like any pool started from a link."""
+        task = asyncio.create_task(self._describe_hub_pool())
+        yield
+        task.cancel()
+
+    async def _describe_hub_pool(self) -> None:
+        model_id = self.config.pool_model
+        row = self.pool_row(HUB_POOL)
+        if not model_id or (row["serves_model_id"] == model_id and row["model_gb"]):
+            return
+        try:
+            model = await asyncio.to_thread(links.describe, model_id)
+        except Exception as e:  # offline, or the repo can't be read: the pool says less until it can
+            log.info("couldn't read %s: %s", model_id, e)
+            return
+        self.store.set_pool_model(HUB_POOL, model.id, model.kind, model.gb)
+
     # ---- the app -------------------------------------------------------------
 
     def app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth], client_max_size=8 * 1024 * 1024)
+        app.cleanup_ctx.append(self._read_hub_pool_model)
         r = app.router
         r.add_get("/healthz", self.healthz)
         r.add_get("/v1/state", self.state)
@@ -147,7 +170,7 @@ class Cloud:
                 return error(400, f"dots can't run {model.name}: {model.why}")
         self.store.ensure_pool(pool_id, name[:60], self.me, is_public=bool(body.get("isPublic")))
         if model is not None:
-            self.store.set_pool_model(pool_id, model.id, model.kind)
+            self.store.set_pool_model(pool_id, model.id, model.kind, model.gb)
         self.store.award("starter", "sparkles", "Pool starter", f"Started {name}")
         sync = await self.sync.build(self.hub)
         pool = next(p for p in sync["state"]["pools"] if p["id"] == pool_id)

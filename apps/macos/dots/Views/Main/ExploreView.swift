@@ -20,7 +20,7 @@ struct ExploreView: View {
                 let q = query.trimmingCharacters(in: .whitespaces).lowercased()
                 guard !q.isEmpty else { return true }
                 return $0.name.lowercased().contains(q) || $0.blurb.lowercased().contains(q)
-                    || ($0.model?.name.lowercased().contains(q) ?? false)
+                    || ($0.modelLabel?.lowercased().contains(q) ?? false)
             }
             .sorted { $0.totalMacs > $1.totalMacs }
     }
@@ -113,6 +113,13 @@ struct PoolCard: View {
     var pool: Pool
     @State private var hovering = false
 
+    /// What the pool has and what its model needs: "6 GB lent of 2 GB" or, for pictures, "needs 5 GB on one Mac"
+    private var resources: String {
+        let lent = "\(pool.pooledGB.grouped) GB lent"
+        guard let needs = pool.needsGB else { return lent }
+        return lent + (pool.draws ? ", \(needs) GB a picture" : " of \(needs) GB")
+    }
+
     var body: some View {
         let s = model.state
         let friends = s.friends(in: pool)
@@ -124,7 +131,7 @@ struct PoolCard: View {
                 MiniRings(pool: pool, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pool.name).font(D.ui(15, .bold)).foregroundStyle(D.t1).lineLimit(1)
-                    Text("\(pool.model?.name ?? "No model yet") · \(pool.totalMacs.counted("Mac"))")
+                    Text("\(pool.modelLabel ?? "No model yet") · \(pool.totalMacs.counted("Mac"))")
                         .font(D.ui(12)).foregroundStyle(D.t3).lineLimit(1)
                 }
             }
@@ -137,12 +144,21 @@ struct PoolCard: View {
                     Circle().fill(D.t4).frame(width: 7, height: 7)
                     Text("\(pool.lendingMacs.grouped) lending").font(D.ui(12, .medium)).foregroundStyle(D.t2)
                 }
-                IconLine(symbol: "gauge.with.dots.needle.33percent", text: "\(pool.tokPerSec) tok/s for you", color: D.t4, size: 12)
+                if pool.runsOneModel {
+                    IconLine(symbol: "memorychip", text: resources, color: D.t4, size: 12)
+                } else {
+                    IconLine(symbol: "gauge.with.dots.needle.33percent", text: "\(pool.tokPerSec) tok/s for you", color: D.t4, size: 12)
+                }
             }
             .padding(.top, 10)
-            IconLine(symbol: "smallcircle.filled.circle",
-                     text: "About \(pool.creditsPerHour(lendGB: max(1, s.mostGB(for: pool.id))).counted("credit")) an hour for your Mac", size: 12)
-                .padding(.top, 7)
+            if let why = pool.whyCantLend(s.thisMac) {
+                IconLine(symbol: "laptopcomputer", text: why.replacingOccurrences(of: "Your Mac can't lend here: ", with: "Can't lend: "), size: 12)
+                    .padding(.top, 7)
+            } else {
+                IconLine(symbol: "smallcircle.filled.circle",
+                         text: "About \(pool.creditsPerHour(lendGB: max(1, s.mostGB(for: pool.id))).counted("credit")) an hour for your Mac", size: 12)
+                    .padding(.top, 7)
+            }
             Group {
                 if !friends.isEmpty {
                     HStack(spacing: 8) {
@@ -176,11 +192,13 @@ struct PoolCard: View {
                     .padding(.horizontal, 12).frame(height: 28)
                     .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
                 } else {
-                    HoverAccentButton(title: isMember ? "Lend Here" : "Add My Mac", alwaysAccent: hovering && !isMember) {
+                    HoverAccentButton(title: isMember ? "Lend Here" : s.offerGB(for: pool) > 0 ? "Add My Mac" : "Join",
+                                      alwaysAccent: hovering && !isMember) {
                         model.join(pool)
                     }
-                    .disabled(isMember && s.mostGB(for: pool.id) == 0)
-                    .help(isMember && s.mostGB(for: pool.id) == 0 ? "Your other pools have all this Mac lends" : "")
+                    .disabled(isMember && s.offerGB(for: pool) == 0)
+                    .opacity(isMember && s.offerGB(for: pool) == 0 ? 0.4 : 1)
+                    .help(pool.whyCantLend(s.thisMac) ?? (isMember && s.offerGB(for: pool) == 0 ? "Your other pools have what this Mac lends" : ""))
                 }
             }
         }

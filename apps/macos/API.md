@@ -84,6 +84,7 @@ The second half of this page covers the API dots serves to your own apps on `loc
 - A Mac's `state` is `lending`, `online` or `asleep`.
 - A public pool counts its Macs in `crowdMacs`, `crowdLending` and `crowdGB` rather than listing them.
 - What a pool runs follows from the memory its lending Macs pool together. The ladder is in `dots/Model/Models.swift`: Qwen3 235B at 136 GB, DeepSeek V3.1 at 396 and Kimi K2 at 620. `servesModelID` lets a pool prefer a model, such as a coding model.
+- A pool started from a link runs that one model, whatever its memory: `servesModelID`, `modelName`, `kind` (`text` or `pictures`) and `modelGB`, the size of its weights, read from the repo. A pool that writes text needs that much across its Macs; a pool that draws needs it on one Mac, so a Mac with less can join it and ask it but not lend to it.
 - Each line of the ladder says whether its model reads images (`readsImages`): a question with an image only goes
   to a pool whose model does.
 - `unlocks` records each model the pool reached: `{id, modelID, byMacID, fromGB, toGB, date}`. `byMacID` is the Mac that tipped it over.
