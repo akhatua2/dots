@@ -129,6 +129,20 @@ struct BadgeReply: Codable { var badge: Badge?; var sync: CloudSync }
 struct PoolReply: Codable { var pool: Pool; var sync: CloudSync }
 struct InviteReply: Codable { var invite: Invite; var sync: CloudSync }
 
+/// What a Hugging Face link runs, as the cloud reads it from the repo: for starting a pool from a link
+struct ModelDescription: Codable, Equatable {
+    var id: String
+    var name: String
+    /// "text", "pictures", or "unknown"
+    var kind: String
+    var family: String?
+    /// The size of its weights
+    var gb: Double
+    /// Whether dots runs it; nil when the cloud can't tell
+    var runs: Bool?
+    var why: String?
+}
+
 // MARK: - Calling it
 
 /// Calls the dots cloud: one base URL and one token for the hub, the server and the gateway.

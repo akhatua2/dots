@@ -399,8 +399,8 @@ final class AppModel {
         _ = backend.endorse(poolID: pool.id)
     }
 
-    func startPool(name: String, isPublic: Bool) {
-        let pool = backend.createPool(name: name, isPublic: isPublic)
+    func startPool(name: String, isPublic: Bool, model: String?) {
+        let pool = backend.createPool(name: name, isPublic: isPublic, model: model)
         route = .pool(pool.id)
     }
 

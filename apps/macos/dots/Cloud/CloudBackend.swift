@@ -173,11 +173,20 @@ final class CloudBackend: DotsBackend {
         return badge
     }
 
-    func createPool(name: String, isPublic: Bool) -> Pool {
+    func createPool(name: String, isPublic: Bool) -> Pool { createPool(name: name, isPublic: isPublic, model: nil) }
+
+    /// A pool that runs the model at `model` (a Hugging Face repo), when one is given
+    func createPool(name: String, isPublic: Bool, model: String?) -> Pool {
         let pool = mirror.createPool(name: name, isPublic: isPublic)
-        struct Body: Encodable { var id: String; var name: String; var isPublic: Bool }
-        send { (try await self.client.send("POST", "v1/pools", body: Body(id: pool.id, name: name, isPublic: isPublic)) as PoolReply).sync }
+        struct Body: Encodable { var id: String; var name: String; var isPublic: Bool; var model: String? }
+        let body = Body(id: pool.id, name: name, isPublic: isPublic, model: model)
+        send { (try await self.client.send("POST", "v1/pools", body: body) as PoolReply).sync }
         return pool
+    }
+
+    /// What a Hugging Face link runs, read by the cloud
+    func describeModel(_ link: String) async throws -> ModelDescription {
+        try await client.get("v1/models/describe", query: [URLQueryItem(name: "link", value: link)])
     }
 
     func createInvite(poolID: String) -> Invite {

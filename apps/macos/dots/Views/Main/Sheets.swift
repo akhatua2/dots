@@ -39,6 +39,11 @@ struct StartPoolSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var isPublic = false
+    /// What it runs: a Hugging Face link, and what the cloud read from it
+    @State private var link = ""
+    @State private var described: ModelDescription?
+    @State private var linkProblem: String?
+    @State private var reading = false
 
     var body: some View {
         let hash = name.unicodeScalars.reduce(UInt64(5)) { $0 &* 31 &+ UInt64($1.value) }
@@ -65,16 +70,56 @@ struct StartPoolSheet: View {
                      ? "Public pools run on strangers' Macs, so private prompts never go there."
                      : "Everyone you invite can lend their Mac and ask the pool for free.")
                     .font(D.ui(12.5)).foregroundStyle(D.t4)
+                VStack(alignment: .leading, spacing: 8) {
+                    CapLabel("What it runs")
+                    Field(placeholder: "A Hugging Face link, like huggingface.co/mlx-community/…", text: $link)
+                    if reading {
+                        Text("Reading the model…").font(D.ui(12.5)).foregroundStyle(D.t4)
+                    } else if let linkProblem {
+                        Text(linkProblem).font(D.ui(12.5)).foregroundStyle(D.t3)
+                    } else if let described {
+                        ModelCard(model: described)
+                    }
+                }
             }
+            .task(id: link) { await read(link) }
         } footer: {
             Button("Cancel") { dismiss() }.buttonStyle(DButtonStyle(kind: .quiet))
             Button("Start pool") {
-                model.startPool(name: name, isPublic: isPublic)
+                model.startPool(name: name, isPublic: isPublic, model: described?.id)
                 dismiss()
             }
             .buttonStyle(DButtonStyle(kind: .primary, large: true))
-            .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(!canStart)
             .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    /// A name, and if a link was given, one dots can run that has been read
+    private var canStart: Bool {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if link.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        return !reading && linkProblem == nil && described != nil && described?.runs != false
+    }
+
+    /// Reads the link once typing pauses
+    private func read(_ text: String) async {
+        let link = text.trimmingCharacters(in: .whitespaces)
+        described = nil
+        linkProblem = nil
+        guard !link.isEmpty else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        guard !Task.isCancelled else { return }
+        reading = true
+        defer { reading = false }
+        do {
+            let model = try await model.backend.describeModel(link)
+            guard !Task.isCancelled else { return }
+            described = model
+            if model.runs == false { linkProblem = model.why.map { "dots can't run \(model.name): \($0)." } }
+        } catch {
+            guard !Task.isCancelled else { return }
+            linkProblem = "Couldn't read that link. Check it's a Hugging Face model you can open."
         }
     }
 
@@ -92,6 +137,32 @@ struct StartPoolSheet: View {
         }
         .buttonStyle(.plain)
         .help(help)
+    }
+}
+
+/// What a link runs and what it needs, under the link in Start a Pool
+private struct ModelCard: View {
+    var model: ModelDescription
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(model.name).font(D.ui(13.5, .semibold)).foregroundStyle(D.t1)
+            Text(what).font(D.ui(12.5)).foregroundStyle(D.t3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(D.bg0))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(D.line, lineWidth: 1))
+    }
+
+    private var size: String { String(format: "%.1f GB", model.gb) }
+
+    private var what: String {
+        switch model.kind {
+        case "pictures": "Draws and changes pictures. Each one is drawn on a single Mac with room for its \(size)."
+        case "text": "Answers questions. Its \(size) runs on one Mac with room for it, or is split across the pool's Macs."
+        default: "\(size) of weights."
+        }
     }
 }
 

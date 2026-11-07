@@ -445,7 +445,7 @@ enum SelfTest {
         model.endorse(model.state.pool("student-union")!)
         await model.backend.settled()
         check("Endorsing a pool of fewer than 20 Macs earns Early backer", badges().contains("backer-student-union"))
-        model.startPool(name: "Self-test Lab", isPublic: false)
+        model.startPool(name: "Self-test Lab", isPublic: false, model: nil)
         await model.backend.settled()
         let lab = cloud.world.state.pools.first { $0.name == "Self-test Lab" }
         check("Starting a pool earns Pool starter, and the cloud keeps the pool under the app's id",
