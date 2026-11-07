@@ -197,3 +197,13 @@ xcodebuild ... CODE_SIGN_IDENTITY="<hash>" DEVELOPMENT_TEAM="<team>" CODE_SIGN_S
 
 `infra/dev-local.sh` runs the app against a real hub and cloud on this Mac; see the top of that script.
 Its contract with the cloud is `apps/macos/API.md`.
+
+To make a build for people to download, with the worker and uv inside, signed, notarized and in a disk image:
+
+```bash
+DOTS_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" DOTS_NOTARY_PROFILE=dots apps/macos/tools/release.sh
+```
+
+It needs a Developer ID Application certificate in the keychain and a notarytool profile saved once with
+`xcrun notarytool store-credentials dots`. Without them it makes an ad hoc signed disk image to try the steps
+(`apps/macos/build/release/dots.dmg`), which other Macs won't open.
