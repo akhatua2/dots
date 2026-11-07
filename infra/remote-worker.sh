@@ -51,6 +51,6 @@ UV_CONSTRAINT="$HOME/.dots-test/constraints.txt" DOTS_HOME="$HOME/.dots-test" DO
   >worker.log 2>&1 </dev/null &
 # The Mac stays awake while it lends, and may sleep again once the worker stops
 nohup caffeinate -dims -w $! >/dev/null 2>&1 &
-echo "worker started on $(scutil --get ComputerName), lending $gb GB to ${pool:-the hub's pool} (log: ~/.dots-test/worker.log)"
+echo "worker started on $(scutil --get ComputerName), lending $gb GB to ${pool:-the default pool} (log: ~/.dots-test/worker.log)"
 REMOTE
 rm -rf "$dist"
