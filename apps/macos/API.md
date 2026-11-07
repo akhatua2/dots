@@ -135,7 +135,7 @@ A pool's answer, in OpenAI's chat completions format. Public pools charge the mo
 
 The sync's `cloud.address` is where friends reach this cloud, when it says (`DOTS_CLOUD_PUBLIC_URL`); invite links carry it as `dots://invite/CODE?cloud=…`.
 
-`X-Dots-Privacy: mine` asks for Only my Macs: the hub runs it only when every Mac holding the model is yours, and otherwise answers 409 without running it anywhere. The same header on a pool's pictures draws only on a Mac of yours. The app sends it for your documents and photos; questions that look personal stay in your pools by the app's routing, and the rest may go anywhere.
+`X-Dots-Privacy: mine` asks for Only my Macs: the hub runs it only when every Mac holding the model is yours, and otherwise answers 409 without running it anywhere. The same header on a pool's pictures draws only on a Mac of yours. The app sends it for your documents and photos. `X-Dots-Privacy: pools` (My pools, for questions that look personal) runs the question's head, the part that reads the question and writes the answer, on your own Mac when you lend to the pool: a model split across Macs is laid out again with your Mac at the front. The rest may go anywhere and send no header.
 
 A streamed answer carries `dots` events beside the usual chunks:
 

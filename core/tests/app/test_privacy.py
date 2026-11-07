@@ -23,6 +23,7 @@ def _hub(placement: list[tuple[str, str]]):
         return deployment
 
     hub.ensure_model_started = ensure_model_started
+    hub.want_head_on = lambda model_id, account: None
     hub.only_on = lambda d, account: Hub.only_on(hub, d, account)
     return hub
 
@@ -55,3 +56,23 @@ def test_a_turn_goes_only_to_macs_lending_to_the_pool_that_runs_the_model():
     hub.in_pool = lambda p, model_id: Hub.in_pool(hub, p, model_id)
     deployment = SimpleNamespace(model_id="qwen", worker_states={}, selected_backend="mlx")
     assert [p.id for p in Hub._ready_in_pool(hub, deployment)] == ["home", "home-2"], "Prism's Mac never answers Home"
+
+
+def test_a_split_models_head_moves_to_the_mac_of_who_asked_privately():
+    def mac(wid, account, pool=""):
+        return SimpleNamespace(id=wid, compute=True, account_id=account, pool=pool)
+
+    macs = {m.id: m for m in (mac("w-ana", "ana"), mac("w-me", "me"), mac("w-elsewhere", "bo", pool="prism"))}
+    hub = SimpleNamespace(participants=macs, _model_pool={"m": ""}, _head_account={})
+    hub.in_pool = lambda p, model_id: Hub.in_pool(hub, p, model_id)
+    split = SimpleNamespace(model_id="m", n_layers=24, current_placement=[("w-ana", 0, 12, True), ("w-me", 12, 24, False)])
+    assert not Hub._head_misplaced(hub, split), "nobody asked yet: the layout stands"
+    Hub.want_head_on(hub, "m", "me")
+    assert Hub._head_misplaced(hub, split), "my private question moves the head to my Mac"
+    Hub.want_head_on(hub, "m", "ana")
+    assert not Hub._head_misplaced(hub, split), "Ana's Mac already has it"
+    Hub.want_head_on(hub, "m", "bo")
+    assert not Hub._head_misplaced(hub, split), "Bo lends elsewhere, so there is nowhere in this pool to move it"
+    whole = SimpleNamespace(model_id="m", n_layers=24, current_placement=[("w-ana", 0, 24, True), ("w-me", 0, 24, True)])
+    Hub.want_head_on(hub, "m", "me")
+    assert not Hub._head_misplaced(hub, whole), "a whole copy on each Mac already runs my turn on mine"

@@ -112,7 +112,7 @@ enum AnswerRunner {
             guard let pool = c.poolID else { return nil }
             var hub = app.backend.client.hub(poolID: pool, model: c.modelID)
             hub.draftAhead = settings.draftAhead
-            if level == .mine { hub.onlyMine = true }
+            hub.privacy = level
             return (hub, false, "the dots hub")
         case .frontier:
             var own = settings.frontierEndpoint

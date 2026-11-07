@@ -94,9 +94,9 @@ Within the shared levels, dots also keeps the plain-text parts where the asker t
 1. **Your question's head runs on your own Mac** when you lend to the pool, so the other Macs only see hidden
    states. A model that fits on one Mac already works this way: every Mac that can hold it keeps a whole copy, and
    your turn runs on your own copy whenever you lend (only Macs in the pool that runs the model are considered).
-   A model split across Macs has one layout per pool, so one Mac holds the head for everyone; giving each asker
-   the head means a layout per asker (the head's layers loaded on each lending Mac, the rest shared), which is
-   the work left here.
+   A model split across Macs is laid out again for a question kept in your pools, with your Mac at the front,
+   when you lend to the pool and your Mac can hold the head (the layout stays until someone else asks privately;
+   ordinary questions don't move it). Checked live with Qwen3.5 2B split across two workers of different accounts.
 2. **Private material only goes where you trust**: your documents and photos to your own Mac or pools of people you
    invited, never public pools. Ask and Draw already route this way.
 3. **Nothing kept**: workers drop a conversation's working memory after each request (the hub already resets it).
@@ -135,7 +135,7 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 8. Privacy levels on every request (Only my Macs, My pools, Anywhere), never falling back to a wider one; your
    question's head on your own Mac within the shared levels (see Who can see what). Levels done: the app routes by
    level and the receipt names it; Only my Macs travels to the hub, which refuses a model held partly on someone
-   else's Mac, and draws only on yours. Still to do: the head on the asker's Mac for models split across Macs.
+   else's Mac, and draws only on yours. The head on the asker's Mac: done for both kinds of model.
 
 ## Not now
 

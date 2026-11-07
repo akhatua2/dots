@@ -779,7 +779,7 @@ enum SelfTest {
 
         let studio = model.state.pool("studio-9")!
         var endpoint = model.backend.client.hub(poolID: studio.id, model: studio.model?.id ?? "")
-        endpoint.onlyMine = true
+        endpoint.privacy = .mine
         var refused = ""
         do {
             for try await _ in OpenAIClient.stream(endpoint, messages: [ChatMessage(role: "user", content: "hi")]) {}

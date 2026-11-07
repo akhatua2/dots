@@ -76,6 +76,14 @@ def _only_mine(body: dict) -> bool:
     return str(body.get("privacy") or "") == _ONLY_MINE
 
 
+# "pools": kept in the asker's pools, so its head runs on the asker's own Mac when they lend there
+_MY_POOLS = "pools"
+
+
+def _in_my_pools(body: dict) -> bool:
+    return str(body.get("privacy") or "") in (_MY_POOLS, _ONLY_MINE)
+
+
 def _template_kwargs(body: dict) -> dict:
     """Options for the model's chat template. A request can pass them as vLLM does, in
     `chat_template_kwargs`; without `enable_thinking` there, the hub's DOTS_THINKING setting decides (off by
@@ -403,6 +411,9 @@ class HttpApi:
         if not isinstance(model_id, str) or not model_id:
             return _error(400, "model must be a non-empty string")
 
+        # A question kept in your pools runs its head on your own Mac, when you lend to the pool
+        if _in_my_pools(body) and _querier(request) != _API_ACCOUNT:
+            self.hub.want_head_on(model_id, _querier(request))
         # The pool that asks: its model runs on its own Macs only. Unnamed, the hub's default pool.
         deployment = await self.hub.ensure_model_started(model_id, pool=str(body.get("pool") or ""))
         if not deployment.pool_ready.is_set():

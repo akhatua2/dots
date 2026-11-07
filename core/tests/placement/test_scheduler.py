@@ -343,3 +343,16 @@ def test_fuzz_schedule_is_always_pareto_optimal():
         )
         frontier = non_dominated_placements(candidates)
         assert p in frontier, f"trial {trial}: schedule picked a dominated point"
+
+
+def test_head_on_puts_the_first_segment_on_that_accounts_mac():
+    """A question kept in your pools runs its head on your own Mac: the scheduler can be held to that."""
+    units = make_unit_graph(LLAMA_70B, layers_per_block=4)
+    workers, latency = make_simple_pool()
+    for account in ("acc-alice", "acc-bob"):
+        placed = schedule(units, workers, latency, head_on=account, max_segments=len(workers))
+        if placed is None:
+            continue  # that Mac can't hold the head of this model
+        owner = next(w.account_id for w in workers if w.worker_id == placed.segments[0][0])
+        assert owner == account
+    assert schedule(units, workers, latency, head_on="acc-nobody") is None, "never someone else's Mac instead"

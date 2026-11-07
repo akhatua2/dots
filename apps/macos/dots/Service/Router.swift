@@ -30,6 +30,15 @@ enum PrivacyLevel: String, Codable, Hashable {
     /// Public pools and frontier models too
     case anywhere
 
+    /// How the hub hears it (X-Dots-Privacy); Anywhere sends nothing
+    var wire: String? {
+        switch self {
+        case .mine: "mine"
+        case .myPools: "pools"
+        case .anywhere: nil
+        }
+    }
+
     var label: String {
         switch self {
         case .mine: "Only my Macs"

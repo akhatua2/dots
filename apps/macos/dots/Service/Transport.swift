@@ -124,7 +124,7 @@ extension URLRequest {
         }
         if inWorkspace, let workspace = endpoint.workspace { setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id") }
         if endpoint.draftAhead == false { setValue("off", forHTTPHeaderField: "X-Dots-Speculate") }
-        if endpoint.onlyMine == true { setValue(PrivacyLevel.mine.rawValue, forHTTPHeaderField: "X-Dots-Privacy") }
+        if let level = endpoint.privacy?.wire { setValue(level, forHTTPHeaderField: "X-Dots-Privacy") }
     }
 }
 

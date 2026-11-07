@@ -501,11 +501,13 @@ async def _body(request: web.Request) -> dict:
 
 
 def _keep_privacy(request: web.Request, body: dict, receipt: dict) -> None:
-    """The app marks a request Only my Macs with a header; the hub holds to it, refusing rather than running it on
-    anyone else's Mac. Any other level comes through as the app's own choice of pool."""
-    if request.headers.get("X-Dots-Privacy", "").strip() == "mine" or body.get("privacy") == "mine":
-        body["privacy"] = "mine"
-        receipt["privacy"] = "mine"
+    """The app marks a request's privacy level with a header: "mine" (Only my Macs), which the hub holds to, refusing
+    rather than running it on anyone else's Mac, or "pools" (My pools), whose head the hub runs on the asker's own Mac
+    when they lend to the pool. Anywhere sends none."""
+    level = request.headers.get("X-Dots-Privacy", "").strip() or str(body.get("privacy") or "")
+    if level in ("mine", "pools"):
+        body["privacy"] = level
+        receipt["privacy"] = level
     else:
         body.pop("privacy", None)
 

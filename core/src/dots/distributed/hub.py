@@ -250,6 +250,9 @@ class Hub:
         self.participants: dict[str, Participant] = {}
         # Which pool each model runs for: a pool runs one model, on its own Macs only
         self._model_pool: dict[str, str] = {}
+        # A model split across Macs runs its head on this account's Mac: the last person who asked it something kept
+        # in their pools (see want_head_on)
+        self._head_account: dict[str, str] = {}
         self._pool_lock = asyncio.Lock()
         # Set after the model is loaded AND the server is listening — useful
         # for callers (tests, embeddings) that want a deterministic ready signal.
@@ -662,14 +665,15 @@ class Hub:
             deployment.current_placement = []
             return []
 
-        placement = schedule(
-            units,
-            workers_snapshot,
-            latency,
-            querier_account=None,
-            mode="cheap",
-            max_segments=len(workers_snapshot),
-        )
+        def place(head_on: str | None):
+            return schedule(units, workers_snapshot, latency, querier_account=None, mode="cheap",
+                            max_segments=len(workers_snapshot), head_on=head_on)
+
+        # The head on the Mac of whoever asked for it (want_head_on), when that Mac can hold it there
+        wanted = self._head_account.get(self.model_id)
+        placement = place(wanted) if wanted else None
+        if placement is None:
+            placement = place(None)
         if placement is None or not placement.segments:
             pool_ram = sum(free_ram(p) for p in compute_workers)
             short_by = max(0.0, model_ram_gb - pool_ram)
@@ -1056,11 +1060,34 @@ class Hub:
             for deployment in list(self.deployments.values()):
                 await self._ensure_model_started_locked(deployment.model_id)
 
-    async def ensure_model_started(self, model_id: str, pool: str = "") -> ModelDeployment:
-        """Create or start loading a model deployment if needed, on the Macs of `pool` (the pool that runs it)."""
-        self._model_pool[model_id] = pool
+    async def ensure_model_started(self, model_id: str, pool: str | None = None) -> ModelDeployment:
+        """Create or start loading a model deployment if needed, on the Macs of `pool` (the pool that runs it).
+        Unnamed, the pool it was last started for (the hub's default pool at first)."""
+        if pool is not None:
+            self._model_pool[model_id] = pool
         async with self._model_turn_lock:
             return await self._ensure_model_started_locked(model_id)
+
+    def want_head_on(self, model_id: str, account: str) -> None:
+        """A question kept in your pools runs its head on your own Mac when you lend to the pool. The head runs the
+        first layers and the output that turns hidden states back into words, so it is the part that reads the
+        question and the answer; the other Macs see only hidden states. A model split across Macs is laid out again
+        with your Mac at the front, if it isn't already and your Mac can hold it there. A model that fits on one
+        Mac needs nothing: every Mac that can hold it keeps a copy, and your turn runs on your own."""
+        self._head_account[model_id] = account
+
+    def _head_misplaced(self, deployment: ModelDeployment) -> bool:
+        """Whether a split model's head should move to the account that asked for it, and can"""
+        wanted = self._head_account.get(deployment.model_id)
+        placement = deployment.current_placement
+        split = len(placement) >= 2 and placement[0][2] < deployment.n_layers
+        if not wanted or not split:
+            return False
+        head = self.participants.get(placement[0][0])
+        if head is not None and head.account_id == wanted:
+            return False
+        return any(p.compute and p.account_id == wanted and self.in_pool(p, deployment.model_id)
+                   for p in self.participants.values())
 
     def in_pool(self, participant: "Participant", model_id: str | None) -> bool:
         """Whether this Mac lends to the pool that runs `model_id`."""
@@ -1164,6 +1191,8 @@ class Hub:
             if decl is None or deployment.selected_backend not in decl.backends:
                 return False
         if self._can_add_full_replica_without_repartition(deployment):
+            return False
+        if self._head_misplaced(deployment):
             return False
         return True
 
