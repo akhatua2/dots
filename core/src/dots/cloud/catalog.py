@@ -65,7 +65,7 @@ def _tier(entry: tuple) -> dict:
 def short_name(model_id: str) -> str:
     """'mlx-community/Qwen3.5-2B-MLX-4bit' -> 'Qwen3.5 2B'; 'mlx-community/gpt-oss-20b-MXFP4-Q4' -> 'gpt-oss 20b'."""
     tail = model_id.split("/")[-1]
-    tail = re.sub(r"-(Instruct|Chat|it|\d+bit|MLX|mlx|GGUF|MXFP4|mxfp4|Q\d|DQ\w*|OptiQ)\b", "", tail)
+    tail = re.sub(r"-(Instruct|Chat|it|\d+bit|MLX|mlx|mflux|GGUF|MXFP4|mxfp4|[Qq]\d|DQ\w*|OptiQ)\b", "", tail)
     return re.sub(r"-(?=[0-9A-Z])", " ", tail).strip()  # a hyphen before a size or a version is a space
 
 

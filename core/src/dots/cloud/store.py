@@ -109,6 +109,9 @@ class Store:
         )
         self.run("insert or ignore into members (pool_id, person_id) values (?, ?)", pool_id, host_id)
 
+    def describe_pool(self, pool_id: str, blurb: str) -> None:
+        self.run("update pools set blurb = ? where id = ?", blurb, pool_id)
+
     def rename_pool(self, pool_id: str, name: str) -> None:
         self.run("update pools set name = ? where id = ?", name, pool_id)
 

@@ -40,8 +40,9 @@ class Cloud:
         # The cloud runs beside this Mac's hub, so it knows the Mac's memory before the first heartbeat.
         if not store.one("select 1 from devices where id = ?", self.this_mac):
             store.set_device(self.this_mac, me, "Mac", _memory_gb())
-        store.ensure_pool(HUB_POOL, config.pool_name, me, blurb="The Macs connected to this hub.")
+        store.ensure_pool(HUB_POOL, config.pool_name, me, blurb=config.pool_blurb)
         store.rename_pool(HUB_POOL, config.pool_name)
+        store.describe_pool(HUB_POOL, config.pool_blurb)
 
     # ---- the app -------------------------------------------------------------
 
