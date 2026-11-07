@@ -39,15 +39,15 @@ In Explore every public pool shows what it runs. Anyone can join and ask it. Len
 Mac can run the pool's model; otherwise "Your Mac can't lend here: it needs macOS 14", and asking still works.
 Ask uses pools that answer in words, Draw uses pools that draw.
 
-## One pool, one model, one hub
+## One hub, many pools, one model each
 
-Each pool is served by its own hub, which serves that pool's one model. A Mac that lends to a pool connects to
-its hub (the ticket comes with the pool in the cloud's sync), and the hub tells it what to run: text layers of
-the pool's model, or the pool's image model.
+There is one hub. Each pool runs exactly one model, the one its creator chose. Every Mac's worker tells the hub
+which pool it lends to, and every request names its pool: the hub runs it on that pool's Macs with that pool's
+model (text layers split across them, or a picture drawn whole on one), and never on another pool's Macs.
 
 A Mac can lend to several pools, an amount to each: 4 GB to Home and 6 GB to Prism, say. It runs one worker for
-each, connected to that pool's hub and held to that pool's share, so the pools never compete for the same memory.
-The app shows each pool's share beside it, and what this Mac has left to lend.
+each, both connected to the hub, each saying its pool and held to that pool's share, so the pools never compete
+for the same memory. The app shows each pool's share beside it, and what this Mac has left to lend.
 
 ## What the backend can tell from a link
 
@@ -73,12 +73,13 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 
 ## Steps
 
-1. The backend reads a link: kind, family where it can tell, size, what Macs need, whether dots runs it.
-2. A pool stores its model (and kind); the hub for a pool serves only that model.
-3. Lending per pool: an amount to each pool, one worker each.
-4. Workers learn what to run from the pool's hub; runners by kind, no models in code.
-5. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
-6. For people beyond one Wi-Fi: the cloud and the hubs on a public server.
+1. The backend reads a link: kind, family where it can tell, size, what Macs need, whether dots runs it. Done.
+2. A pool stores its model (and kind). Done: the cloud keeps it and says it in each pool's sync.
+3. The hub knows each worker's pool and runs each request on its pool's Macs with its pool's model.
+4. Lending per pool: an amount to each pool, one worker each.
+5. Workers learn what to run from their pool; runners by kind, no models in code.
+6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
+7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
 
 ## Not now
 
