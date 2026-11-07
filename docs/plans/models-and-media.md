@@ -129,6 +129,19 @@ three spelled a sign's words right. Z-Image Turbo can only restyle a picture; Kl
 instructions ("make it a snowy winter evening" kept the road and the mountains). An edit costs about three
 times a new picture, because the starting picture's tokens join the image's own.
 
+**Pictures in Ask.** "Draw…", or a photo with "make it…", gets a picture in the conversation instead of
+words (`Drawing.wantsPicture`; a question about a picture is still answered in words). It sharpens as the
+pool draws it: the worker sends a preview after every step and the hub and cloud stream them as OpenAI's
+`partial_image` events. mflux's own step pictures are the noisy work in progress, static until the last
+steps, so FLUX 3 Klein runs through dots' own driver (`image_tools/flux3_draw.py`) that decodes what the model
+is heading for instead (x - s v, from two steps of its flow): the subject shows from the first step. The
+preview decodes cost about a third more time (65 s against 44 s at 512).
+
+A step can take half a minute on a laptop, so the forming picture moves under film grain that thins with each
+step, with the steps as the app's dots and the time left on the picture. A photo you edit is changed in your
+own pools only, edited as a one-megapixel copy, and put back into your full-size photo on your Mac
+(`Compositing.swift`): only where the edit changed the copy, so the rest keeps its own pixels and definition.
+
 ## Next
 
 1. **A hero run.** The largest model the pooled Macs can hold, measured over real wifi, once a second Mac
