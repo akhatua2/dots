@@ -497,3 +497,14 @@ async def test_a_public_cloud_lets_someone_new_in_from_the_app(tmp_path):
             again = await client.post("/v1/people", json={"name": "Sam", "account": "acc-sam-new"})
             assert again.status == 409
     await hub_server.close()
+
+
+async def test_a_public_clouds_own_pool_is_in_explore(tmp_path):
+    hub_server = TestServer(fake_hub())
+    await hub_server.start_server()
+    config = CloudConfig(hub_url=str(hub_server.make_url("")), pool_public=True)
+    cloud = Cloud(Store(tmp_path / "c.db"), HubClient(config.hub_url), config, me=ME, my_name="A")
+    async with TestClient(TestServer(cloud.app())) as client:
+        home = next(p for p in (await state(client))["state"]["pools"] if p["id"] == "hub")
+        assert home["isPublic"] is True
+    await hub_server.close()

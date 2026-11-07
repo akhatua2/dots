@@ -24,6 +24,8 @@ class CloudConfig:
     # The name the hub's pool goes by in the apps.
     pool_name: str = "Home"
     pool_blurb: str = "A small model for quick, simple questions."
+    # Whether the hub's own pool is public, in Explore for anyone: on a public cloud, where newcomers start
+    pool_public: bool = False
     # The model the pool asks the hub for. The hub serves whatever it is asked for, loading it on the
     # first request, so the cloud names one.
     pool_model: str = "mlx-community/Qwen3.5-0.8B-4bit"
@@ -45,6 +47,7 @@ class CloudConfig:
             open_signup=env.get("DOTS_CLOUD_OPEN_SIGNUP", "") == "1",
             pool_name=env.get("DOTS_POOL_NAME", cls.pool_name),
             pool_blurb=env.get("DOTS_POOL_BLURB", cls.pool_blurb),
+            pool_public=env.get("DOTS_POOL_PUBLIC", "") == "1",
             pool_model=env.get("DOTS_POOL_MODEL", cls.pool_model),
             hub_ticket=env.get("DOTS_HUB_TICKET", cls.hub_ticket),
             credits_per_cu=float(env.get("DOTS_CREDITS_PER_CU", cls.credits_per_cu)),

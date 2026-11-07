@@ -61,6 +61,7 @@ class Cloud:
         store.ensure_pool(HUB_POOL, config.pool_name, me, blurb=config.pool_blurb)
         store.rename_pool(HUB_POOL, config.pool_name)
         store.describe_pool(HUB_POOL, config.pool_blurb)
+        store.run("update pools set is_public = ? where id = ?", int(config.pool_public), HUB_POOL)
 
     async def _read_hub_pool_model(self, app: web.Application):
         """Reads, once and in the background, what each pool runs where the cloud doesn't know it all yet: the
