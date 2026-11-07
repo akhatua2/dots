@@ -99,10 +99,14 @@ private struct DrawActions: View {
             IconButton(symbol: "wand.and.stars", help: "Change this picture") {
                 model.draw.change(picture, maxPixels: model.settings.imageMaxPixels)
             }
+            if picture.photo == nil {
+                IconButton(symbol: "arrow.clockwise", help: "Draw it again") { model.draw.drawAgain(picture, model: model) }
+            }
             IconButton(symbol: copied ? "checkmark" : "doc.on.doc", help: copied ? "Copied" : "Copy", action: copy)
             IconButton(symbol: "square.and.arrow.down", help: "Save the picture", action: save)
             if let receipt = picture.receipt {
-                IconButton(symbol: receipt.symbol, help: receipt.sentence) {}
+                let drawnFrom = picture.description.map { "\nDrawn from: \($0)" } ?? ""
+                IconButton(symbol: receipt.symbol, help: receipt.sentence + drawnFrom) {}
             }
         }
         .padding(.leading, -4)
@@ -135,7 +139,13 @@ private struct DrawComposer: View {
         @Bindable var draw = model.draw
         VStack(alignment: .leading, spacing: 10) {
             if let start = draw.start {
-                StartChip(start: start) { draw.start = nil }
+                HStack(spacing: 10) {
+                    StartChip(start: start) { draw.start = nil }
+                    if start.drawn != nil {
+                        Button("Draw something new") { draw.start = nil }
+                            .buttonStyle(.plain).font(D.ui(12.5, .medium)).foregroundStyle(D.t4)
+                    }
+                }
             }
             TextField(placeholder, text: $draw.prompt, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -187,7 +197,7 @@ private struct StartChip: View {
                 Image(nsImage: image).resizable().scaledToFill().frame(width: 22, height: 22)
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
-            Text(start.drawn == nil ? "Changing \(start.name)" : "Changing this picture")
+            Text(start.drawn == nil ? "Changing \(start.name)" : "Changing the picture above")
                 .font(D.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
             Button(action: remove) { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
                 .buttonStyle(.plain).foregroundStyle(D.t4).help("Draw something new instead")

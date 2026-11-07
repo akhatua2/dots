@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import random
 import re
 import shlex
 import tempfile
@@ -132,8 +133,8 @@ class ImageTool:
         steps = job.steps if job.steps is not None else self.steps
         if steps is not None:
             args += ["--steps", str(steps)]
-        if job.seed is not None:
-            args += ["--seed", str(job.seed)]
+        # A fresh seed unless the job asks for one: the same words then draw a new picture each time
+        args += ["--seed", str(job.seed if job.seed is not None else random.randrange(2**31))]
         if editing:
             args += ["--image-paths", str(source)]
         elif source is not None:

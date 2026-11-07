@@ -16,6 +16,8 @@ struct DrawnPicture: Codable, Equatable, Identifiable {
     var thread: UUID?
     /// The photo of yours it changed, by name, when it started from one
     var photo: String?
+    /// What the image model was asked to draw, when the pool's chat model put the words into a description
+    var description: String?
 }
 
 /// A drawing in the sidebar: its first words, and when it last changed
@@ -122,6 +124,19 @@ final class DrawController {
         start = Start(name: "This picture", sent: sent, original: url, drawn: picture.id)
     }
 
+    /// Draws `picture` again from the same words, with a new seed: for when it came out wrong. A change is made
+    /// again to the same picture. A change to a photo of yours can't be: the photo was never kept.
+    func drawAgain(_ picture: DrawnPicture, model: AppModel) {
+        guard !isDrawing, picture.photo == nil else { return }
+        if let changed = picture.changed, let original = pictures.first(where: { $0.id == changed }) {
+            change(original, maxPixels: maxPixels)
+        } else {
+            start = nil
+        }
+        prompt = picture.prompt
+        draw(model: model)
+    }
+
     /// Deletes a whole drawing and its pictures from this Mac
     func delete(thread: UUID) {
         let gone = pictures.filter { ($0.thread ?? $0.id) == thread }
@@ -155,9 +170,19 @@ final class DrawController {
                                                credits: 0, listCredits: 0, tokPerSec: 0, isPrivate: !pool.isPublic,
                                                poolID: pool.id, minGB: 0)
                 guard let target = AnswerRunner.target(for: candidate, model: model) else { continue }
+                // A new picture is drawn from a clear description of it; a change goes as said
+                var description: String?
+                if start == nil, let chatModel = pool.model?.id {
+                    var chat = candidate
+                    chat.modelID = chatModel
+                    if let chatTarget = AnswerRunner.target(for: chat, model: model) {
+                        description = await Drawing.describe(prompt, endpoint: chatTarget.endpoint)
+                    }
+                    if Task.isCancelled { return }
+                }
                 do {
                     var png: Data?
-                    for try await event in Drawing.stream(target.endpoint, prompt: prompt, picture: start?.sent, side: side) {
+                    for try await event in Drawing.stream(target.endpoint, prompt: description ?? prompt, picture: start?.sent, side: side) {
                         if Task.isCancelled { return }
                         switch event {
                         case let .step(step, of, preview):
@@ -178,7 +203,7 @@ final class DrawController {
                                                                                               reasons: [], isPrivate: !pool.isPublic),
                                                        via: target.via, paidWithKey: false)
                     self.keep(picture, prompt: prompt, changed: start?.drawn, photo: start?.drawn == nil ? start?.name : nil,
-                              receipt: receipt)
+                              description: description, receipt: receipt)
                     return
                 } catch {
                     if self.progress?.image == nil { continue }  // nothing came back: the next pool
@@ -203,7 +228,7 @@ final class DrawController {
         if prompt.isEmpty { prompt = asked }
     }
 
-    private func keep(_ png: Data, prompt: String, changed: UUID?, photo: String?, receipt: Receipt) {
+    private func keep(_ png: Data, prompt: String, changed: UUID?, photo: String?, description: String?, receipt: Receipt) {
         let file = UUID().uuidString + ".png"
         if let folder {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -214,7 +239,7 @@ final class DrawController {
         let thread = threadID ?? UUID()
         threadID = thread
         let picture = DrawnPicture(prompt: prompt, file: file, date: .now, changed: changed, receipt: receipt,
-                                   thread: thread, photo: photo)
+                                   thread: thread, photo: photo, description: description)
         pictures.insert(picture, at: 0)
         save()
         finish(.idle)

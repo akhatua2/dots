@@ -15,6 +15,29 @@ enum Drawing {
     /// What a picture's receipt calls the model that drew it. Which image model a pool runs is its own business.
     static let modelLabel = "Image model"
 
+    private static let describeInstruction = """
+        Rewrite the request as a one-sentence description of a picture, for an image model: what is in it, where, \
+        the light and the style. Keep exactly what was asked for and fix any typos. Reply with the description only.
+        """
+
+    /// What to draw for `request`, as the pool's chat model describes it: image models draw a clear description far
+    /// better than a quick ask ("generate apicture of new york" drew a man in a suit). The words as they were if
+    /// the chat model doesn't answer in time.
+    static func describe(_ request: String, endpoint: EndpointConfig, within seconds: Double = 20) async -> String {
+        let messages = [ChatMessage(role: "system", content: describeInstruction), ChatMessage(role: "user", content: request)]
+        let writing = Task {
+            var text = ""
+            for try await event in OpenAIClient.stream(endpoint, messages: messages) {
+                if case .text(let t) = event { text += t }
+            }
+            return text
+        }
+        let deadline = Task { try await Task.sleep(for: .seconds(seconds)); writing.cancel() }
+        let text = ((try? await writing.value) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        deadline.cancel()
+        return text.isEmpty || text.count > 600 ? request : text
+    }
+
     /// The sizes a picture can be drawn at, as the longer side in pixels. Bigger is sharper and slower.
     static let sides = [512, 1024, 1536]
 
