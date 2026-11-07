@@ -76,7 +76,20 @@ log or keep any of it, but its owner could read it on purpose. Nothing on a cons
 run in a Linux VM the owner controls (and without the GPU), the Secure Enclave holds keys but runs no models, and
 the hardware that proves a machine can't look (confidential computing) isn't offered to apps on Macs.
 
-So dots keeps the plain-text parts where the asker trusts them:
+The only real guarantee, then, is where things run: what you mark private never reaches another person's Mac.
+Every request carries a privacy level, and dots holds to it without falling back:
+
+| Level | Runs on | Who could see it |
+|---|---|---|
+| Only my Macs | Macs signed into your account, and the hub | only you |
+| My pools | your pools' Macs, friends' included | pool members, in principle |
+| Anywhere | public pools and frontier models | others |
+
+Pictures you upload and your documents default to Only my Macs (a picture edit runs whole on one Mac, so it runs on
+yours); ordinary questions can use your pools. When none of your Macs can run something marked Only my Macs, the
+app says so and asks, rather than sending it to a friend's Mac. The receipt says the level an answer ran at.
+
+Within the shared levels, dots also keeps the plain-text parts where the asker trusts them:
 
 1. **Your question's head runs on your own Mac** when you lend to the pool, so the other Macs only see hidden
    states; when you don't lend, it runs on the hub. Today the hub picks the head by free memory, so a small model
@@ -108,7 +121,8 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
 5. Workers learn what to run from their pool; runners by kind, no models in code.
 6. Start a Pool takes a link; Explore shows what each pool runs, what it needs, and whether this Mac can lend.
 7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
-8. Your question's head on your own Mac (see Who can see what).
+8. Privacy levels on every request (Only my Macs, My pools, Anywhere), never falling back to a wider one; your
+   question's head on your own Mac within the shared levels (see Who can see what).
 
 ## Not now
 
