@@ -417,8 +417,8 @@ dev = [
     { name = "ruff" },
 ]
 mac = [
-    { name = "mlx" },
-    { name = "mlx-lm" },
+    { name = "mlx", marker = "platform_release >= '23'" },
+    { name = "mlx-lm", marker = "platform_release >= '23'" },
     { name = "pillow" },
 ]
 sim = [
@@ -437,8 +437,8 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.20" },
     { name = "iroh", specifier = ">=0.35.0,<0.36" },
     { name = "matplotlib", marker = "extra == 'sim'", specifier = ">=3.7" },
-    { name = "mlx", marker = "extra == 'mac'", specifier = ">=0.20.0" },
-    { name = "mlx-lm", marker = "extra == 'mac'", specifier = ">=0.20.0" },
+    { name = "mlx", marker = "platform_release >= '23' and extra == 'mac'", specifier = ">=0.20.0" },
+    { name = "mlx-lm", marker = "platform_release >= '23' and extra == 'mac'", specifier = ">=0.20.0" },
     { name = "msgpack", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pillow", marker = "extra == 'mac'", specifier = ">=10.3" },

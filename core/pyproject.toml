@@ -27,9 +27,11 @@ dependencies = [
 # Apple-silicon compute workers: the MLX backend that runs model layers.
 # Install on each Mac with `uv sync --extra mac`. mlx is Apple-only and not
 # needed on the hub VM (which runs `uv sync` with no extras).
+# MLX exists for macOS 14 (Darwin 23) and newer only. On an older Mac the worker still installs, and serves
+# pools whose model runs in its own tool (pictures); a text pool tells it that it needs a newer macOS.
 mac = [
-    "mlx>=0.20.0",
-    "mlx-lm>=0.20.0",
+    "mlx>=0.20.0; platform_release >= '23'",
+    "mlx-lm>=0.20.0; platform_release >= '23'",
     "pillow>=10.3",  # reads the images people ask about
 ]
 dev = [

@@ -29,10 +29,6 @@ _LADDER = [
     ("mlx-community/Kimi-K2.5", "Kimi K2.5", 720, "1T", 61, 32, 8, 4),
 ]
 _SPECIAL: list[tuple] = []
-# Models whose vision encoder dots runs on the head Mac (backends/mlx/vision.py): they read images
-_READS_IMAGES = {"mlx-community/Qwen3.5-0.8B-4bit", "mlx-community/Qwen3.5-2B-MLX-4bit",
-                 "mlx-community/Qwen3.5-4B-MLX-4bit", "mlx-community/Qwen3.5-9B-MLX-4bit"}
-
 _LONG = {"T": "trillion", "B": "billion", "M": "million"}
 
 # Anthropic's list prices in USD per million tokens, and what a credit is worth.
@@ -63,7 +59,6 @@ def _tier(entry: tuple) -> dict:
         "credits": credits,
         "layers": layers,
         "activeB": active_b,
-        "readsImages": model_id in _READS_IMAGES,
     }
 
 
@@ -91,8 +86,22 @@ def served_tier(model_id: str, layers: int, tok_per_sec: float) -> dict:
         "credits": 0,
         "layers": layers,
         "activeB": billions,
-        "readsImages": model_id in _READS_IMAGES,
+        "readsImages": reads_images(model_id),
     }
+
+
+def reads_images(model_id: str) -> bool:
+    """Whether a model reads images, from its own config: one with a vision encoder does."""
+    import json
+
+    from huggingface_hub import hf_hub_download
+
+    try:
+        with open(hf_hub_download(model_id, "config.json")) as f:
+            config = json.load(f)
+    except Exception:
+        return False
+    return "vision_config" in config and "image_token_id" in config
 
 
 def ladder(served: dict | None) -> dict:

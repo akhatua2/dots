@@ -4,26 +4,22 @@ A diffusion model runs every layer many times over one image, so splitting it ac
 network at every step; and the image models people use fit on one Mac. So the hub sends each image job,
 whole, to a worker that offers an image model, and that Mac draws it.
 
-The model runs in its own tool, mflux by default, which uv installs on first use in an environment of its
-own: it brings torch and opencv, which the worker itself never needs. A worker offers images only when
-`DOTS_IMAGE_MODEL` is set.
+The model runs in its own tool, such as mflux, which uv installs on first use in an environment of its own: it
+brings torch and opencv, which the worker itself never needs. A worker offers images only when it is set up
+with a model and the tool that runs it:
 
     DOTS_IMAGE_MODEL         the model it offers; unset: none
     DOTS_IMAGE_COMMAND       the tool that draws with it
     DOTS_IMAGE_EDIT_COMMAND  the tool that edits pictures with it; unset: the drawing tool starts from the
                              picture instead (image to image), which restyles but doesn't follow instructions
     DOTS_IMAGE_BASE_MODEL    the family a converted model belongs to, as the tool names it
-    DOTS_IMAGE_STEPS         denoising steps when a job doesn't say (8: FLUX 3 Klein's own default is 16,
-                             and 8 drew nearly the same pictures in 44 s instead of 81 s)
+    DOTS_IMAGE_STEPS         denoising steps when a job doesn't say; unset: the model's own
     DOTS_IMAGE_EDIT_PIXELS   a picture larger than this is edited at this size, and the edit put back into the
                              full-size picture (`keep_unchanged`), so it keeps its definition everywhere else
     DOTS_IMAGE_TIMEOUT_S     how long one image may take
 
-The defaults suit FLUX 3 Image Klein (mflux-community/flux-3-image-klein-mflux-q4, 5.3 GB): in November
-2026 it was second among open image models on Artificial Analysis's text-to-image board (Elo 1,043, one
-behind Qwen-Image-2.1 at twice the size and a research-only license), among the top three for editing,
-and it edits by instruction from up to ten reference pictures. Its license (FLUX Kommunity) is free for
-commercial use below $5M a year in revenue. FLUX.2 klein 4B is the Apache-licensed choice, a step lower.
+`image_tools/flux3_draw.py` is a tool for mflux's FLUX 3 models that shows the picture the model is heading for
+after each step, rather than the noisy one; models and how they compare are in docs/plans/models-and-media.md.
 """
 
 from __future__ import annotations
@@ -42,12 +38,6 @@ from pathlib import Path
 
 import numpy as np
 
-# FLUX 3 Image Klein runs through dots' own driver of mflux, which shows the picture the model is heading for
-# after each step instead of the noisy one (image_tools/flux3_draw.py); it edits when given a picture
-_DRIVER = Path(__file__).parent / "image_tools" / "flux3_draw.py"
-DEFAULT_COMMAND = f"uvx --from mflux==0.24.0 python -I {shlex.quote(str(_DRIVER))}"
-DEFAULT_EDIT_COMMAND = DEFAULT_COMMAND
-DEFAULT_BASE_MODEL = "flux3-klein"
 # Sides are multiples of this, as the models' latents need
 SIDE_STEP = 16
 LARGEST_SIDE = 2048
@@ -113,13 +103,16 @@ class ImageTool:
         model = os.environ.get("DOTS_IMAGE_MODEL", "").strip()
         if not model:
             return None
-        edit_command = os.environ.get("DOTS_IMAGE_EDIT_COMMAND", DEFAULT_EDIT_COMMAND).strip()
+        command = os.environ.get("DOTS_IMAGE_COMMAND", "").strip()
+        if not command:
+            return None
+        edit_command = os.environ.get("DOTS_IMAGE_EDIT_COMMAND", "").strip()
         return cls(model=model,
-                   command=tuple(shlex.split(os.environ.get("DOTS_IMAGE_COMMAND", DEFAULT_COMMAND))),
+                   command=tuple(shlex.split(command)),
                    edit_command=tuple(shlex.split(edit_command)) if edit_command else None,
-                   base_model=os.environ.get("DOTS_IMAGE_BASE_MODEL", DEFAULT_BASE_MODEL).strip() or None,
+                   base_model=os.environ.get("DOTS_IMAGE_BASE_MODEL", "").strip() or None,
                    timeout_s=float(os.environ.get("DOTS_IMAGE_TIMEOUT_S", "900")),
-                   steps=_steps(os.environ.get("DOTS_IMAGE_STEPS", "8")),
+                   steps=_steps(os.environ.get("DOTS_IMAGE_STEPS", "")),
                    edit_pixels=int(os.environ.get("DOTS_IMAGE_EDIT_PIXELS", str(1024 * 1024))))
 
     def arguments(self, job: ImageJob, out: Path, source: Path | None) -> list[str]:
