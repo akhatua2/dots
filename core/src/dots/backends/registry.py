@@ -18,6 +18,8 @@ IMPLEMENTED_BACKENDS = ("mlx",)
 
 
 log = logging.getLogger(__name__)
+# Why MLX can't run here, when a packaged worker finds it can't
+why_no_mlx: str | None = None
 
 
 def get_backend_runtime(name: str) -> BackendRuntime:
@@ -64,7 +66,13 @@ def _mlx_available() -> bool:
 
             return bool(mx.metal.is_available())
         except Exception as e:
-            log.warning("MLX isn't usable in this worker: %s", e)
+            global why_no_mlx
+            causes, cause = [str(e)], e.__cause__ or e.__context__
+            while cause is not None and len(causes) < 4:
+                causes.append(f"{type(cause).__name__}: {cause}")
+                cause = cause.__cause__ or cause.__context__
+            why_no_mlx = " <- ".join(causes)
+            log.warning("MLX isn't usable in this worker: %s", why_no_mlx)
             return False
     probe = (
         "import mlx.core as mx; "

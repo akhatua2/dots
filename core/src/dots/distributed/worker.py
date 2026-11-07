@@ -267,6 +267,10 @@ class Worker:
             if self.compute:
                 self._peer_ticket = await self._endpoint.ticket()
 
+        if self.compute and not self.resource_limits.backends:
+            from ..backends import registry
+
+            ui.notice("this Mac can't run models here: " + (registry.why_no_mlx or "MLX isn't usable"))
         ui.info("connecting to hub (iroh)…")
         self.conn = await self._endpoint.connect(self.hub_ticket, self._handle)
         # Build the worker's bounded resource declaration. Defaults are
