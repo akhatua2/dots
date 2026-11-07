@@ -2,28 +2,26 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Draw: a picture from a few words, then changes to it, one after another. The picture is the screen; the box
-/// below it says what to draw, or what to change; your recent pictures run along the bottom.
+/// Draw, laid out like Ask: a drawing is a conversation. What you asked for on the right, the picture beneath it,
+/// then the next thing you said and the picture it changed into, with the box fixed below. Your drawings are
+/// listed in the sidebar.
 struct DrawScreen: View {
     @Environment(AppModel.self) private var model
     @State private var dropTargeted = false
 
+    private var hasDrawing: Bool { !model.draw.thread.isEmpty || model.draw.phase != .idle }
+
     var body: some View {
-        let draw = model.draw
-        VStack(spacing: 18) {
-            Spacer(minLength: 24)
-            stage
-            if case .failed(let why) = draw.phase {
-                Text(why).font(D.ui(13)).foregroundStyle(D.t3)
-            }
-            Spacer(minLength: 12)
-            DrawComposer()
-                .frame(maxWidth: Layout.column)
-            if !draw.pictures.isEmpty {
-                RecentPictures().frame(maxWidth: Layout.column)
+        VStack(spacing: 0) {
+            if hasDrawing {
+                DrawConversation()
+                DrawComposer(placeholder: model.draw.start == nil ? "Describe a picture" : "Describe a change")
+                    .padding(.horizontal, 32).padding(.bottom, 24)
+                    .frame(maxWidth: Layout.column + 64)
+            } else {
+                welcome
             }
         }
-        .padding(.horizontal, 32).padding(.bottom, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if dropTargeted {
@@ -35,48 +33,79 @@ struct DrawScreen: View {
         })
     }
 
-    /// The picture being drawn, or the one picked, or a first line to start from
-    @ViewBuilder private var stage: some View {
-        let draw = model.draw
-        if let progress = draw.progress {
-            PictureAnswer(image: progress.image, progress: progress, maxWidth: Layout.picture)
-        } else if let shown = draw.shown {
-            VStack(alignment: .leading, spacing: 8) {
-                PictureAnswer(image: draw.image(shown), maxWidth: Layout.picture)
-                PictureActions(picture: shown)
-            }
-            .frame(maxWidth: Layout.picture)
-        } else {
-            VStack(spacing: 10) {
-                Text("What should the pool draw?").font(D.display(30)).foregroundStyle(D.t1)
-                Text("Describe a picture, or drop a photo to change it. Photos stay in your pools.")
-                    .font(D.ui(13)).foregroundStyle(D.t4)
-            }
+    /// Before the first picture: a line to start from, and the box.
+    private var welcome: some View {
+        VStack(spacing: 22) {
+            Spacer()
+            Text("What should the pool draw?").font(D.display(30)).foregroundStyle(D.t1)
+            DrawComposer(placeholder: model.draw.start == nil ? "Describe a picture. Drop a photo to change it." : "Describe a change")
+                .frame(maxWidth: Layout.column)
+            Text("A Mac in your pools draws it. Your photos stay in your pools, and your pictures on this Mac.")
+                .font(D.ui(12.5)).foregroundStyle(D.t4)
+            Spacer()
+            Spacer()
         }
+        .padding(.horizontal, 32)
     }
 }
 
 private enum Layout {
     static let column: CGFloat = 680
-    static let picture: CGFloat = 520
 }
 
-/// Under a picture: the words that made it, and what you can do with it.
-private struct PictureActions: View {
+/// The open drawing: every picture and what made it, then the one being drawn now.
+private struct DrawConversation: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let draw = model.draw
+        LiveScroll {
+            VStack(alignment: .leading, spacing: 26) {
+                ForEach(draw.thread) { picture in
+                    QuestionBubble(text: picture.prompt, attachment: picture.photo)
+                    VStack(alignment: .leading, spacing: 8) {
+                        PictureAnswer(image: draw.image(picture))
+                        DrawActions(picture: picture)
+                    }
+                }
+                if draw.isDrawing || draw.phase != .idle {
+                    QuestionBubble(text: draw.asked, attachment: draw.askedPhoto)
+                    if let progress = draw.progress {
+                        PictureAnswer(image: progress.image, progress: progress)
+                    }
+                    if case .failed(let why) = draw.phase {
+                        Text(why).font(D.ui(13)).foregroundStyle(D.t3)
+                    }
+                }
+                Color.clear.frame(height: 1).id("end")
+            }
+            .padding(.horizontal, 32).padding(.top, 56).padding(.bottom, 20)
+            .frame(maxWidth: Layout.column + 64, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .defaultScrollAnchor(.bottom)
+        .scrollIndicators(.never)
+    }
+}
+
+/// Under a picture: change this one (rather than the latest), copy it, save it, and where it was drawn.
+private struct DrawActions: View {
     @Environment(AppModel.self) private var model
     var picture: DrawnPicture
     @State private var copied = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(picture.prompt).font(D.ui(13)).foregroundStyle(D.t3).lineLimit(2)
-            Spacer(minLength: 12)
-            Button("Change it") { model.draw.change(picture, maxPixels: model.settings.imageMaxPixels) }
-                .buttonStyle(DButtonStyle(kind: .grey))
+        HStack(spacing: 2) {
+            IconButton(symbol: "wand.and.stars", help: "Change this picture") {
+                model.draw.change(picture, maxPixels: model.settings.imageMaxPixels)
+            }
             IconButton(symbol: copied ? "checkmark" : "doc.on.doc", help: copied ? "Copied" : "Copy", action: copy)
             IconButton(symbol: "square.and.arrow.down", help: "Save the picture", action: save)
-            IconButton(symbol: "trash", help: "Delete the picture") { model.draw.delete(picture) }
+            if let receipt = picture.receipt {
+                IconButton(symbol: receipt.symbol, help: receipt.sentence) {}
+            }
         }
+        .padding(.leading, -4)
     }
 
     private func copy() {
@@ -96,10 +125,11 @@ private struct PictureActions: View {
     }
 }
 
-/// The box: what the next picture changes, if anything, the words, and Draw.
+/// The box: what the next picture changes, if anything, the words, and send.
 private struct DrawComposer: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focused: Bool
+    var placeholder: String
 
     var body: some View {
         @Bindable var draw = model.draw
@@ -107,15 +137,15 @@ private struct DrawComposer: View {
             if let start = draw.start {
                 StartChip(start: start) { draw.start = nil }
             }
-            TextField(draw.start == nil ? "Describe a picture" : "Describe a change", text: $draw.prompt, axis: .vertical)
+            TextField(placeholder, text: $draw.prompt, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(D.ui(14)).foregroundStyle(D.t1)
-                .lineLimit(1...6)
+                .lineLimit(1...8)
                 .focused($focused)
                 .onSubmit(send)
             HStack(spacing: 10) {
                 Button(action: pickPhoto) { Image(systemName: "photo.badge.plus").font(.system(size: 13, weight: .medium)) }
-                    .buttonStyle(.plain).foregroundStyle(D.t4).help("Change a photo")
+                    .buttonStyle(.plain).foregroundStyle(D.t4).help("Change a photo of yours")
                 Spacer()
                 if draw.start == nil {
                     PictureSizePicker()
@@ -146,7 +176,7 @@ private struct DrawComposer: View {
     }
 }
 
-/// What the next picture changes: a small picture and its name, with a way to start fresh instead.
+/// What the next words change: a small picture and what it is, with a way to draw something new instead.
 private struct StartChip: View {
     var start: DrawController.Start
     var remove: () -> Void
@@ -166,35 +196,5 @@ private struct StartChip: View {
         .padding(.leading, 4).padding(.trailing, 10).frame(height: 30)
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(D.raised))
         .fixedSize()
-    }
-}
-
-/// Your pictures, newest first, small along the bottom. The one shown large is outlined.
-private struct RecentPictures: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                ForEach(model.draw.pictures) { picture in
-                    Button { model.draw.show(picture) } label: {
-                        Group {
-                            if let png = model.draw.image(picture), let image = NSImage(data: png) {
-                                Image(nsImage: image).resizable().scaledToFill()
-                            } else {
-                                D.raised
-                            }
-                        }
-                        .frame(width: 52, height: 52)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(model.draw.shownID == picture.id ? D.t2 : .clear, lineWidth: 1.5))
-                    }
-                    .buttonStyle(.plain)
-                    .help(picture.prompt)
-                }
-            }
-        }
-        .scrollIndicators(.never)
     }
 }

@@ -73,6 +73,12 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @AppStorage("sidebar.poolsFolded") private var poolsFolded = false
     @AppStorage("sidebar.chatsFolded") private var chatsFolded = false
+    @AppStorage("sidebar.drawingsFolded") private var drawingsFolded = false
+
+    private func newDrawing() {
+        model.draw.startNew()
+        model.open(.draw)
+    }
 
     private func newChat() {
         model.ask.clear()
@@ -96,7 +102,9 @@ struct Sidebar: View {
             VStack(spacing: 2) {
                 NavRow(symbol: "safari", title: "Explore", selected: model.route == .explore) { model.open(.explore) }
                 NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: model.route == .ask) { model.showAsk() }
-                NavRow(symbol: "paintbrush.pointed", title: "Draw", selected: model.route == .draw) { model.open(.draw) }
+                NavRow(symbol: "paintbrush.pointed", title: "Draw", selected: model.route == .draw && model.draw.threadID == nil) {
+                    newDrawing()
+                }
                 NavRow(symbol: "curlybraces", title: "API", selected: model.route == .api) { model.open(.api) }
                 NavRow(symbol: "person", title: "Profile", selected: model.route == .profile,
                        badge: model.state.badges.contains(where: \.isNew)) { model.open(.profile) }
@@ -126,7 +134,8 @@ struct Sidebar: View {
                     }
                     SidebarSection(title: "Chats", folded: $chatsFolded, action: ("square.and.pencil", "New chat", newChat)) {
                         ForEach(model.chats.chats) { chat in
-                            ChatRow(chat: chat, selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
+                            ChatRow(title: chat.title, updated: chat.updated,
+                                    selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
                                 .contextMenu {
                                     Button("Delete Chat", role: .destructive) {
                                         if chat.id == model.chats.currentID { model.ask.clear() }
@@ -138,6 +147,21 @@ struct Sidebar: View {
                             Text("Your conversations show up here.")
                                 .font(D.ui(12)).foregroundStyle(D.t5)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
+                        }
+                    }
+                    if !model.draw.threads.isEmpty {
+                        SidebarSection(title: "Drawings", folded: $drawingsFolded,
+                                       action: ("square.and.pencil", "New drawing", newDrawing)) {
+                            ForEach(model.draw.threads) { thread in
+                                ChatRow(title: thread.title, updated: thread.updated,
+                                        selected: model.route == .draw && thread.id == model.draw.threadID) {
+                                    model.draw.open(thread.id)
+                                    model.open(.draw)
+                                }
+                                .contextMenu {
+                                    Button("Delete Drawing", role: .destructive) { model.draw.delete(thread: thread.id) }
+                                }
+                            }
                         }
                     }
                 }
@@ -355,17 +379,19 @@ struct SidebarSection<Content: View>: View {
 }
 
 /// A chat in the sidebar: its first question, and when it was last used.
+/// A chat or a drawing in the sidebar: its title and when it last changed
 struct ChatRow: View {
-    var chat: Chat
+    var title: String
+    var updated: Date
     var selected: Bool
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(chat.title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
                     .lineLimit(1)
-                Text(chat.updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
+                Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.vertical, 6)

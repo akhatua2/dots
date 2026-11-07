@@ -97,7 +97,8 @@ private struct Conversation: View {
     }
 }
 
-private struct QuestionBubble: View {
+/// What you asked, on the right, with the file or photo it came with.
+struct QuestionBubble: View {
     var text: String
     var attachment: String?
 

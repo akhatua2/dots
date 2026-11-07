@@ -12,11 +12,22 @@ struct DrawnPicture: Codable, Equatable, Identifiable {
     /// The picture this one changed, when it was a change
     var changed: UUID?
     var receipt: Receipt?
+    /// The drawing it belongs to: a conversation of a picture and the changes to it
+    var thread: UUID?
+    /// The photo of yours it changed, by name, when it started from one
+    var photo: String?
 }
 
-/// Draw: pictures from a few words, and changes to a picture, one after another. A Mac in one of your pools
-/// draws each picture whole; you watch it form. Pictures stay on this Mac; a photo of yours is changed only in
-/// your own pools.
+/// A drawing in the sidebar: its first words, and when it last changed
+struct DrawingThread: Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var updated: Date
+}
+
+/// Draw: a conversation in pictures. You describe a picture; then each thing you say changes the last one,
+/// until you start over. A Mac in one of your pools draws each picture whole; you watch it form. Pictures stay
+/// on this Mac; a photo of yours is changed only in your own pools.
 @MainActor
 @Observable
 final class DrawController {
@@ -36,10 +47,12 @@ final class DrawController {
     var prompt = ""
     var start: Start?
     var phase: Phase = .idle
-    /// The picture being drawn, as far as it has come
+    /// The picture being drawn, as far as it has come, and what was asked for it
     var progress: Drawing.Progress?
-    /// The picture shown large when nothing is being drawn
-    var shownID: UUID?
+    private(set) var asked = ""
+    private(set) var askedPhoto: String?
+    /// The drawing open now; nil starts a new one with the next picture
+    private(set) var threadID: UUID?
     private(set) var pictures: [DrawnPicture] = []
 
     @ObservationIgnored private let folder: URL?
@@ -55,7 +68,41 @@ final class DrawController {
     }
 
     var isDrawing: Bool { phase == .drawing }
-    var shown: DrawnPicture? { pictures.first { $0.id == shownID } }
+
+    /// The open drawing's pictures, oldest first
+    var thread: [DrawnPicture] {
+        guard let threadID else { return [] }
+        return pictures.filter { ($0.thread ?? $0.id) == threadID }.reversed()
+    }
+
+    /// Your drawings, most recently changed first
+    var threads: [DrawingThread] {
+        var seen: [UUID: DrawingThread] = [:]
+        var order: [UUID] = []
+        for p in pictures {  // newest first
+            let id = p.thread ?? p.id
+            if seen[id] == nil { order.append(id); seen[id] = DrawingThread(id: id, title: p.prompt, updated: p.date) }
+            else { seen[id]?.title = p.prompt }  // ends on the oldest: the words that started it
+        }
+        return order.compactMap { seen[$0] }
+    }
+
+    func open(_ thread: UUID) {
+        guard !isDrawing else { return }
+        threadID = thread
+        phase = .idle
+        if let last = self.thread.last { change(last, maxPixels: maxPixels) } else { start = nil }
+    }
+
+    func startNew() {
+        guard !isDrawing else { return }
+        threadID = nil
+        start = nil
+        phase = .idle
+    }
+
+    /// How large a picture is sent to be changed; set from the app's settings
+    @ObservationIgnored var maxPixels = 1_048_576
 
     func image(_ picture: DrawnPicture) -> Data? {
         if let png = unsaved[picture.file] { return png }
@@ -75,17 +122,12 @@ final class DrawController {
         start = Start(name: "This picture", sent: sent, original: url, drawn: picture.id)
     }
 
-    func show(_ picture: DrawnPicture) {
-        guard !isDrawing else { return }
-        shownID = picture.id
-        phase = .idle
-    }
-
-    func delete(_ picture: DrawnPicture) {
-        pictures.removeAll { $0.id == picture.id }
-        if shownID == picture.id { shownID = pictures.first?.id }
-        if start?.drawn == picture.id { start = nil }
-        if let url = fileURL(picture) { try? FileManager.default.removeItem(at: url) }
+    /// Deletes a whole drawing and its pictures from this Mac
+    func delete(thread: UUID) {
+        let gone = pictures.filter { ($0.thread ?? $0.id) == thread }
+        pictures.removeAll { ($0.thread ?? $0.id) == thread }
+        for picture in gone { if let url = fileURL(picture) { try? FileManager.default.removeItem(at: url) } }
+        if threadID == thread { startNew() }
         save()
     }
 
@@ -96,6 +138,9 @@ final class DrawController {
         guard !prompt.isEmpty, !isDrawing else { return }
         task?.cancel()
         let start = self.start
+        asked = prompt
+        askedPhoto = start?.drawn == nil ? start?.name : nil
+        self.prompt = ""
         let personal = start != nil && start?.drawn == nil
         let side = start == nil ? model.settings.pictureSide : nil
         let places = model.state.myPools.filter { !$0.isPublic && $0.drawsWith != nil }
@@ -132,14 +177,17 @@ final class DrawController {
                     let receipt = AnswerRunner.receipt(for: candidate, decision: RouteDecision(chosen: candidate, candidates: [candidate],
                                                                                               reasons: [], isPrivate: !pool.isPublic),
                                                        via: target.via, paidWithKey: false)
-                    self.keep(picture, prompt: prompt, changed: start?.drawn, receipt: receipt)
+                    self.keep(picture, prompt: prompt, changed: start?.drawn, photo: start?.drawn == nil ? start?.name : nil,
+                              receipt: receipt)
                     return
                 } catch {
                     if self.progress?.image == nil { continue }  // nothing came back: the next pool
+                    self.restoreAsked()
                     self.finish(.failed(error.localizedDescription))
                     return
                 }
             }
+            self.restoreAsked()
             self.finish(.failed(personal ? "No pool of yours draws pictures right now, and this photo stays in your pools."
                                          : "No pool draws pictures right now."))
         }
@@ -150,7 +198,12 @@ final class DrawController {
         finish(.idle)
     }
 
-    private func keep(_ png: Data, prompt: String, changed: UUID?, receipt: Receipt) {
+    /// A drawing that failed: its words go back in the box to try again
+    private func restoreAsked() {
+        if prompt.isEmpty { prompt = asked }
+    }
+
+    private func keep(_ png: Data, prompt: String, changed: UUID?, photo: String?, receipt: Receipt) {
         let file = UUID().uuidString + ".png"
         if let folder {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -158,14 +211,15 @@ final class DrawController {
         } else {
             unsaved[file] = png
         }
-        let picture = DrawnPicture(prompt: prompt, file: file, date: .now, changed: changed, receipt: receipt)
+        let thread = threadID ?? UUID()
+        threadID = thread
+        let picture = DrawnPicture(prompt: prompt, file: file, date: .now, changed: changed, receipt: receipt,
+                                   thread: thread, photo: photo)
         pictures.insert(picture, at: 0)
         save()
-        self.prompt = ""
-        // The next prompt changes what was just drawn, until you start over
-        start = nil
-        shownID = picture.id
         finish(.idle)
+        // What you say next changes what was just drawn, until you take it off or start over
+        change(picture, maxPixels: maxPixels)
     }
 
     private func finish(_ phase: Phase) {

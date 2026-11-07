@@ -23,6 +23,7 @@ class _Previews:
     """After each step, the picture the model is heading for, saved as `seed_N_stepKofM.png` in `folder`."""
 
     def __init__(self, model, folder: Path, steps: int, height: int, width: int):
+        from mflux.models.common.vae.tiling_config import TilingConfig
         from mflux.models.flux3.latent_creator.flux3_latent_creator import Flux3LatentCreator
         from mflux.models.flux3.model.flux3_scheduler.flux3_flow_map_scheduler import Flux3FlowMapScheduler
 
@@ -32,6 +33,8 @@ class _Previews:
         self.levels = Flux3FlowMapScheduler(num_inference_steps=steps).timesteps
         self.steps = steps
         self.last = None
+        # A preview each step adds up: decode it in tiles, and give the memory back after each one
+        self.tiles = TilingConfig()
         folder.mkdir(parents=True, exist_ok=True)
 
     def call_before_loop(self, seed, prompt, latents, config, **_):
@@ -42,9 +45,11 @@ class _Previews:
         direction = (latents - self.last) / (after - before)
         heading = self.last - before * direction
         self.last = latents
-        pixels = self.decode_tokens(self.model.vae, heading, *self.grid)
+        pixels = self.decode_tokens(self.model.vae, heading, *self.grid, tiling_config=self.tiles)
         mx.eval(pixels)
         _save(pixels, self.folder / f"seed_{seed}_step{t + 1}of{self.steps}.png")
+        del pixels, heading, direction
+        mx.clear_cache()
 
 
 def _save(pixels: mx.array, path: Path) -> None:

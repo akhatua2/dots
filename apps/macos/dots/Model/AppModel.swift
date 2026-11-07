@@ -125,6 +125,7 @@ final class AppModel {
         // The self-test and snapshots pass a backend of their own; they must not touch your saved chats.
         self.chats = ChatStore(persists: backend == nil)
         self.draw = DrawController(persists: backend == nil)
+        self.draw.maxPixels = settings.imageMaxPixels
     }
 
     /// Your Ask conversations, kept on this Mac.
