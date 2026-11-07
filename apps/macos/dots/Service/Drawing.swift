@@ -1,6 +1,6 @@
 import Foundation
 
-/// Asking a pool for a picture: what counts as asking for one, and the picture as it forms.
+/// Asking a pool for a picture, and the picture as it forms.
 ///
 /// A picture is drawn whole on one Mac in the pool that offers an image model. It takes a while (a minute or
 /// more on a laptop), so the pool sends the picture after every step of the drawing and Ask shows it sharpen.
@@ -18,31 +18,29 @@ enum Drawing {
     /// The sizes a picture can be drawn at, as the longer side in pixels. Bigger is sharper and slower.
     static let sides = [512, 1024, 1536]
 
-    private static let drawWords = ["draw", "paint", "sketch", "illustrate", "generate an image", "generate a picture",
-                                    "generate a photo", "make an image", "make a picture", "make a photo", "create an image",
-                                    "create a picture", "create a photo", "an image of", "a picture of", "a photo of"]
-    private static let editStarts = ["make it", "make the", "make him", "make her", "make them", "remove", "erase", "add",
-                                     "change", "replace", "turn", "put", "swap", "recolor", "recolour", "brighten",
-                                     "darken", "fix", "edit", "give", "blur", "restore", "colorize", "colourize", "clean up"]
-    private static let questionStarts = ["what", "who", "where", "why", "how", "when", "which", "is ", "are ", "can ",
-                                         "could ", "does ", "do ", "describe", "explain", "tell", "read", "summarize"]
-    /// Ways of asking politely that still ask for the thing ("can you draw…")
-    private static let politeStarts = ["please ", "can you ", "could you ", "would you ", "will you "]
+    /// How far a picture's drawing has come: the picture so far, the step, and when the steps came
+    struct Progress: Equatable {
+        var image: Data?
+        var step = 0
+        var of = 0
+        var done = false
+        /// Which step came first and when, and when the latest came, to tell how long the rest will take
+        var firstStep: (step: Int, at: Date)?
+        var latestAt: Date?
 
-    /// Whether the question asks for a picture: to draw one, or, with a picture attached, to change it.
-    /// A question about the picture ("what's in this?") is answered in words.
-    static func wantsPicture(_ question: String, hasPicture: Bool) -> Bool {
-        var q = question.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var polite = false
-        while let start = politeStarts.first(where: { q.hasPrefix($0) }) {
-            q = String(q.dropFirst(start.count)).trimmingCharacters(in: .whitespaces)
-            polite = true
+        static func == (a: Self, b: Self) -> Bool {
+            a.image == b.image && a.step == b.step && a.of == b.of && a.done == b.done && a.latestAt == b.latestAt
         }
-        if polite { q = q.trimmingCharacters(in: CharacterSet(charactersIn: "?")) }
-        guard !q.isEmpty, !q.hasSuffix("?"), !questionStarts.contains(where: { q.hasPrefix($0) }) else { return false }
-        if drawWords.contains(where: { q.hasPrefix($0) || q.contains(" " + $0 + " ") }) { return true }
-        return hasPicture && editStarts.contains { q.hasPrefix($0) }
+
+        /// Seconds left at `now`: the steps still to come at the pace of those so far, less the time since the
+        /// latest. Nil until two steps have come.
+        func secondsLeft(at now: Date) -> Double? {
+            guard !done, let first = firstStep, let latest = latestAt, step > first.step, of > step else { return nil }
+            let perStep = latest.timeIntervalSince(first.at) / Double(step - first.step)
+            return max(1, perStep * Double(of - step) - now.timeIntervalSince(latest))
+        }
     }
+
 
     /// Draws `prompt`, or changes `picture` as it says, at `side` pixels (nil: the picture's own size).
     static func stream(_ endpoint: EndpointConfig, prompt: String, picture: Data?, side: Int?) -> AsyncThrowingStream<Event, Error> {

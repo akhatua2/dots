@@ -11,7 +11,7 @@ struct ChatTurn: Codable, Equatable, Identifiable {
     var date: Date
     /// Your thumbs up (1) or down (-1) on the answer. Kept with the chat on this Mac.
     var rating: Int?
-    /// When the answer is a picture: its file, among the chats' pictures on this Mac
+    /// A picture an older dots drew as the answer: its file, among the pictures on this Mac
     var picture: String?
 
     var hasAnswer: Bool { picture != nil || !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -38,8 +38,6 @@ final class ChatStore {
     /// The chat new questions continue. Nil starts a new one with the next question.
     private(set) var currentID: UUID?
     @ObservationIgnored private let url: URL?
-    /// Pictures of a store that isn't saved (the self-test's), kept in memory instead
-    @ObservationIgnored private var unsaved: [String: Data] = [:]
 
     init(persists: Bool) {
         url = persists ? Simulation.supportURL("chats.json") : nil
@@ -75,23 +73,9 @@ final class ChatStore {
         save()
     }
 
-    /// Keeps a picture an answer drew, beside the chats on this Mac, and says what to call it in the turn.
-    func keepPicture(_ png: Data) -> String {
-        let name = UUID().uuidString + ".png"
-        if let url { try? writePicture(png, to: url.deletingLastPathComponent().appendingPathComponent("pictures/" + name)) }
-        else { unsaved[name] = png }
-        return name
-    }
-
     func picture(_ name: String) -> Data? {
-        if let png = unsaved[name] { return png }
         guard let url else { return nil }
         return try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("pictures/" + name))
-    }
-
-    private func writePicture(_ png: Data, to file: URL) throws {
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try png.write(to: file, options: .atomic)
     }
 
     func open(_ id: UUID) { currentID = id }

@@ -112,7 +112,7 @@ enum Snapshots {
         save(AskPanelView(), model, CGSize(width: 720, height: 800), dir, "07-ask-photo", fitHeight: true)
         ask.clear()
         // A picture as an answer, three steps into its drawing
-        let forming = AskController.PictureProgress(image: SampleData.photo, step: 3, of: 8,
+        let forming = Drawing.Progress(image: SampleData.photo, step: 3, of: 8,
                                                     firstStep: (1, Date(timeIntervalSinceNow: -40)), latestAt: Date(timeIntervalSinceNow: -5))
         save(PictureAnswer(image: SampleData.photo, progress: forming).padding(28).background(D.bg2),
              model, CGSize(width: 540, height: 600), dir, "07-ask-drawing", fitHeight: true)
@@ -226,6 +226,7 @@ enum Snapshots {
                     case .api: APIView()
                     case .profile: ProfileView()
                     case .ask: AskScreen()
+                    case .draw: DrawScreen()
                     case .settings: SettingsView(inline: true)
                     case .pool(let id): PoolView(pool: model.state.pool(id)!)
                     }

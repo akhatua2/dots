@@ -6,7 +6,8 @@ import SwiftUI
 struct PictureAnswer: View {
     var image: Data?
     /// How far the drawing has come; nil once it's done
-    var progress: AskController.PictureProgress?
+    var progress: Drawing.Progress?
+    var maxWidth: CGFloat = 460
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var drawing: Bool { progress.map { !$0.done } ?? false }
@@ -28,7 +29,7 @@ struct PictureAnswer: View {
                 }
             }
             .aspectRatio(aspect, contentMode: .fit)
-            .frame(maxWidth: 460, alignment: .leading)
+            .frame(maxWidth: maxWidth, alignment: .leading)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .animation(.easeInOut(duration: 0.4), value: progress?.step)
         }
@@ -51,7 +52,7 @@ struct PictureAnswer: View {
 /// How far a drawing has come, on the picture itself, in the app's own dots: one a step, light once drawn, the
 /// one being drawn breathing in orange, the rest still to come; then, once it can tell, about how long is left.
 private struct DrawingProgress: View {
-    var progress: AskController.PictureProgress
+    var progress: Drawing.Progress
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {

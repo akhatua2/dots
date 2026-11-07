@@ -136,17 +136,18 @@ enum SelfTest {
         let parts = sent?["content"] as? [[String: Any]]
         check("A question with a photo goes out as an image part, then its text",
               parts?.first?["type"] as? String == "image_url" && parts?.last?["text"] as? String == "What is this?")
-        let asks: [(String, Bool, Bool)] = [
-            ("Draw a fox sitting in the snow", false, true), ("Can you draw a cat on a windowsill?", false, true),
-            ("Make a picture of a lighthouse at dusk", false, true), ("Make it a snowy evening", true, true),
-            ("Remove the person in the background", true, true), ("What's in this photo?", true, false),
-            ("Make it shorter", false, false), ("Explain how to draw a circle in SwiftUI", false, false),
-            ("Describe the colors", true, false),
-        ]
-        check("An edit goes back into the full-size photo, which keeps its own pixels everywhere else", putBackKeepsThePhoto())
-        let wrong = asks.filter { Drawing.wantsPicture($0.0, hasPicture: $0.1) != $0.2 }.map(\.0)
-        check("Asking for a picture draws one; asking about it answers in words\(wrong.isEmpty ? "" : " (wrong: \(wrong))")",
-              wrong.isEmpty)
+        // Draw takes a photo to change, shrunk to what a pool reads, and not a document
+        let draw = DrawController(persists: false)
+        let drawPhoto = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-draw.jpg")
+        let note = FileManager.default.temporaryDirectory.appendingPathComponent("dots-selftest-note.txt")
+        try? SampleData.photo?.write(to: drawPhoto)
+        try? "a note".write(to: note, atomically: true, encoding: .utf8)
+        draw.attach(note, maxPixels: 100_000)
+        let ignoredNote = draw.start == nil
+        draw.attach(drawPhoto, maxPixels: 100_000)
+        let shrunk = draw.start.flatMap { NSImage(data: $0.sent) }.map { $0.size.width * $0.size.height <= 101_000 } ?? false  // the short side rounds up
+        check("Draw changes a photo, sent shrunk to what a pool reads, and leaves documents to Ask",
+              ignoredNote && shrunk && draw.start?.drawn == nil)
     }
 
     // MARK: Stories 1 to 6: the router and the endpoint

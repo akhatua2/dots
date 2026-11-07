@@ -80,16 +80,7 @@ private struct Conversation: View {
                 if live {
                     QuestionBubble(text: ask.asked, attachment: ask.attachment?.name)
                     VStack(alignment: .leading, spacing: 8) {
-                        if let picture = ask.picture {
-                            if case .failed(let why) = ask.phase {
-                                if picture.image != nil { PictureAnswer(image: picture.image) }
-                                Text(why).font(D.ui(13)).foregroundStyle(D.t3)
-                            } else {
-                                PictureAnswer(image: picture.image, progress: picture)
-                            }
-                        } else {
-                            AskBody(compact: true)
-                        }
+                        AskBody(compact: true)
                         if ask.phase == .done, let turn = model.chats.current?.turns.first(where: { $0.id == ask.recordedTurnID }) {
                             AnswerActions(turn: turn)
                         }
@@ -148,9 +139,6 @@ struct AskComposer: View {
                 Button(action: pickFile) { Image(systemName: "paperclip").font(.system(size: 13, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(D.t4)
                 Spacer()
-                if Drawing.wantsPicture(ask.input, hasPicture: false) && ask.attachment?.picture == nil {
-                    PictureSizePicker()
-                }
                 RoutePicker()
                 SendButton(enabled: canSend, busy: ask.isBusy, action: send)
             }
@@ -181,8 +169,8 @@ struct AskComposer: View {
     }
 }
 
-/// The round orange send button. It dims when there is nothing to send and shows progress while an answer is on its way.
-private struct SendButton: View {
+/// The round orange send button (Ask's and Draw's). It dims when there is nothing to send and shows progress while an answer is on its way.
+struct SendButton: View {
     var enabled: Bool
     var busy: Bool
     var action: () -> Void

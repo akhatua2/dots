@@ -4,7 +4,7 @@ import SwiftUI
 import UserNotifications
 
 enum Route: Hashable {
-    case explore, api, profile, ask, settings
+    case explore, api, profile, ask, draw, settings
     case pool(String)
 }
 
@@ -124,10 +124,13 @@ final class AppModel {
         self.backend = backend ?? CloudBackend(client: Self.client(for: settings))
         // The self-test and snapshots pass a backend of their own; they must not touch your saved chats.
         self.chats = ChatStore(persists: backend == nil)
+        self.draw = DrawController(persists: backend == nil)
     }
 
     /// Your Ask conversations, kept on this Mac.
     let chats: ChatStore
+    /// Draw: pictures, and changes to them, kept on this Mac
+    let draw: DrawController
 
     var state: NetworkState { backend.state }
     /// Your Mac is working on someone's question right now, as the hub says
@@ -533,6 +536,15 @@ final class AppModel {
         ask.input = question
         ask.submit(model: self)
         ask.input = ""
+    }
+
+    /// Opens Draw and draws `picture`, as if typed and sent. Empty, it just opens Draw.
+    func draw(picture: String) {
+        openMainWindow()
+        open(.draw)
+        guard !picture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !draw.isDrawing else { return }
+        draw.prompt = picture
+        draw.draw(model: self)
     }
 
     // MARK: Gateway

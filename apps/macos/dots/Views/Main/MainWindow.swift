@@ -59,6 +59,7 @@ struct MainWindow: View {
         case .api: APIView()
         case .profile: ProfileView()
         case .ask: AskScreen()
+        case .draw: DrawScreen()
         case .settings: SettingsView(inline: true)
         case .pool(let id):
             if let pool = model.state.pool(id) { PoolView(pool: pool) } else { ExploreView() }
@@ -95,6 +96,7 @@ struct Sidebar: View {
             VStack(spacing: 2) {
                 NavRow(symbol: "safari", title: "Explore", selected: model.route == .explore) { model.open(.explore) }
                 NavRow(symbol: nil, title: "Ask", trailing: "⌥ Space", selected: model.route == .ask) { model.showAsk() }
+                NavRow(symbol: "paintbrush.pointed", title: "Draw", selected: model.route == .draw) { model.open(.draw) }
                 NavRow(symbol: "curlybraces", title: "API", selected: model.route == .api) { model.open(.api) }
                 NavRow(symbol: "person", title: "Profile", selected: model.route == .profile,
                        badge: model.state.badges.contains(where: \.isNew)) { model.open(.profile) }

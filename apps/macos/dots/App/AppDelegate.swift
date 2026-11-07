@@ -72,13 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// dots://invite/CODE, from a link a friend sent: shows the invite before you join.
-    /// dots://ask?q=QUESTION, from Shortcuts, Raycast or a script: asks it in Ask.
+    /// dots://ask?q=QUESTION and dots://draw?q=PICTURE, from Shortcuts, Raycast or a script: asks it in Ask,
+    /// or draws it in Draw.
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let url = urls.first(where: { $0.scheme?.lowercased() == "dots" }) else { return }
-        if url.host()?.lowercased() == "ask" {
-            let question = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value
-            AppModel.shared.send(question: question ?? "")
-            return
+        let words = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value ?? ""
+        switch url.host()?.lowercased() {
+        case "ask": AppModel.shared.send(question: words); return
+        case "draw": AppModel.shared.draw(picture: words); return
+        default: break
         }
         AppModel.shared.openMainWindow()
         AppModel.shared.openInviteLink(url.absoluteString)
