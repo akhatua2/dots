@@ -271,6 +271,8 @@ class Worker:
             from ..backends import registry
 
             ui.notice("this Mac can't run models here: " + (registry.why_no_mlx or "MLX isn't usable"))
+        if self.compute and self.pool:
+            ui.info("draws " + (", ".join(sorted({r.name for r in self.runners})) or "nothing on this Mac"))
         ui.info("connecting to hub (iroh)…")
         self.conn = await self._endpoint.connect(self.hub_ticket, self._handle)
         # Build the worker's bounded resource declaration. Defaults are

@@ -36,3 +36,13 @@ def test_a_runner_runs_only_on_a_new_enough_macos(monkeypatch):
     assert runner.runs_here()
     monkeypatch.setattr(runners.sys, "platform", "linux")
     assert not runner.runs_here()
+
+
+def test_inside_the_app_the_shipped_uv_runs_the_tool(monkeypatch, tmp_path):
+    (tmp_path / "uv").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(runners.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(runners.sys, "executable", str(tmp_path / "dots-worker"))
+    flux2 = runners.for_original("black-forest-labs/FLUX.2-klein-4B", runners.load())
+    assert flux2.draw[:3] == (str(tmp_path / "uv"), "tool", "run") and flux2.draw[3:5] == ("--from", "mflux==0.24.0")
+    monkeypatch.setattr(runners.sys, "frozen", False)
+    assert runners.for_original("black-forest-labs/FLUX.2-klein-4B", runners.load()).draw[0] == "uvx"

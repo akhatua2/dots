@@ -54,10 +54,23 @@ def load(path: Path = _CONFIG) -> list[Runner]:
         entries = tomllib.load(f).get("runner", [])
 
     def command(words: list[str] | None) -> tuple[str, ...] | None:
-        return tuple(w.replace("{tools}", str(_HERE)) for w in words) if words else None
+        if not words:
+            return None
+        words = [w.replace("{tools}", str(_HERE)) for w in words]
+        return tuple(_uvx() + words[1:] if words[0] == "uvx" else words)
 
     return [Runner(name=e["name"], originals=tuple(e["originals"]), base_model=e["base_model"], draw=command(e["draw"]),
                    edit=command(e.get("edit")), macos=e.get("macos", "0")) for e in entries]
+
+
+def _uvx() -> list[str]:
+    """How to run `uvx` here: the uv that ships beside the packaged worker inside the Mac app, so a Mac without
+    developer tools draws too; otherwise the uvx on this Mac's PATH."""
+    if getattr(sys, "frozen", False):
+        shipped = Path(sys.executable).parent / "uv"
+        if shipped.is_file():
+            return [str(shipped), "tool", "run"]
+    return ["uvx"]
 
 
 def here() -> list[Runner]:
