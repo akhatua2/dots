@@ -361,15 +361,29 @@ class Hub:
     def image_models(self) -> list[str]:
         return sorted({p.images for p in self.participants.values() if p.compute and p.images})
 
-    async def make_image(self, on_step=None, **job) -> dict:
-        """Draws a picture, whole, on a Mac that offers an image model, one not busy with a turn if there is
-        one. Returns the worker's answer: base64 `png`, `model`, `ms`, and which Mac drew it. `on_step(step,
-        of, preview)` gets the picture as it forms, a base64 JPEG after each step."""
+    def drawing_mac(self) -> "Participant":
+        """Which Mac draws the next picture. Of those that offer an image model: one not answering a question
+        right now, then one that isn't the head of a text model (the head runs the first layers, the output
+        layer and the draft that guesses ahead on every answer), then the one with the most memory free,
+        since a picture needs several GB beyond the Mac's share of the text model."""
         offering = [p for p in self.participants.values() if p.compute and p.images]
         if not offering:
             raise NoImageMac("no Mac in the pool offers images right now")
-        idle = [p for p in offering if not self.is_serving(p.id)]
-        worker = (idle or offering)[0]
+
+        def free_gb(p) -> float:
+            decl = self.pool_view.resources.get(p.id)
+            return decl.ram_gb_free if decl is not None else 0.0
+
+        def is_head(p) -> bool:
+            return p.layer_range is not None and p.layer_range[0] == 0
+
+        return min(offering, key=lambda p: (self.is_serving(p.id), is_head(p), -free_gb(p)))
+
+    async def make_image(self, on_step=None, **job) -> dict:
+        """Draws a picture, whole, on the Mac `drawing_mac` picks. Returns the worker's answer: base64 `png`,
+        `model`, `ms`, and which Mac drew it. `on_step(step, of, preview)` gets the picture as it forms, a
+        base64 JPEG after each step."""
+        worker = self.drawing_mac()
         ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
         job_id = uuid.uuid4().hex
         if on_step is not None:

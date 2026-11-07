@@ -100,10 +100,13 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
         async def call(kind, **job):
             calls.append((wid, kind, job))
             return {"kind": "image_ok", "png": "cG5n", "model": images, "ms": 5.0}
-        return SimpleNamespace(id=wid, short_id=wid, compute=True, images=images, busy=busy, conn=SimpleNamespace(call=call))
+        return SimpleNamespace(id=wid, short_id=wid, compute=True, images=images, busy=busy, layer_range=None,
+                               conn=SimpleNamespace(call=call))
 
     pool = [worker("plain", None), worker("busy", "z", busy=True), worker("free", "z")]
-    hub = SimpleNamespace(participants={w.id: w for w in pool}, is_serving=lambda wid: wid == "busy", _image_watchers={})
+    hub = SimpleNamespace(participants={w.id: w for w in pool}, is_serving=lambda wid: wid == "busy", _image_watchers={},
+                          pool_view=SimpleNamespace(resources={}))
+    hub.drawing_mac = lambda: Hub.drawing_mac(hub)
     drawn = await Hub.make_image(hub, prompt="a cat", width=512, height=512)
     ((wid, kind, job),) = calls
     assert drawn["worker_id"] == "free" and (wid, kind) == ("free", "make_image")
@@ -111,8 +114,10 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
     assert hub._image_watchers == {}  # nothing left behind
     assert Hub.image_models(hub) == ["z"]
     with pytest.raises(NoImageMac):
-        await Hub.make_image(SimpleNamespace(participants={"p": pool[0]}, is_serving=lambda _: False, _image_watchers={}),
-                             prompt="x")
+        lonely = SimpleNamespace(participants={"p": pool[0]}, is_serving=lambda _: False, _image_watchers={},
+                                 pool_view=SimpleNamespace(resources={}))
+        lonely.drawing_mac = lambda: Hub.drawing_mac(lonely)
+        await Hub.make_image(lonely, prompt="x")
 
 
 @pytest.fixture
@@ -228,3 +233,18 @@ async def test_a_streamed_picture_shows_each_step_then_the_picture(api):
     events = [json.loads(line[6:]) for line in (await r.text()).splitlines() if line.startswith("data: ")]
     assert [e["type"] for e in events] == ["image_generation.partial_image"] * 2 + ["image_generation.completed"]
     assert events[1]["dots"] == {"step": 2, "of": 2} and base64.b64decode(events[-1]["b64_json"]) == PNG
+
+
+def test_the_text_models_head_draws_only_when_no_other_mac_can():
+    def mac(wid, head, free):
+        return SimpleNamespace(id=wid, compute=True, images="z", layer_range=(0, 12) if head else (12, 24))
+
+    macs = {m.id: m for m in (mac("head", True, 9.0), mac("roomy", False, 8.0), mac("tight", False, 3.0))}
+    free = {"head": 9.0, "roomy": 8.0, "tight": 3.0}
+    hub = SimpleNamespace(participants=macs, is_serving=lambda wid: False,
+                          pool_view=SimpleNamespace(resources={k: SimpleNamespace(ram_gb_free=v) for k, v in free.items()}))
+    assert Hub.drawing_mac(hub).id == "roomy"  # not the head, and the most memory of the rest
+    hub.is_serving = lambda wid: wid == "roomy"
+    assert Hub.drawing_mac(hub).id == "tight"  # busy answering: the next Mac that isn't the head
+    hub.participants = {"head": macs["head"]}
+    assert Hub.drawing_mac(hub).id == "head"  # the only one
