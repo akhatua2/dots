@@ -10,6 +10,8 @@ drops the cache; the next prefill rebuilds it.
 
 from __future__ import annotations
 
+import importlib.util
+
 import asyncio
 import os
 import time
@@ -395,10 +397,12 @@ class MlxBackendRuntime(BackendRuntime):
         self.source: str | None = None
         self._vision = None
         self._vision_loaded = False
-        # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't
-        from .small_batch import install
+        # Checking a draft feeds a layer a few tokens at once, which MLX does slowly; this kernel doesn't. Where
+        # MLX isn't installed (the hub's tests on Linux), there's nothing to speed up
+        if importlib.util.find_spec("mlx") is not None:
+            from .small_batch import install
 
-        install()
+            install()
 
     @classmethod
     def from_host(cls, host: FullModelHost, source: str | None = None) -> "MlxBackendRuntime":
