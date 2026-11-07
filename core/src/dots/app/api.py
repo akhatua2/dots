@@ -386,7 +386,11 @@ class HttpApi:
 
         deployment = await self.hub.ensure_model_started(model_id)
         if not deployment.pool_ready.is_set():
-            return _error(503, "pool not ready — no compute workers available")
+            # The first question after the hub starts loads the model; with Macs in the pool it waits for that
+            # instead of turning the question away
+            wait = float(os.environ.get("DOTS_FIRST_ANSWER_WAIT_S", "180"))
+            if not any(p.compute for p in self.hub.participants.values()) or not await _ready_within(deployment, wait):
+                return _error(503, "pool not ready — no compute workers available")
 
         # Each HTTP request gets a fresh, stateless Conversation. The hub
         # routes worker COMPUTE responses by conv_id, so a unique id per
@@ -592,6 +596,14 @@ async def _image_request(request: web.Request) -> tuple[dict, bytes | None]:
         return body, base64.b64decode(payload, validate=True)
     except binascii.Error as e:
         raise ValueError("image isn't valid base64") from e
+
+
+async def _ready_within(deployment, seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(deployment.pool_ready.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 def _int_or_none(value) -> int | None:

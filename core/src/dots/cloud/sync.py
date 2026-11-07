@@ -68,7 +68,9 @@ class SyncBuilder:
         if pool_id == HUB_POOL:
             for node in hub.nodes:
                 mac_id = self.this_mac if node.get("account_id") == self.me else node["id"]
-                macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending" if node.get("ready") else "online"))
+                # A worker in the hub is lending, whether or not a model is loaded yet: the hub loads one on the first
+                # question, which the pool would never get if it waited for the model before counting the Mac
+                macs.append(self._mac(mac_id, round(node.get("ram_gb") or 0), "lending"))
         lending = self.store.lending()
         if lending["pool_id"] == pool_id and lending["active"] and all(m["macID"] != self.this_mac for m in macs):
             # In the hub's pool this Mac lends only once its worker is in the hub; until then it is starting up and

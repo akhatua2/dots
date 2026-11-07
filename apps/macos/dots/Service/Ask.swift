@@ -348,7 +348,8 @@ final class AskController {
                 }
                 return
             }
-            self.phase = .failed(missed.isEmpty ? "Nothing that can take this is set up." : "\(missed.joined(separator: " and ")) didn't answer.")
+            let places = missed.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+            self.phase = .failed(places.isEmpty ? "Nothing that can take this is set up." : "\(places.joined(separator: " and ")) didn't answer.")
         }
     }
 
