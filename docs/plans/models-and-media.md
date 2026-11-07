@@ -138,8 +138,8 @@ is heading for instead (x - s v, from two steps of its flow): the subject shows 
 preview decodes cost about a third more time (65 s against 44 s at 512).
 
 A step can take half a minute on a laptop, so the forming picture moves under film grain that thins with each
-step, with the steps as the app's dots and the time left on the picture. A photo you edit is changed in your
-own pools only, edited as a one-megapixel copy, and put back into your full-size photo on your Mac
+step, with the steps as the app's dots and the time left on the picture. A photo you edit is changed in any
+pool that draws, edited as a one-megapixel copy, and put back into your full-size photo on your Mac
 (`Compositing.swift`): only where the edit changed the copy, so the rest keeps its own pixels and definition.
 
 ## Next

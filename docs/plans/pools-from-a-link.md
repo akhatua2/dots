@@ -85,8 +85,8 @@ Every request carries a privacy level, and dots holds to it without falling back
 | My pools | your pools' Macs, friends' included | pool members, in principle |
 | Anywhere | public pools and frontier models | others |
 
-Pictures you upload and your documents default to Only my Macs (a picture edit runs whole on one Mac, so it runs on
-yours); ordinary questions can use your pools. When none of your Macs can run something marked Only my Macs, the
+Your documents, and pictures you ask about, default to Only my Macs; ordinary questions can use your pools. A photo
+you change in Draw goes to any pool that draws, public ones included: that is fine for the pictures people edit. When none of your Macs can run something marked Only my Macs, the
 app says so and asks, rather than sending it to a friend's Mac. The receipt says the level an answer ran at.
 
 Within the shared levels, dots also keeps the plain-text parts where the asker trusts them:

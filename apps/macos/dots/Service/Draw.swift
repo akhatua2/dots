@@ -156,16 +156,10 @@ final class DrawController {
         asked = prompt
         askedPhoto = start?.drawn == nil ? start?.name : nil
         self.prompt = ""
-        // A photo of yours is changed only on your own Macs
-        let personal = start != nil && start?.drawn == nil
-        let level: PrivacyLevel = personal ? .mine : .anywhere
         let side = start == nil ? model.settings.pictureSide : nil
-        // A photo of yours goes only to pools your own Mac draws in, public ones too: the hub draws it on your Mac
-        // or not at all (Only my Macs)
+        // Your own pools first, then public ones, for a new picture and for a change to a photo of yours alike
         let s = model.state
-        let places = personal
-            ? s.pools.filter { $0.drawsWith != nil && s.isLending(to: $0.id) }
-            : s.myPools.filter { !$0.isPublic && $0.drawsWith != nil } + s.publicPools.filter { $0.drawsWith != nil }
+        let places = s.myPools.filter { !$0.isPublic && $0.drawsWith != nil } + s.publicPools.filter { $0.drawsWith != nil }
         phase = .drawing
         progress = Drawing.Progress()
         task = Task { [weak self] in
@@ -175,7 +169,7 @@ final class DrawController {
                                                place: pool.name, model: Drawing.modelLabel, modelID: pool.drawsWith ?? "",
                                                credits: 0, listCredits: 0, tokPerSec: 0, isPrivate: !pool.isPublic,
                                                poolID: pool.id, minGB: 0)
-                guard let target = AnswerRunner.target(for: candidate, model: model, level: level) else { continue }
+                guard let target = AnswerRunner.target(for: candidate, model: model) else { continue }
                 // A new picture is drawn from a clear description of it; a change goes as said
                 var description: String?
                 if start == nil, let chatModel = pool.model?.id {
@@ -207,7 +201,7 @@ final class DrawController {
                     }
                     let receipt = AnswerRunner.receipt(for: candidate, decision: RouteDecision(chosen: candidate, candidates: [candidate],
                                                                                               reasons: [], isPrivate: !pool.isPublic,
-                                                                                              level: personal ? .mine : .myPools),
+                                                                                              level: .myPools),
                                                        via: target.via, paidWithKey: false)
                     self.keep(picture, prompt: prompt, changed: start?.drawn, photo: start?.drawn == nil ? start?.name : nil,
                               description: description, receipt: receipt)
@@ -220,8 +214,7 @@ final class DrawController {
                 }
             }
             self.restoreAsked()
-            self.finish(.failed(personal ? "Your Mac doesn't lend to a pool that draws, and this photo stays on your own Macs. Lend to one to change it here."
-                                         : "No pool draws pictures right now."))
+            self.finish(.failed("No pool draws pictures right now."))
         }
     }
 

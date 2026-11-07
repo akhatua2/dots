@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import subprocess
 import sys
 
@@ -14,6 +15,9 @@ SUPPORTED_BACKENDS = ("mlx", "llama_cpp")
 # Backends this build can actually execute. Workers advertise this list by
 # default; the hub still requires an explicit selected backend per assignment.
 IMPLEMENTED_BACKENDS = ("mlx",)
+
+
+log = logging.getLogger(__name__)
 
 
 def get_backend_runtime(name: str) -> BackendRuntime:
@@ -59,7 +63,8 @@ def _mlx_available() -> bool:
             import mlx.core as mx
 
             return bool(mx.metal.is_available())
-        except Exception:
+        except Exception as e:
+            log.warning("MLX isn't usable in this worker: %s", e)
             return False
     probe = (
         "import mlx.core as mx; "
