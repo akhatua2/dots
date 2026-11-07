@@ -73,7 +73,17 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @AppStorage("sidebar.poolsFolded") private var poolsFolded = false
     @AppStorage("sidebar.chatsFolded") private var chatsFolded = false
-    @AppStorage("sidebar.drawingsFolded") private var drawingsFolded = false
+
+    /// A chat or a drawing, for the one list of both
+    private enum Recent: Identifiable {
+        case chat(Chat), drawing(DrawingThread)
+        var id: UUID { switch self { case .chat(let c): c.id; case .drawing(let d): d.id } }
+        var updated: Date { switch self { case .chat(let c): c.updated; case .drawing(let d): d.updated } }
+    }
+
+    private var recents: [Recent] {
+        (model.chats.chats.map(Recent.chat) + model.draw.threads.map(Recent.drawing)).sorted { $0.updated > $1.updated }
+    }
 
     private func newDrawing() {
         model.draw.startNew()
@@ -132,28 +142,21 @@ struct Sidebar: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    // Conversations and drawings, together, most recently changed first
                     SidebarSection(title: "Chats", folded: $chatsFolded, action: ("square.and.pencil", "New chat", newChat)) {
-                        ForEach(model.chats.chats) { chat in
-                            ChatRow(title: chat.title, updated: chat.updated,
-                                    selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
-                                .contextMenu {
-                                    Button("Delete Chat", role: .destructive) {
-                                        if chat.id == model.chats.currentID { model.ask.clear() }
-                                        model.chats.delete(chat.id)
+                        ForEach(recents) { item in
+                            switch item {
+                            case .chat(let chat):
+                                ChatRow(title: chat.title, updated: chat.updated,
+                                        selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
+                                    .contextMenu {
+                                        Button("Delete Chat", role: .destructive) {
+                                            if chat.id == model.chats.currentID { model.ask.clear() }
+                                            model.chats.delete(chat.id)
+                                        }
                                     }
-                                }
-                        }
-                        if model.chats.chats.isEmpty {
-                            Text("Your conversations show up here.")
-                                .font(D.ui(12)).foregroundStyle(D.t5)
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                        }
-                    }
-                    if !model.draw.threads.isEmpty {
-                        SidebarSection(title: "Drawings", folded: $drawingsFolded,
-                                       action: ("square.and.pencil", "New drawing", newDrawing)) {
-                            ForEach(model.draw.threads) { thread in
-                                ChatRow(title: thread.title, updated: thread.updated,
+                            case .drawing(let thread):
+                                ChatRow(title: thread.title, updated: thread.updated, symbol: "paintbrush.pointed",
                                         selected: model.route == .draw && thread.id == model.draw.threadID) {
                                     model.draw.open(thread.id)
                                     model.open(.draw)
@@ -162,6 +165,11 @@ struct Sidebar: View {
                                     Button("Delete Drawing", role: .destructive) { model.draw.delete(thread: thread.id) }
                                 }
                             }
+                        }
+                        if recents.isEmpty {
+                            Text("Your conversations and drawings show up here.")
+                                .font(D.ui(12)).foregroundStyle(D.t5)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
                         }
                     }
                 }
@@ -379,18 +387,24 @@ struct SidebarSection<Content: View>: View {
 }
 
 /// A chat in the sidebar: its first question, and when it was last used.
-/// A chat or a drawing in the sidebar: its title and when it last changed
+/// A chat or a drawing in the sidebar: its title and when it last changed, a drawing marked with a brush
 struct ChatRow: View {
     var title: String
     var updated: Date
+    var symbol: String? = nil
     var selected: Bool
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    if let symbol {
+                        Image(systemName: symbol).font(.system(size: 10, weight: .medium)).foregroundStyle(D.t4)
+                    }
+                    Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                        .lineLimit(1)
+                }
                 Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

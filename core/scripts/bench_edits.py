@@ -10,6 +10,8 @@ anything. For each step:
 - Done: whether a vision model (Qwen3.5, read through dots) sees each edit so far in the picture.
 
     uv run python scripts/bench_edits.py --start nook.png --out /tmp/edits
+
+Edits already saved in --out are reused, so a stopped run picks up where it left off.
 """
 
 from __future__ import annotations
@@ -110,13 +112,17 @@ async def main() -> None:
         picture, edited = start, []
         for step, item in enumerate(chain, 1):
             instruction, box = item["edit"], tuple(item["box"])
-            raw, seconds = await edit(tool, picture, instruction, args.seed, args.out)
-            result = keep_unchanged(picture, raw) if mode == "keep unchanged" else raw
+            name = f"{mode.split()[0]}-{step}"
+            saved = args.out / f"{name}.png"
+            if saved.exists():  # an earlier run got this far: pick up from there
+                result, seconds = saved.read_bytes(), 0.0
+            else:
+                raw, seconds = await edit(tool, picture, instruction, args.seed, args.out)
+                result = keep_unchanged(picture, raw) if mode == "keep unchanged" else raw
             edited.append(box)
             kept = psnr_outside(pixels(picture), pixels(result), [box])
             drift = psnr_outside(first, pixels(result), edited)
-            name = f"{mode.split()[0]}-{step}"
-            (args.out / f"{name}.png").write_bytes(result)
+            saved.write_bytes(result)
             pictures[name] = result
             rows.append({"mode": mode, "step": step, "kept_db": round(kept, 1), "drift_db": round(drift, 1),
                          "seconds": round(seconds)})
