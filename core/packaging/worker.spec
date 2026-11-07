@@ -6,6 +6,7 @@ import os
 
 from PyInstaller.building.api import EXE, PYZ
 from PyInstaller.building.build_main import Analysis
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
@@ -20,9 +21,13 @@ a = Analysis(
     # src/ holds the dots package (src layout); the package is also installed
     # editably by `uv sync`, so this is belt-and-suspenders.
     pathex=[_SRC_DIR, _CORE_DIR],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
+    # iroh's networking library, loaded by its bindings at run time
+    binaries=collect_dynamic_libs("iroh"),
+    # How a Mac draws each kind of image model (image_tools/runners.toml), and dots' own drawing driver; MLX's
+    # Metal kernels
+    datas=collect_data_files("dots.image_tools", include_py_files=True) + collect_data_files("mlx"),
+    # The engine loads a model's code by its architecture's name, so every architecture goes in
+    hiddenimports=collect_submodules("mlx_lm.models") + collect_submodules("dots") + [
         'dots.cli',
         'dots.distributed.worker',
         'dots.distributed.hub',

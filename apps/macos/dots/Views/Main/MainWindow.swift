@@ -151,22 +151,22 @@ struct Sidebar: View {
                             switch item {
                             case .chat(let chat):
                                 ChatRow(title: chat.title, updated: chat.updated,
-                                        selected: model.route == .ask && chat.id == model.chats.currentID) { open(chat) }
-                                    .contextMenu {
-                                        Button("Delete Chat", role: .destructive) {
+                                        selected: model.route == .ask && chat.id == model.chats.currentID,
+                                        deleteHelp: "Delete chat",
+                                        action: { open(chat) },
+                                        delete: {
                                             if chat.id == model.chats.currentID { model.ask.clear() }
                                             model.chats.delete(chat.id)
-                                        }
-                                    }
+                                        })
                             case .drawing(let thread):
                                 ChatRow(title: thread.title, updated: thread.updated,
-                                        selected: model.route == .draw && thread.id == model.draw.threadID) {
-                                    model.draw.open(thread.id)
-                                    model.open(.draw)
-                                }
-                                .contextMenu {
-                                    Button("Delete Drawing", role: .destructive) { model.draw.delete(thread: thread.id) }
-                                }
+                                        selected: model.route == .draw && thread.id == model.draw.threadID,
+                                        deleteHelp: "Delete drawing",
+                                        action: {
+                                            model.draw.open(thread.id)
+                                            model.open(.draw)
+                                        },
+                                        delete: { model.draw.delete(thread: thread.id) })
                             }
                         }
                         if recents.isEmpty {
@@ -389,26 +389,35 @@ struct SidebarSection<Content: View>: View {
     }
 }
 
-/// A chat in the sidebar: its first question, and when it was last used.
-/// A chat or a drawing in the sidebar: its title and when it last changed
+/// A chat or a drawing in the sidebar: its title and when it last changed, and a button to delete it that shows
+/// on the open one and the one under the pointer.
 struct ChatRow: View {
     var title: String
     var updated: Date
     var selected: Bool
+    var deleteHelp: String
     var action: () -> Void
+    var delete: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
-                    .lineLimit(1)
-                Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
+        HStack(spacing: 4) {
+            Button(action: action) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(D.ui(13, selected ? .semibold : .regular)).foregroundStyle(selected ? D.t1 : D.t2)
+                        .lineLimit(1)
+                    Text(updated, format: .relative(presentation: .named)).font(D.ui(11)).foregroundStyle(D.t5)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            if hovering || selected {
+                IconButton(symbol: "trash", help: deleteHelp, action: delete)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color(hex: 0x262626) : .clear))
+        .onHover { hovering = $0 }
     }
 }

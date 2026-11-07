@@ -53,6 +53,14 @@ def is_backend_available(name: str) -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _mlx_available() -> bool:
+    if getattr(sys, "frozen", False):
+        # A packaged worker (the one inside the Mac app) is its own interpreter, with no Python to probe with
+        try:
+            import mlx.core as mx
+
+            return bool(mx.metal.is_available())
+        except Exception:
+            return False
     probe = (
         "import mlx.core as mx; "
         "import sys; "

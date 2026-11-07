@@ -160,8 +160,12 @@ final class DrawController {
         let personal = start != nil && start?.drawn == nil
         let level: PrivacyLevel = personal ? .mine : .anywhere
         let side = start == nil ? model.settings.pictureSide : nil
-        let places = model.state.myPools.filter { !$0.isPublic && $0.drawsWith != nil }
-            + (personal ? [] : model.state.publicPools.filter { $0.drawsWith != nil })
+        // A photo of yours goes only to pools your own Mac draws in, public ones too: the hub draws it on your Mac
+        // or not at all (Only my Macs)
+        let s = model.state
+        let places = personal
+            ? s.pools.filter { $0.drawsWith != nil && s.isLending(to: $0.id) }
+            : s.myPools.filter { !$0.isPublic && $0.drawsWith != nil } + s.publicPools.filter { $0.drawsWith != nil }
         phase = .drawing
         progress = Drawing.Progress()
         task = Task { [weak self] in
@@ -216,7 +220,7 @@ final class DrawController {
                 }
             }
             self.restoreAsked()
-            self.finish(.failed(personal ? "None of your own Macs draws pictures right now, and this photo stays on them."
+            self.finish(.failed(personal ? "Your Mac doesn't lend to a pool that draws, and this photo stays on your own Macs. Lend to one to change it here."
                                          : "No pool draws pictures right now."))
         }
     }
