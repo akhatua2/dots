@@ -6,13 +6,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=__USER__
-WorkingDirectory=__APP_DIR__
+WorkingDirectory=__HOME__/dots-cloud
 Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
-# The cloud's settings, kept in the persistent ~/.dots dir: at least DOTS_CLOUD_TOKEN (the owner's token) and
-# DOTS_CLOUD_PUBLIC_URL (where friends reach it, which invite links carry). See infra/README.md.
-EnvironmentFile=-__HOME__/.dots/cloud.env
-# The hub's API on this machine; the cloud listens on localhost, behind an HTTPS proxy.
-ExecStart=__HOME__/.local/bin/uv run dots cloud --port 8800 --hub-url http://127.0.0.1:8080
+# The exact dependency versions the package was built with
+Environment=UV_CONSTRAINT=__HOME__/dots-cloud/constraints.txt
+# DOTS_CLOUD_TOKEN (the owner's), DOTS_CLOUD_PUBLIC_URL, DOTS_CLOUD_OPEN_SIGNUP=1, DOTS_POOL_PUBLIC=1, and the hub's
+# DOTS_JOIN_TOKEN. See infra/README.md.
+EnvironmentFile=__HOME__/.dots/cloud.env
+# The cloud runs from a package of core/ copied to ~/dots-cloud; it listens on localhost, behind Caddy
+ExecStart=__HOME__/.local/bin/uvx --python 3.12 --refresh-package dots --from "dots @ file://__HOME__/dots-cloud/dots-0.0.1-py3-none-any.whl" dots cloud --port 8800 --hub-url http://127.0.0.1:8080
 Restart=always
 RestartSec=2
 # Pools, people and tokens live in ~/.dots/cloud.db: persist it.

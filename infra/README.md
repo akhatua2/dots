@@ -44,26 +44,26 @@ sudo systemctl restart dots-hub
 Clients then connect with that token in their environment:
 `DOTS_JOIN_TOKEN=some-long-secret dots chat <TICKET>`.
 
-### Optional: the cloud beside the hub, for friends beyond one Wi-Fi
+### The cloud beside the hub, for friends beyond one Wi-Fi
 
-The cloud keeps pools, people and invites. On the hub's VM it serves its owner and every friend who joins through
-an invite, each with a token of their own (only its hash is stored). It listens on localhost; put an HTTPS proxy
-(Caddy, nginx) in front of it for the public address.
+The cloud keeps pools, people and invites. On the hub's VM it serves its owner and everyone who signs up from the
+app or joins through an invite, each with a token of their own (only its hash is stored). It listens on localhost;
+Caddy (Debian's `caddy` package) serves it over HTTPS at https://8-231-51-68.sslip.io, with a certificate from
+Let's Encrypt, through the `dots-cloud-https` firewall rule (tcp:443, instances tagged `dots-cloud`). Fresh installs
+of the Mac app connect there (`DOTS_CLOUD_ADDRESS` in apps/macos/project.yml).
+
+It isn't deployed by CI yet. To deploy a new version from core/:
 
 ```bash
-cat >> ~/.dots/cloud.env <<'ENV'
-DOTS_CLOUD_TOKEN=a-long-secret-only-you-keep
-DOTS_CLOUD_PUBLIC_URL=https://dots.example.org
-ENV
-sudo cp ~/dots/infra/dots-cloud.service /etc/systemd/system/dots-cloud.service
-sudo sed -i -e "s|__USER__|$USER|g" -e "s|__HOME__|$HOME|g" -e "s|__APP_DIR__|$HOME/dots|g" \
-  /etc/systemd/system/dots-cloud.service
-sudo systemctl daemon-reload && sudo systemctl enable --now dots-cloud
+uv build --wheel -o /tmp/dots-cloud && uv export --frozen --no-hashes --no-dev --no-emit-project -o /tmp/dots-cloud/constraints.txt
+gcloud compute scp --zone us-west1-a --project dots-497221 /tmp/dots-cloud/* dots-hub:~/dots-cloud/
+gcloud compute ssh dots-hub --zone us-west1-a --project dots-497221 --command 'sudo systemctl restart dots-cloud'
 ```
 
-In the Mac app's Settings, connect to the public address with the owner's token. Invite links you make then name
-the cloud (`dots://invite/CODE?cloud=https://…`): a friend who opens one joins there with their name and their
-Mac's account, and their app keeps the token it gets and uses that cloud from then on.
+First time on a VM: `~/.dots/cloud.env` holds `DOTS_CLOUD_TOKEN` (a long secret), `DOTS_CLOUD_PUBLIC_URL`,
+`DOTS_CLOUD_OPEN_SIGNUP=1`, `DOTS_POOL_PUBLIC=1` and the hub's `DOTS_JOIN_TOKEN`; install
+`infra/dots-cloud.service` with `__USER__` and `__HOME__` filled in, and `/etc/caddy/Caddyfile` is
+`8-231-51-68.sslip.io { reverse_proxy 127.0.0.1:8800 }`.
 
 ## 2. One-time CI/CD setup (Workload Identity Federation — keyless)
 
