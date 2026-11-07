@@ -16,6 +16,27 @@ struct RouteCandidate: Identifiable, Hashable {
     var contextTokens = 128_000
     var canUseTools = false
     var canReadImages = false
+    /// Every Mac it runs on is yours: this Mac, or a pool of yours whose lending Macs are all your own
+    var onlyMine = false
+}
+
+/// How far a request may go, and so who could read it there. dots holds to a request's level and never falls
+/// back to a wider one; when nothing within it can take the request, you decide. See docs/plans/pools-from-a-link.md.
+enum PrivacyLevel: String, Codable, Hashable {
+    /// Your own Macs only, and the hub
+    case mine
+    /// Your pools' Macs, friends' included
+    case myPools
+    /// Public pools and frontier models too
+    case anywhere
+
+    var label: String {
+        switch self {
+        case .mine: "Only my Macs"
+        case .myPools: "My pools"
+        case .anywhere: "Anywhere"
+        }
+    }
 }
 
 struct RouteReason: Codable, Hashable {
@@ -28,6 +49,8 @@ struct RouteDecision {
     var candidates: [RouteCandidate]
     var reasons: [RouteReason]
     var isPrivate: Bool
+    /// How far it may go: it never runs anywhere wider
+    var level: PrivacyLevel = .anywhere
     /// Set when nothing private can take a private question: the user decides.
     var needsConsent: String?
     /// Where it goes next if the chosen place doesn't answer, within the same rules
@@ -50,7 +73,10 @@ enum Router {
                        reach: Reach = .all, forcedID: String? = nil, facts: RequestFacts = RequestFacts(),
                        thisMac: RouteCandidate? = nil) -> RouteDecision {
         let personal = looksPersonal(question)
-        let isPrivate = hasDocument || personal || rules.privateByDefault
+        // Your documents and photos stay on your own Macs; a question that looks personal stays in your pools
+        let level: PrivacyLevel = hasDocument || facts.hasImages ? .mine
+            : personal || rules.privateByDefault ? .myPools : .anywhere
+        let isPrivate = level != .anywhere
         let hard = looksHard(question) || facts.inputTokens > 24_000
 
         // Everything that could take it
@@ -58,9 +84,12 @@ enum Router {
             .filter { !$0.isPublic }
             .compactMap { pool -> RouteCandidate? in
                 guard let model = pool.model, pool.lendingMacs > 0 else { return nil }
+                let mine = pool.macs.filter { $0.state == .lending }
+                    .allSatisfy { $0.macID == state.thisMacID || state.device($0.macID)?.ownerID == state.meID }
                 return RouteCandidate(id: "pool:\(pool.id)", destination: .yourPool, place: pool.name, model: model.name,
                                       modelID: model.id, credits: 0, listCredits: 0, tokPerSec: Double(pool.tokPerSec),
-                                      isPrivate: true, poolID: pool.id, minGB: model.minGB, canReadImages: model.readsImages == true)
+                                      isPrivate: true, poolID: pool.id, minGB: model.minGB, canReadImages: model.readsImages == true,
+                                      onlyMine: mine)
             }
             .sorted { $0.minGB == $1.minGB ? $0.tokPerSec > $1.tokPerSec : $0.minGB > $1.minGB }
         let publicPools = state.publicPools
@@ -106,7 +135,8 @@ enum Router {
             if !shown.contains(pick) { shown.insert(pick, at: 0) }
             var seen = Set<String>([pick.id])
             let fallbacks = order.filter { seen.insert($0.id).inserted }
-            return RouteDecision(chosen: pick, candidates: Array(shown.prefix(3)), reasons: reasons, isPrivate: isPrivate, fallbacks: fallbacks)
+            return RouteDecision(chosen: pick, candidates: Array(shown.prefix(3)), reasons: reasons, isPrivate: isPrivate,
+                                 level: isPrivate ? level : .anywhere, fallbacks: fallbacks)
         }
 
         // You picked something yourself
@@ -119,13 +149,17 @@ enum Router {
             return decision(forced, reasons, isPrivate: isPrivate && forced.isPrivate, order: [])
         }
 
-        // 1. Privacy first: a private question only runs on this Mac or in pools you're in with people you know
-        let privateOrder = (hard ? [] : [mac].compactMap { $0 }) + allowedOwn.filter { !hard || $0.minGB >= 136 }
-            + (hard ? [mac].compactMap { $0 } + allowedOwn.filter { $0.minGB < 136 } : [])
+        // 1. Privacy first: a private question only runs on this Mac or in pools you're in with people you know, and
+        // one with your own document or photo only on your own Macs
+        let within = { (c: RouteCandidate) in level != .mine || c.destination == .thisMac || c.onlyMine }
+        let privateOrder = ((hard ? [] : [mac].compactMap { $0 }) + allowedOwn.filter { !hard || $0.minGB >= 136 }
+            + (hard ? [mac].compactMap { $0 } + allowedOwn.filter { $0.minGB < 136 } : [])).filter(within)
         if isPrivate {
             let why: RouteReason
-            if hasDocument {
-                why = RouteReason(symbol: "lock", text: "It includes a personal document, so it stayed in pools you're in.")
+            if level == .mine {
+                why = RouteReason(symbol: "lock", text: facts.hasImages
+                    ? "It includes your picture, so it ran only on your own Macs."
+                    : "It includes a personal document, so it ran only on your own Macs.")
             } else if personal {
                 why = RouteReason(symbol: "lock", text: "It looks personal, so it stayed in pools you're in.")
             } else {
@@ -133,9 +167,9 @@ enum Router {
             }
             guard let pick = privateOrder.first else {
                 let why = facts.needsTools ? "Only a frontier model can take a request with tools, and this one is private."
-                    : facts.hasImages ? "Nothing in your own pools reads images right now, and this question is private."
+                    : level == .mine ? "None of your own Macs can take this right now, and it stays on them."
                     : "Nothing on this Mac or in your own pools is lending right now, and this question is private."
-                return RouteDecision(chosen: nil, candidates: shown, reasons: [], isPrivate: true, needsConsent: why)
+                return RouteDecision(chosen: nil, candidates: shown, reasons: [], isPrivate: true, level: level, needsConsent: why)
             }
             var reasons = [why]
             if pick.destination == .thisMac {

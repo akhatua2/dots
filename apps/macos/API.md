@@ -130,7 +130,11 @@ While a Mac lends, the hub does three things:
 
 ### POST /hub/v1/pools/:id/chat/completions
 
-A pool's answer, in OpenAI's chat completions format. Public pools charge the model's credits. Your own pools are free. A streamed answer carries `dots` events beside the usual chunks:
+A pool's answer, in OpenAI's chat completions format. Public pools charge the model's credits. Your own pools are free.
+
+`X-Dots-Privacy: mine` asks for Only my Macs: the hub runs it only when every Mac holding the model is yours, and otherwise answers 409 without running it anywhere. The same header on a pool's pictures draws only on a Mac of yours. The app sends it for your documents and photos; questions that look personal stay in your pools by the app's routing, and the rest may go anywhere.
+
+A streamed answer carries `dots` events beside the usual chunks:
 
 ```
 data: {"choices":[{"delta":{},"index":0}],"dots":{"event":"macs","macs":[{"id":"mac-maya","initial":"M","name":"Maya"}],"model":"Qwen3 235B","pool":"Studio 9","simulated":true},…}

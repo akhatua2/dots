@@ -49,6 +49,9 @@ def fake_hub(*, nodes: list[dict] | None = None) -> web.Application:
     async def complete(request: web.Request) -> web.StreamResponse:
         body = await request.json()
         assert body["model"] == MODEL, "the cloud must ask the hub for the model it serves"
+        if body.get("privacy") == "mine":  # the real hub refuses when a friend's Mac holds part of the model
+            return web.json_response({"error": {"message": "only my Macs: this pool's model is on Macs that aren't yours"}},
+                                     status=409)
         if not body.get("stream"):
             return web.json_response({"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi there"}}],
                                       "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
@@ -361,3 +364,12 @@ async def test_the_hub_pool_reads_what_it_runs_from_its_repo(tmp_path, monkeypat
         home = next(p for p in (await state(client))["state"]["pools"] if p["id"] == "hub")
         assert home["servesModelID"] == MODEL and home["kind"] == "text" and home["modelGB"] == 1.7
     await hub_server.close()
+
+
+async def test_only_my_macs_reaches_the_hub_and_its_refusal_comes_back(env):
+    client, _ = env
+    ask = {"model": "Qwen3.5 0.8B", "messages": [{"role": "user", "content": "hi"}]}
+    r = await client.post("/hub/v1/pools/hub/chat/completions", json=ask, headers={"X-Dots-Privacy": "mine"})
+    assert r.status == 409 and "aren't yours" in (await r.json())["error"]["message"]
+    r = await client.post("/hub/v1/pools/hub/chat/completions", json=ask)
+    assert r.status == 200, "without it, the pool's Macs answer"

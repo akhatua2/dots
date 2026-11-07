@@ -365,14 +365,18 @@ class Hub:
     def image_models(self) -> list[str]:
         return sorted({p.images for p in self.participants.values() if p.compute and p.images})
 
-    def drawing_mac(self, pool: str = "") -> "Participant":
+    def drawing_mac(self, pool: str = "", only_account: str | None = None) -> "Participant":
         """Which Mac draws the next picture. Of those that offer an image model: one not answering a question
         right now, then one that isn't the head of a text model (the head runs the first layers, the output
         layer and the draft that guesses ahead on every answer), then the one with the most memory free,
-        since a picture needs several GB beyond the Mac's share of the text model."""
-        offering = [p for p in self.participants.values() if p.compute and p.images and p.pool == pool]
+        since a picture needs several GB beyond the Mac's share of the text model.
+
+        `only_account`: only that person's own Macs ("Only my Macs"), and none at all rather than anyone else's."""
+        offering = [p for p in self.participants.values() if p.compute and p.images and p.pool == pool
+                    and (only_account is None or p.account_id == only_account)]
         if not offering:
-            raise NoImageMac("no Mac in the pool offers images right now")
+            raise NoImageMac("none of your Macs in the pool draws right now" if only_account
+                             else "no Mac in the pool offers images right now")
 
         def free_gb(p) -> float:
             decl = self.pool_view.resources.get(p.id)
@@ -383,11 +387,16 @@ class Hub:
 
         return min(offering, key=lambda p: (self.is_serving(p.id), is_head(p), -free_gb(p)))
 
-    async def make_image(self, on_step=None, pool: str = "", **job) -> dict:
+    def only_on(self, deployment, account: str) -> bool:
+        """Whether every Mac holding a model's layers is `account`'s own: what "Only my Macs" asks for."""
+        holders = [self.participants.get(worker_id) for worker_id, *_ in deployment.current_placement]
+        return bool(holders) and all(p is not None and p.account_id == account for p in holders)
+
+    async def make_image(self, on_step=None, pool: str = "", only_account: str | None = None, **job) -> dict:
         """Draws a picture, whole, on the Mac `drawing_mac` picks. Returns the worker's answer: base64 `png`,
         `model`, `ms`, and which Mac drew it. `on_step(step, of, preview)` gets the picture as it forms, a
         base64 JPEG after each step."""
-        worker = self.drawing_mac(pool)
+        worker = self.drawing_mac(pool, only_account)
         ui.notice(f"image on worker·{worker.short_id} ({worker.images})")
         job_id = uuid.uuid4().hex
         if on_step is not None:

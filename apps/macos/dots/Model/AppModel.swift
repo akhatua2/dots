@@ -488,7 +488,7 @@ final class AppModel {
         guard e.isReady, e.isLocal, (localDownUntil ?? .distantPast) < .now else { return nil }
         return RouteCandidate(id: "mac", destination: .thisMac, place: "This Mac", model: e.model, modelID: e.model,
                               credits: 0, listCredits: 0, tokPerSec: localTokPerSec ?? 30, isPrivate: true, poolID: nil,
-                              minGB: 18, contextTokens: 32_000, canUseTools: false)
+                              minGB: 18, contextTokens: 32_000, canUseTools: false, onlyMine: true)
     }
 
     func noteLocalSpeed(_ tokPerSec: Double) {

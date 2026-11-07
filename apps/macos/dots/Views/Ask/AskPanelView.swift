@@ -276,7 +276,7 @@ struct ReceiptView: View {
                     } else {
                         Tag(text: "\(receipt.credits) credits", symbol: "smallcircle.filled.circle")
                     }
-                    if receipt.isPrivate { Tag(text: "Private", symbol: "lock") }
+                    if receipt.isPrivate { Tag(text: receipt.level?.label ?? "Private", symbol: "lock") }
                 }
                 .fixedSize()
             }

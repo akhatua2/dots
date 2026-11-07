@@ -15,6 +15,8 @@ struct EndpointConfig: Codable, Equatable {
     var token: String? = nil
     /// For a dots pool: whether a draft model may guess ahead on this request. Set per request, never saved.
     var draftAhead: Bool? = nil
+    /// Only the asker's own Macs may run it (the hub refuses rather than use anyone else's)
+    var onlyMine: Bool? = nil
 
     enum CodingKeys: String, CodingKey { case enabled, label, baseURL, model, keychainAccount, workspaceID }
 

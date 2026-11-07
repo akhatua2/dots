@@ -344,6 +344,7 @@ class Cloud:
         receipt = {"pool": row["name"], "model": catalog.short_name(model), "credits": 0, "simulated": False}
         body["model"] = model
         body["pool"] = hub_pool(pool_id)
+        _keep_privacy(request, body, receipt)
         if not body.get("stream"):
             try:
                 reply = await self.hub.complete(body, self.me)
@@ -362,6 +363,7 @@ class Cloud:
         if row is None or row["model_kind"] != "pictures":
             return error(404, "This pool doesn't draw pictures.", "not_found_error")
         body = {**await _body(request), "pool": hub_pool(pool_id)}
+        _keep_privacy(request, body, {})
         out = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
         await out.prepare(request)
         try:
@@ -428,6 +430,16 @@ async def _body(request: web.Request) -> dict:
     except (json.JSONDecodeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _keep_privacy(request: web.Request, body: dict, receipt: dict) -> None:
+    """The app marks a request Only my Macs with a header; the hub holds to it, refusing rather than running it on
+    anyone else's Mac. Any other level comes through as the app's own choice of pool."""
+    if request.headers.get("X-Dots-Privacy", "").strip() == "mine" or body.get("privacy") == "mine":
+        body["privacy"] = "mine"
+        receipt["privacy"] = "mine"
+    else:
+        body.pop("privacy", None)
 
 
 def _gb(body: dict) -> int:

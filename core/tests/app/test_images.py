@@ -106,7 +106,7 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
     pool = [worker("plain", None), worker("busy", "z", busy=True), worker("free", "z")]
     hub = SimpleNamespace(participants={w.id: w for w in pool}, is_serving=lambda wid: wid == "busy", _image_watchers={},
                           pool_view=SimpleNamespace(resources={}))
-    hub.drawing_mac = lambda pool="": Hub.drawing_mac(hub, pool)
+    hub.drawing_mac = lambda pool="", account=None: Hub.drawing_mac(hub, pool, account)
     drawn = await Hub.make_image(hub, prompt="a cat", width=512, height=512)
     ((wid, kind, job),) = calls
     assert drawn["worker_id"] == "free" and (wid, kind) == ("free", "make_image")
@@ -116,7 +116,7 @@ async def test_the_hub_sends_a_picture_to_a_mac_that_offers_images_and_is_free()
     with pytest.raises(NoImageMac):
         lonely = SimpleNamespace(participants={"p": pool[0]}, is_serving=lambda _: False, _image_watchers={},
                                  pool_view=SimpleNamespace(resources={}))
-        lonely.drawing_mac = lambda pool="": Hub.drawing_mac(lonely, pool)
+        lonely.drawing_mac = lambda pool="", account=None: Hub.drawing_mac(lonely, pool, account)
         await Hub.make_image(lonely, prompt="x")
 
 
@@ -260,3 +260,32 @@ def test_a_picture_is_drawn_only_by_a_mac_in_the_pool_that_asked():
     assert Hub.drawing_mac(hub, "").id == "home"
     with pytest.raises(NoImageMac):
         Hub.drawing_mac(hub, "elsewhere")
+
+
+def test_only_my_macs_draws_on_my_own_mac_or_not_at_all():
+    def mac(wid, account):
+        return SimpleNamespace(id=wid, compute=True, images="z", layer_range=None, pool="", account_id=account)
+
+    macs = {m.id: m for m in (mac("friend", "ana"), mac("mine", "me"))}
+    hub = SimpleNamespace(participants=macs, is_serving=lambda wid: wid == "mine", pool_view=SimpleNamespace(resources={}))
+    assert Hub.drawing_mac(hub, "", "me").id == "mine", "even busy, yours rather than a friend's"
+    assert Hub.drawing_mac(hub, "").id == "friend"
+    with pytest.raises(NoImageMac, match="none of your Macs"):
+        Hub.drawing_mac(hub, "", "someone-else")
+
+
+def test_only_my_macs_holds_when_every_part_of_the_model_is_on_my_macs():
+    hub = SimpleNamespace(participants={"a": SimpleNamespace(account_id="me"), "b": SimpleNamespace(account_id="ana")})
+    mine = SimpleNamespace(current_placement=[("a", 0, 24, True)])
+    shared = SimpleNamespace(current_placement=[("a", 0, 12, True), ("b", 12, 24, False)])
+    assert Hub.only_on(hub, mine, "me") and not Hub.only_on(hub, shared, "me")
+    assert not Hub.only_on(hub, SimpleNamespace(current_placement=[]), "me"), "nowhere yet is not yours"
+
+
+async def test_an_only_mine_picture_names_whose_macs(api):
+    client, jobs = api
+    r = await client.post("/v1/images/generations", json={"prompt": "a cat", "privacy": "mine"},
+                          headers={"X-Dots-Account": "me"})
+    assert r.status == 200 and jobs[-1]["only_account"] == "me"
+    anonymous = await client.post("/v1/images/generations", json={"prompt": "a cat", "privacy": "mine"})
+    assert anonymous.status == 400

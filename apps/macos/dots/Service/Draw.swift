@@ -156,7 +156,9 @@ final class DrawController {
         asked = prompt
         askedPhoto = start?.drawn == nil ? start?.name : nil
         self.prompt = ""
+        // A photo of yours is changed only on your own Macs
         let personal = start != nil && start?.drawn == nil
+        let level: PrivacyLevel = personal ? .mine : .anywhere
         let side = start == nil ? model.settings.pictureSide : nil
         let places = model.state.myPools.filter { !$0.isPublic && $0.drawsWith != nil }
             + (personal ? [] : model.state.publicPools.filter { $0.drawsWith != nil })
@@ -169,7 +171,7 @@ final class DrawController {
                                                place: pool.name, model: Drawing.modelLabel, modelID: pool.drawsWith ?? "",
                                                credits: 0, listCredits: 0, tokPerSec: 0, isPrivate: !pool.isPublic,
                                                poolID: pool.id, minGB: 0)
-                guard let target = AnswerRunner.target(for: candidate, model: model) else { continue }
+                guard let target = AnswerRunner.target(for: candidate, model: model, level: level) else { continue }
                 // A new picture is drawn from a clear description of it; a change goes as said
                 var description: String?
                 if start == nil, let chatModel = pool.model?.id {
@@ -200,7 +202,8 @@ final class DrawController {
                         picture = await Task.detached { Compositing.putBack(edited: edited, sent: start.sent, into: start.original) }.value ?? picture
                     }
                     let receipt = AnswerRunner.receipt(for: candidate, decision: RouteDecision(chosen: candidate, candidates: [candidate],
-                                                                                              reasons: [], isPrivate: !pool.isPublic),
+                                                                                              reasons: [], isPrivate: !pool.isPublic,
+                                                                                              level: personal ? .mine : .myPools),
                                                        via: target.via, paidWithKey: false)
                     self.keep(picture, prompt: prompt, changed: start?.drawn, photo: start?.drawn == nil ? start?.name : nil,
                               description: description, receipt: receipt)
@@ -213,7 +216,7 @@ final class DrawController {
                 }
             }
             self.restoreAsked()
-            self.finish(.failed(personal ? "No pool of yours draws pictures right now, and this photo stays in your pools."
+            self.finish(.failed(personal ? "None of your own Macs draws pictures right now, and this photo stays on them."
                                          : "No pool draws pictures right now."))
         }
     }

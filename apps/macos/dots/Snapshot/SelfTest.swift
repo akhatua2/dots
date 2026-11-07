@@ -71,6 +71,7 @@ enum SelfTest {
         if model.state.thisMac.maxLendGB > 0 {
             await lendingStories(rig)
             await communityStories(rig)
+            await privacyStories(rig)
         } else {
             print("\nThis Mac can't lend (it needs more than 8 GB of memory), so stories 7 to 17 can't run here.")
         }
@@ -115,21 +116,28 @@ enum SelfTest {
             && (red?.redComponent ?? 0) > 0.8 && (red?.greenComponent ?? 1) < 0.4
     }
 
-    /// A question about a photo is personal, so it stays in your pools, and only goes to a model that reads images.
+    /// A question about a photo stays on your own Macs, and only goes to a model that reads images.
     private static func pictureStories(_ model: AppModel) {
         let photo = RequestFacts(inputTokens: 40, hasImages: true)
         let studio = model.state.myPools.first { $0.name == "Studio 9" }
         let ask = { Router.decide(question: "What's in this photo?", hasDocument: true, state: model.state,
                                   rules: model.settings.rules, facts: photo) }
         let noReader = ask()
-        check("A photo stays private, and with no pool of yours that reads images it asks first",
-              noReader.chosen == nil && noReader.needsConsent?.contains("reads images") == true)
+        check("A photo stays on your own Macs, and with none of them reading images it asks first",
+              noReader.chosen == nil && noReader.level == .mine && noReader.needsConsent?.contains("your own Macs") == true)
         let saved = LadderData(tiers: Ladder.tiers, special: Ladder.special)
         Ladder.adopt(LadderData(tiers: Ladder.tiers.map { var t = $0; t.readsImages = t.id == studio?.model?.id; return t },
                                 special: Ladder.special))
         let reader = ask()
-        check("Once Studio 9's model reads images, the photo goes there, free and private",
-              reader.chosen?.poolID == studio?.id && reader.isPrivate && reader.chosen?.credits == 0)
+        check("Even once Studio 9's model reads images, the photo doesn't go there: friends' Macs lend in it",
+              reader.chosen == nil && reader.needsConsent != nil)
+        let mac = RouteCandidate(id: "mac", destination: .thisMac, place: "This Mac", model: "A model that reads images",
+                                 modelID: "local", credits: 0, listCredits: 0, tokPerSec: 30, isPrivate: true, poolID: nil,
+                                 minGB: 18, canReadImages: true, onlyMine: true)
+        let onMine = Router.decide(question: "What's in this photo?", hasDocument: true, state: model.state,
+                                   rules: model.settings.rules, facts: photo, thisMac: mac)
+        check("A model on this Mac that reads images takes it, free and only on your Macs",
+              onMine.chosen?.destination == .thisMac && onMine.level == .mine && onMine.chosen?.credits == 0)
         Ladder.adopt(saved)
         let sent = (try? JSONEncoder().encode(ChatMessage(role: "user", content: "What is this?", images: [Data([1, 2, 3])])))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -728,6 +736,31 @@ enum SelfTest {
     }
 
     // MARK: Helpers
+
+    /// Story 20: three levels of privacy, held to, never widened.
+    private static func privacyStories(_ rig: Rig) async {
+        let model = rig.model
+        story(20, "Every request has a privacy level, and dots never runs it anywhere wider")
+        let rules = RouterRules()
+        let document = Router.decide(question: "Summarize this lease", hasDocument: true, state: model.state, rules: rules)
+        check("A document of yours stays on your own Macs: with friends' Macs in every pool, nothing takes it, and you decide",
+              document.level == .mine && document.chosen == nil && document.needsConsent?.contains("your own Macs") == true)
+        let personal = Router.decide(question: "What does my lease say about pets?", hasDocument: false, state: model.state, rules: rules)
+        check("A question that looks personal stays in your pools, friends' Macs included: \(personal.chosen?.place ?? "nowhere")",
+              personal.level == .myPools && personal.chosen?.destination == .yourPool)
+        let ordinary = Router.decide(question: "What is a haiku?", hasDocument: false, state: model.state, rules: rules)
+        check("An ordinary question may go anywhere", ordinary.level == .anywhere)
+
+        let studio = model.state.pool("studio-9")!
+        var endpoint = model.backend.client.hub(poolID: studio.id, model: studio.model?.id ?? "")
+        endpoint.onlyMine = true
+        var refused = ""
+        do {
+            for try await _ in OpenAIClient.stream(endpoint, messages: [ChatMessage(role: "user", content: "hi")]) {}
+        } catch { refused = error.localizedDescription }
+        check("Asked for Only my Macs, a pool with friends' Macs in it refuses rather than run it there",
+              refused.contains("409") || refused.contains("aren't yours"))
+    }
 
     /// The real worker launcher, with a stand-in for the worker: a worker for each pool, held to its share.
     private static func launcherChecks() async {

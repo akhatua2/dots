@@ -68,6 +68,14 @@ def _querier(request: web.Request) -> str:
     return named if _ACCOUNT_ID.match(named) else _API_ACCOUNT
 
 
+# A request's privacy level: "mine" runs only on the asker's own Macs, and is refused rather than run anywhere else
+_ONLY_MINE = "mine"
+
+
+def _only_mine(body: dict) -> bool:
+    return str(body.get("privacy") or "") == _ONLY_MINE
+
+
 def _template_kwargs(body: dict) -> dict:
     """Options for the model's chat template. A request can pass them as vLLM does, in
     `chat_template_kwargs`; without `enable_thinking` there, the hub's DOTS_THINKING setting decides (off by
@@ -201,6 +209,11 @@ class HttpApi:
         payload = {"prompt": job.prompt, "width": job.width, "height": job.height, "steps": job.steps,
                    "seed": job.seed, "strength": job.strength, "keep_unchanged": job.keep_unchanged,
                    "pool": str(body.get("pool") or "")}
+        if _only_mine(body):
+            account = _querier(request)
+            if account == _API_ACCOUNT:
+                return _error(400, "only my Macs needs to know whose Macs: name the account asking")
+            payload["only_account"] = account
         if job.image is not None:
             payload["image"] = base64.b64encode(job.image).decode()
         if str(body.get("stream", False)).lower() in ("true", "1"):
@@ -394,6 +407,9 @@ class HttpApi:
             wait = float(os.environ.get("DOTS_FIRST_ANSWER_WAIT_S", "180"))
             if not any(p.compute for p in self.hub.participants.values()) or not await _ready_within(deployment, wait):
                 return _error(503, "pool not ready — no compute workers available")
+        # Only my Macs: every Mac holding the model must be the asker's own, or it doesn't run at all
+        if _only_mine(body) and (_querier(request) == _API_ACCOUNT or not self.hub.only_on(deployment, _querier(request))):
+            return _error(409, "only my Macs: this pool's model is on Macs that aren't yours, so it didn't run")
 
         # Each HTTP request gets a fresh, stateless Conversation. The hub
         # routes worker COMPUTE responses by conv_id, so a unique id per

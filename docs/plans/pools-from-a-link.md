@@ -125,7 +125,9 @@ inference time travels over iroh, encrypted, between Macs that hold the pool's t
    that can't hold a drawing pool's model joins it to ask, lending nothing.
 7. For people beyond one Wi-Fi: the cloud and the hub on a public server.
 8. Privacy levels on every request (Only my Macs, My pools, Anywhere), never falling back to a wider one; your
-   question's head on your own Mac within the shared levels (see Who can see what).
+   question's head on your own Mac within the shared levels (see Who can see what). Levels done: the app routes by
+   level and the receipt names it; Only my Macs travels to the hub, which refuses a model held partly on someone
+   else's Mac, and draws only on yours. Still to do: the head on the asker's Mac.
 
 ## Not now
 

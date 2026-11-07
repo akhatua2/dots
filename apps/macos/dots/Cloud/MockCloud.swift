@@ -349,6 +349,11 @@ final class MockCloud {
             res.error(404, "No pool \(poolID) is running a model right now.", type: "not_found_error"); return
         }
         guard pool.isPublic || pool.isMember(s.meID) else { res.error(403, "You're not in \(pool.name).", type: "permission_error"); return }
+        // Only my Macs: every Mac lending here must be yours, or it doesn't run at all
+        let friendsLend = pool.macs.contains { $0.state == .lending && $0.macID != s.thisMacID && s.device($0.macID)?.ownerID != s.meID }
+        if r.headers["x-dots-privacy"] == PrivacyLevel.mine.rawValue, friendsLend || pool.crowdLending > 0 {
+            res.error(409, "only my Macs: this pool's model is on Macs that aren't yours, so it didn't run", type: "conflict_error"); return
+        }
         guard let body = ParsedRequest.parse(r.body, format: .openai) else { res.error(400, "Send a JSON body with a messages array."); return }
         let credits = pool.isPublic ? model.credits : 0
         guard Double(credits) <= s.credits else {

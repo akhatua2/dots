@@ -14,6 +14,8 @@ struct Receipt: Codable, Equatable {
     var credits: Int
     var saved: Int
     var isPrivate: Bool
+    /// The privacy level it ran at, when it was kept private
+    var level: PrivacyLevel? = nil
     var isSimulated: Bool
     var reasons: [RouteReason]
     var finished = false
@@ -47,7 +49,7 @@ extension Receipt {
             parts.append(String(format: "%.1f tokens a check", Double(kept + checks) / Double(checks)))
         }
         parts.append(paidWithKey ? usd.dollars : credits == 0 ? "free" : "\(credits) credits")
-        if isPrivate { parts.append("private") }
+        if isPrivate { parts.append(level?.label.lowercased() ?? "private") }
         return parts.joined(separator: " · ")
     }
 
@@ -99,7 +101,8 @@ enum AnswerRunner {
         var via: String
     }
 
-    static func target(for c: RouteCandidate, model app: AppModel) -> (endpoint: EndpointConfig, paidWithKey: Bool, via: String)? {
+    static func target(for c: RouteCandidate, model app: AppModel, level: PrivacyLevel = .anywhere)
+        -> (endpoint: EndpointConfig, paidWithKey: Bool, via: String)? {
         let settings = app.settings
         switch c.destination {
         case .thisMac:
@@ -109,6 +112,7 @@ enum AnswerRunner {
             guard let pool = c.poolID else { return nil }
             var hub = app.backend.client.hub(poolID: pool, model: c.modelID)
             hub.draftAhead = settings.draftAhead
+            if level == .mine { hub.onlyMine = true }
             return (hub, false, "the dots hub")
         case .frontier:
             var own = settings.frontierEndpoint
@@ -123,8 +127,8 @@ enum AnswerRunner {
         }
     }
 
-    static func plan(for c: RouteCandidate, messages: [ChatMessage], model app: AppModel) -> Plan? {
-        guard let t = target(for: c, model: app) else { return nil }
+    static func plan(for c: RouteCandidate, messages: [ChatMessage], model app: AppModel, level: PrivacyLevel = .anywhere) -> Plan? {
+        guard let t = target(for: c, model: app, level: level) else { return nil }
         return Plan(events: OpenAIClient.stream(t.endpoint, messages: messages), endpoint: t.endpoint, paidWithKey: t.paidWithKey, via: t.via)
     }
 
@@ -137,7 +141,8 @@ enum AnswerRunner {
         reasons.append(RouteReason(symbol: c.destination == .thisMac ? "desktopcomputer" : "network", text: "Answered through \(via)."))
         return Receipt(destination: c.destination, model: c.model, place: c.place, macs: [], tokPerSec: c.tokPerSec,
                        credits: paidWithKey ? 0 : c.credits, saved: paidWithKey ? 0 : max(0, c.listCredits - c.credits),
-                       isPrivate: decision.isPrivate && c.isPrivate, isSimulated: false, reasons: reasons, paidWithKey: paidWithKey)
+                       isPrivate: decision.isPrivate && c.isPrivate, level: decision.isPrivate && c.isPrivate ? decision.level : nil,
+                       isSimulated: false, reasons: reasons, paidWithKey: paidWithKey)
     }
 
     /// The request for a question: the system prompt, the conversation so far, then the question, with its
@@ -255,7 +260,7 @@ final class AskController {
             let messages = AnswerRunner.messages(question: question, attachment: attachment, history: history)
             var missed: [String] = []
             for candidate in [chosen] + decision.fallbacks {
-                guard let plan = AnswerRunner.plan(for: candidate, messages: messages, model: model) else { continue }
+                guard let plan = AnswerRunner.plan(for: candidate, messages: messages, model: model, level: decision.level) else { continue }
                 var receipt = AnswerRunner.receipt(for: candidate, decision: decision, plan: plan)
                 if !missed.isEmpty {
                     receipt.fallbackNote = "\(missed.joined(separator: " and ")) didn't answer, so it went to \(candidate.place)."
