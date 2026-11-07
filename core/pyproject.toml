@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 # `iroh` is the single network transport (QUIC p2p + NAT traversal + relays);
 # it ships prebuilt wheels for macOS arm64 and linux x86_64/aarch64.
 dependencies = [
-    "iroh>=0.35.0",
+    "iroh>=0.35.0,<0.36",  # its API changed after 0.35; the engine is written against 0.35
     "msgpack>=1.0.0",
     "numpy>=1.26.0",
     "rich>=13.0.0",

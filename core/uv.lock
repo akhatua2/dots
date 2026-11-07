@@ -435,7 +435,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "hf-xet", specifier = ">=1.0" },
     { name = "huggingface-hub", specifier = ">=0.20" },
-    { name = "iroh", specifier = ">=0.35.0" },
+    { name = "iroh", specifier = ">=0.35.0,<0.36" },
     { name = "matplotlib", marker = "extra == 'sim'", specifier = ">=3.7" },
     { name = "mlx", marker = "extra == 'mac'", specifier = ">=0.20.0" },
     { name = "mlx-lm", marker = "extra == 'mac'", specifier = ">=0.20.0" },
