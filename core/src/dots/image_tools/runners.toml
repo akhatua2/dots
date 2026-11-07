@@ -22,22 +22,6 @@ draw = ["uvx", "--from", "mflux==0.24.0", "python", "-I", "{tools}/flux3_draw.py
 edit = ["uvx", "--from", "mflux==0.24.0", "python", "-I", "{tools}/flux3_draw.py"]
 macos = "14.0"
 
-# The same FLUX.2 klein 4B for Macs MLX doesn't run on (macOS 13): stable-diffusion.cpp, built on the Mac into
-# ~/.dots/tools (infra/sdcpp.sh), reading the original's own files rather than the pool's mflux build. Slower, and
-# the picture comes when it is done, with no step previews. Its 4-bit files take about 5.3 GB.
-[[runner]]
-name = "FLUX.2 klein"
-originals = ["black-forest-labs/FLUX.2-klein-4B"]
-style = "sdcpp"
-draw = ["{home}/tools/sd-cli"]
-extra = ["--cfg-scale", "1.0", "--offload-to-cpu"]
-steps = 4
-macos = "13.0"
-[runner.files]
-diffusion-model = "leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf"
-llm = "unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"
-vae = "Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors"
-
 # Restyles a starting picture rather than following edit instructions
 [[runner]]
 name = "Z-Image Turbo"

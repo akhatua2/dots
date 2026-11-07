@@ -91,30 +91,17 @@ class ImageTool:
     timeout_s: float
     steps: int | None = None
     edit_pixels: int = 1024 * 1024
-    # How the tool takes its arguments: "mflux", or "sdcpp" (stable-diffusion.cpp, which runs on older macOS and
-    # reads the model from its files: `files` maps each of its flags to a local path)
-    style: str = "mflux"
-    files: tuple[tuple[str, str], ...] = ()
-    extra: tuple[str, ...] = ()
 
     @classmethod
     def with_settings(cls, *, model: str, command: tuple[str, ...], edit_command: tuple[str, ...] | None,
-                      base_model: str | None, steps: int | None = None, **style) -> "ImageTool":
-        """A tool for `model`, with this Mac's settings for steps, time and edit size. `steps`: the tool's own
-        default, when this Mac sets none."""
+                      base_model: str | None) -> "ImageTool":
+        """A tool for `model`, with this Mac's settings for steps, time and edit size."""
         return cls(model=model, command=command, edit_command=edit_command, base_model=base_model,
                    timeout_s=float(os.environ.get("DOTS_IMAGE_TIMEOUT_S", "900")),
-                   steps=_steps(os.environ.get("DOTS_IMAGE_STEPS", "")) or steps,
-                   edit_pixels=int(os.environ.get("DOTS_IMAGE_EDIT_PIXELS", str(1024 * 1024))), **style)
-
-    @property
-    def shows_steps(self) -> bool:
-        """Whether the tool writes the picture after each step, for previews"""
-        return self.style == "mflux"
+                   steps=_steps(os.environ.get("DOTS_IMAGE_STEPS", "")),
+                   edit_pixels=int(os.environ.get("DOTS_IMAGE_EDIT_PIXELS", str(1024 * 1024))))
 
     def arguments(self, job: ImageJob, out: Path, source: Path | None) -> list[str]:
-        if self.style == "sdcpp":
-            return self._sdcpp_arguments(job, out, source)
         editing = source is not None and self.edit_command is not None
         args = [*(self.edit_command if editing else self.command), "--model", self.model, "--prompt", job.prompt,
                 "--output", str(out)]
@@ -135,23 +122,6 @@ class ImageTool:
                 args += ["--image-strength", str(job.strength)]
         return args
 
-    def _sdcpp_arguments(self, job: ImageJob, out: Path, source: Path | None) -> list[str]:
-        """stable-diffusion.cpp's sd-cli: the model's files, then the job. A starting picture is a reference the
-        words describe a change to."""
-        args = [*(self.edit_command if source is not None and self.edit_command else self.command)]
-        for flag, path in self.files:
-            args += [f"--{flag}", path]
-        args += [*self.extra, "-p", job.prompt, "-o", str(out)]
-        if job.width is not None and job.height is not None:
-            args += ["-W", str(job.width), "-H", str(job.height)]
-        steps = job.steps if job.steps is not None else self.steps
-        if steps is not None:
-            args += ["--steps", str(steps)]
-        args += ["--seed", str(job.seed if job.seed is not None else random.randrange(2**31))]
-        if source is not None:
-            args += ["-r", str(source)]
-        return args
-
     async def draw(self, job: ImageJob, on_step: StepCallback | None = None) -> tuple[bytes, float]:
         """The picture as PNG bytes, and how long it took in ms. `on_step` gets the picture as it forms, after
         each denoising step, so whoever asked can watch it sharpen instead of waiting on a blank."""
@@ -166,8 +136,6 @@ class ImageTool:
             out.parent.mkdir()
             arguments = self.arguments(job, out, source)
             steps_dir = folder_path / "steps"
-            if not self.shows_steps:
-                on_step = None  # the picture comes when it's done
             if on_step is not None:
                 arguments += ["--stepwise-image-output-dir", str(steps_dir)]
             proc = await asyncio.create_subprocess_exec(*arguments, stdout=asyncio.subprocess.PIPE,

@@ -54,7 +54,7 @@ enum LendingStatus: Equatable {
 
     var detail: String {
         switch self {
-        case .cantLend: "It has no memory to spare."
+        case .cantLend: "It needs more than 8 GB of memory."
         case .off: "Switch it on to earn credits."
         case .noPool: "Join a pool in Explore."
         case let .paused(until): "Back at \(until.formatted(date: .omitted, time: .shortened))"
@@ -197,10 +197,8 @@ final class AppModel {
         guard s.lending.isOn else { return .off }
         guard !s.lendingPools.isEmpty else { return .noPool }
         if let until = s.lending.pausedUntil, until > .now { return .paused(until: until) }
-        // A small Mac lends only while it's plugged in and nobody is using it, whatever the switches say
-        let small = s.thisMac.lendsOnlyWhenIdle
-        if (s.lending.onlyWhenPluggedIn || small) && !signals.onPower { return .waitingForPower }
-        if (s.lending.pauseWhileInUse || small) && signals.inUse { return .inUse }
+        if s.lending.onlyWhenPluggedIn && !signals.onPower { return .waitingForPower }
+        if s.lending.pauseWhileInUse && signals.inUse { return .inUse }
         return .lending(pool: s.lendingPools.map(\.name).formatted(.list(type: .and)), working: backend.worker?.working ?? false)
     }
 

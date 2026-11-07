@@ -475,10 +475,3 @@ def test_a_picture_model_goes_by_its_familys_name(model_id, original, name):
     from dots.cloud.catalog import picture_model_name
 
     assert picture_model_name(model_id, original) == name
-
-
-@pytest.mark.parametrize("memory,lends", [(0, 0), (8, 5), (16, 8), (24, 16), (64, 48)])
-def test_a_small_mac_keeps_less_so_it_can_draw(memory, lends):
-    from dots.cloud.server import lendable_gb
-
-    assert lendable_gb(memory) == lends
