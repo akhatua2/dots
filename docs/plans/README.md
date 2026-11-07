@@ -120,6 +120,7 @@ order.
 - [`microbatching.md`](./microbatching.md) — N tokens in flight through
   the pipeline at once. Amortizes per-stage network cost.
 - [`models-and-media.md`](./models-and-media.md) — The newest model
+- [`pools-from-a-link.md`](./pools-from-a-link.md) — Anyone starts a pool from a Hugging Face link; one pool, one model, one hub; workers learn what to run from the pool
   architectures split across Macs, guessing ahead on them, images in and
   out, and private photo edits.
 - [`decode-over-the-network.md`](./decode-over-the-network.md) —
