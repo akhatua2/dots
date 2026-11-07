@@ -18,6 +18,19 @@ targets:
     platform: macOS
     sources:
       - path: dots
+    # The worker ships inside the app, so lending works the first time it's switched on: the single-file engine
+    # (core/packaging/worker.spec, `uv run --extra dev --extra mac pyinstaller packaging/worker.spec` in core/) is
+    # copied into Resources when it has been built
+    postCompileScripts:
+      - name: Bundle the worker
+        basedOnDependencyAnalysis: false
+        script: |
+          worker="$SRCROOT/../../core/dist/dots-worker"
+          if [ -f "$worker" ]; then
+            cp "$worker" "$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/dots-worker"
+          else
+            echo "warning: no packaged worker at $worker; the app will lend only with DOTS_WORKER set"
+          fi
     info:
       path: dots/Info.plist
       properties:

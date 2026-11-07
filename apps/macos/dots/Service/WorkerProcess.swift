@@ -153,7 +153,8 @@ final class WorkerProcess {
             NSHomeDirectory() + "/.dots/worker/dots-worker",
         ]
         let found = candidates.compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0) }
-        return found.map { [$0] }
+        // The packaged worker is the whole engine, so it is told which of its commands to run
+        return found.map { [$0, "worker"] }
     }
 
     private static func logFile(_ path: String) -> FileHandle {
