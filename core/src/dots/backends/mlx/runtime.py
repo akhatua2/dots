@@ -160,8 +160,11 @@ def _layer_mask(hidden, cache, as_array: bool):
     `make_mask` handles a sliding window), a running state (linear attention, convolution) the SSM one.
     A layer that keeps several caches (attention beside an indexer, in DeepSeek-style sparse attention)
     is masked by its first. `as_array` is for models whose attention wants the mask as an array."""
-    from mlx_lm.models.base import create_attention_mask, create_ssm_mask
-    from mlx_lm.models.cache import ArraysCache, CacheList
+    try:
+        from mlx_lm.models.base import create_attention_mask, create_ssm_mask
+        from mlx_lm.models.cache import ArraysCache, CacheList
+    except ImportError:  # no MLX here (the hub's tests on Linux): only stand-in layers, which take no mask
+        return None
 
     if isinstance(cache, CacheList):
         cache = cache[0]
@@ -176,14 +179,18 @@ MAX_REWIND = 9
 
 def _running_state(cache) -> bool:
     """A layer state that summarizes every token so far (linear attention, convolution), not one entry each."""
-    from mlx_lm.models.cache import ArraysCache
-
+    try:
+        from mlx_lm.models.cache import ArraysCache
+    except ImportError:  # no MLX here (the hub's tests on Linux), so no MLX caches either
+        return False
     return isinstance(cache, ArraysCache)
 
 
 def _sliding_window(cache) -> bool:
-    from mlx_lm.models.cache import RotatingKVCache
-
+    try:
+        from mlx_lm.models.cache import RotatingKVCache
+    except ImportError:
+        return False
     return isinstance(cache, RotatingKVCache)
 
 
@@ -595,7 +602,7 @@ class MlxBackendRuntime(BackendRuntime):
         template_kwargs: dict | None = None,
         keep_rows: int = 1,
     ) -> PrefillOutput:
-        from .vision import take_images
+        from ..image_parts import take_images
 
         host = self._require_host()
         messages, images = take_images(history)

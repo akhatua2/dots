@@ -16,8 +16,6 @@ The encoder follows mlx-vlm's port of Qwen3-VL's (MIT).
 
 from __future__ import annotations
 
-import base64
-import binascii
 import io
 import json
 import math
@@ -27,6 +25,8 @@ from dataclasses import dataclass, fields
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+
+from ..image_parts import image_bytes, take_images  # noqa: F401  (read here, used by the runtime)
 
 
 @dataclass
@@ -329,36 +329,3 @@ def load_vision(source: str, max_pixels: int) -> Vision | None:
                          min_pixels=size.get("shortest_edge", 0),
                          max_pixels=min(max_pixels, size.get("longest_edge", max_pixels)))
     return Vision(model, reader, config["image_token_id"])
-
-
-def image_bytes(part: dict) -> bytes:
-    """The image in an OpenAI-style message part, `{"type": "image_url", "image_url": {"url": "data:..."}}`.
-    Only images sent inline are read: a worker never fetches a URL someone else chose."""
-    url = (part.get("image_url") or {}).get("url", "") if isinstance(part.get("image_url"), dict) else part.get("image_url", "")
-    if not isinstance(url, str) or not url.startswith("data:") or "," not in url:
-        raise ValueError("images must be sent inline, as data: URLs")
-    header, payload = url.split(",", 1)
-    try:
-        return base64.b64decode(payload, validate=True) if header.endswith(";base64") else payload.encode()
-    except binascii.Error as e:
-        raise ValueError("the image's data URL isn't valid base64") from e
-
-
-def take_images(history: list[dict]) -> tuple[list[dict], list[bytes]]:
-    """The conversation with each image part replaced by the chat template's placeholder, and the images,
-    in the order they appear."""
-    images: list[bytes] = []
-    messages = []
-    for message in history:
-        content = message.get("content")
-        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
-            parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    images.append(image_bytes(part))
-                    parts.append({"type": "image"})
-                else:
-                    parts.append(part)
-            message = {**message, "content": parts}
-        messages.append(message)
-    return messages, images
